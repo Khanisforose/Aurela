@@ -33,8 +33,19 @@ services:
     depends_on: [web]
     networks: [aurela]
 
+  # For obtaining certs use `certbot-run` (one-shot, no entrypoint override).
+  # The `certbot` service below only handles auto-renew in a loop.
+  certbot-run:
+    image: certbot/certbot:latest
+    profiles: ["tools"]
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    networks: [aurela]
+
   certbot:
     image: certbot/certbot:latest
+    restart: unless-stopped
     volumes:
       - ./certbot/www:/var/www/certbot
       - ./certbot/conf:/etc/letsencrypt
