@@ -49,6 +49,10 @@ const BINANCE_SYMBOLS = {
   FIL:'FILUSDT', ICP:'ICPUSDT', HBAR:'HBARUSDT', USDC:'USDCUSDT'
   // USDT itself = 1.0
 }
+// All supported deposit/withdrawal methods. Admin toggles which are exposed to users.
+const ALL_FIAT_METHODS = ['bank_swift','bank_indian','upi','paypal','stripe','card','sepa','ach','wise']
+const ALL_CRYPTO_METHOD = 'crypto'
+
 const CARD_TIERS = {
   basic:   { name: 'Aurela Basic',   activation_fee_usdt: 10,  daily_spend: 1000,  daily_withdraw: 500,   monthly_spend: 10000,  color: 'basic' },
   premium: { name: 'Aurela Premium', activation_fee_usdt: 50,  daily_spend: 10000, daily_withdraw: 5000,  monthly_spend: 100000, color: 'premium' },
@@ -353,6 +357,10 @@ async function handleRoute(request, { params }) {
         activation_network: s?.card_activation_network,
         activation_fees: s?.card_activation_fees,
         platform_wallets: clean(platformWallets),
+        enabled_deposit_methods: s?.enabled_deposit_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
+        enabled_withdrawal_methods: s?.enabled_withdrawal_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
+        all_deposit_methods: [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
+        all_withdrawal_methods: [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
       }))
     }
 
@@ -744,14 +752,19 @@ async function handleRoute(request, { params }) {
       const amt = Number(amount)
       if (!amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid deposit' }, { status: 400 }))
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
+      // Enforce admin-controlled method whitelist
+      const s = await db.collection('settings').findOne({ id: 'platform' })
+      const enabled = s?.enabled_deposit_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD]
+      const chosen = pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift')
+      if (!enabled.includes(chosen)) return handleCORS(NextResponse.json({ error: `The "${chosen}" deposit method is currently disabled. Please choose another method.` }, { status: 400 }))
       const req = {
-        id: uuidv4(), type: 'deposit_request', method: pm || 'bank', currency, amount: amt,
-        user_id: user.id, username: user.username, from_username: pm || 'external', to_username: user.username,
+        id: uuidv4(), type: 'deposit_request', method: chosen, currency, amount: amt,
+        user_id: user.id, username: user.username, from_username: chosen, to_username: user.username,
         tx_hash: tx_hash || '', note: note || '', network: network || '', details: details || {},
         status: 'pending', created_at: now()
       }
       await db.collection('deposit_requests').insertOne(req)
-      await audit(db, user.id, 'deposit.request', { method: pm, amount: amt, currency })
+      await audit(db, user.id, 'deposit.request', { method: chosen, amount: amt, currency })
       return handleCORS(NextResponse.json({ ok: true, message: 'Deposit request submitted. It will be credited after admin verification.', request: clean(req) }))
     }
 
@@ -763,6 +776,11 @@ async function handleRoute(request, { params }) {
       const amt = Number(amount)
       if (!amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid withdraw' }, { status: 400 }))
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
+      // Enforce admin-controlled method whitelist
+      const s = await db.collection('settings').findOne({ id: 'platform' })
+      const enabled = s?.enabled_withdrawal_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD]
+      const chosen = pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift')
+      if (!enabled.includes(chosen)) return handleCORS(NextResponse.json({ error: `The "${chosen}" withdrawal method is currently disabled. Please choose another method.` }, { status: 400 }))
       const cardOk = await hasActiveCard(db, user.id)
       if (!cardOk) return handleCORS(NextResponse.json({ error: 'Card activation required. External withdrawals are enabled only after you activate an Aurela card.', code: 'CARD_REQUIRED' }, { status: 403 }))
       const wallet = await db.collection('wallets').findOne({ user_id: user.id, currency })
@@ -770,13 +788,13 @@ async function handleRoute(request, { params }) {
       // Lock funds on the wallet until admin approves/rejects
       await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: -amt, locked: amt } })
       const wreq = {
-        id: uuidv4(), type: 'withdraw_request', method: pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank'),
+        id: uuidv4(), type: 'withdraw_request', method: chosen,
         currency, amount: amt, user_id: user.id, username: user.username,
         destination: destination || '', network: network || '', details: details || {},
         wallet_id: wallet.id, status: 'pending', created_at: now()
       }
       await db.collection('withdraw_requests').insertOne(wreq)
-      await audit(db, user.id, 'withdraw.request', { method: pm, amount: amt, currency })
+      await audit(db, user.id, 'withdraw.request', { method: chosen, amount: amt, currency })
       return handleCORS(NextResponse.json({ ok: true, message: 'Withdrawal request submitted. Funds are held on your account until admin approval.', request: clean(wreq) }))
     }
 
@@ -948,7 +966,7 @@ async function handleRoute(request, { params }) {
       if (route === '/admin/settings' && method === 'PUT') {
         const body = await request.json()
         const upd = {}
-        for (const k of ['card_activation_wallet','card_activation_network','card_activation_fees','enabled_fiat','enabled_crypto','maintenance_mode']) {
+        for (const k of ['card_activation_wallet','card_activation_network','card_activation_fees','enabled_fiat','enabled_crypto','maintenance_mode','enabled_deposit_methods','enabled_withdrawal_methods']) {
           if (k in body) upd[k] = body[k]
         }
         upd.updated_at = now()

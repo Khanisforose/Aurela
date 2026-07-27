@@ -799,21 +799,29 @@ function MethodFields({ method, details, setDetails }) {
 
 function DepositTab({ wallets, onDone }) {
   const { api, user, config } = useApp()
-  const [form, setForm] = useState({ method: 'bank_swift', currency: 'USD', amount: '', network: '', note: '', tx_hash: '' })
+  const enabledMethods = config?.enabled_deposit_methods || Object.keys(FIAT_METHODS)
+  const enabledFiatMethods = Object.entries(FIAT_METHODS).filter(([k]) => enabledMethods.includes(k))
+  const cryptoEnabled = enabledMethods.includes('crypto')
+  const firstFiat = enabledFiatMethods[0]?.[0] || 'bank_swift'
+  const [form, setForm] = useState({ method: firstFiat, currency: 'USD', amount: '', network: '', note: '', tx_hash: '' })
   const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const isCrypto = wallets.find(w => w.currency === form.currency)?.type === 'crypto'
   const platformWallets = (config?.platform_wallets || []).filter(p => p.asset === form.currency)
   const activePlatformWallet = form.network ? platformWallets.find(p => p.network === form.network) : platformWallets[0]
 
-  // Reset method when switching between fiat and crypto
+  // Reset method when switching between fiat and crypto or when method list changes
   useEffect(() => {
     if (isCrypto) setForm(f => ({ ...f, method: 'crypto', network: '' }))
-    else if (form.method === 'crypto') setForm(f => ({ ...f, method: 'bank_swift' }))
+    else if (form.method === 'crypto' || !enabledMethods.includes(form.method)) {
+      setForm(f => ({ ...f, method: enabledFiatMethods[0]?.[0] || 'bank_swift' }))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.currency])
+  }, [form.currency, enabledMethods.join(',')])
 
   const submit = async () => {
+    // If admin disabled this method entirely, hard block
+    if (isCrypto && !cryptoEnabled) return toast.error('Crypto deposits are currently disabled by the platform.')
     // Validate required fields for the chosen method
     if (!isCrypto) {
       const spec = FIAT_METHODS[form.method]
@@ -868,7 +876,8 @@ function DepositTab({ wallets, onDone }) {
                 <Select value={form.method} onValueChange={v => { setForm({ ...form, method: v }); setDetails({}) }}>
                   <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                   <SelectContent>
-                    {Object.entries(FIAT_METHODS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+                    {enabledFiatMethods.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">No fiat deposit methods enabled. Contact support.</div>}
+                    {enabledFiatMethods.map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -928,8 +937,12 @@ function DepositTab({ wallets, onDone }) {
 }
 
 function WithdrawTab({ wallets, onDone }) {
-  const { api, user } = useApp()
-  const [form, setForm] = useState({ method: 'bank_swift', currency: 'USD', amount: '', destination: '', network: '' })
+  const { api, user, config } = useApp()
+  const enabledMethods = config?.enabled_withdrawal_methods || Object.keys(FIAT_METHODS)
+  const enabledFiatMethods = Object.entries(FIAT_METHODS).filter(([k]) => enabledMethods.includes(k))
+  const cryptoEnabled = enabledMethods.includes('crypto')
+  const firstFiat = enabledFiatMethods[0]?.[0] || 'bank_swift'
+  const [form, setForm] = useState({ method: firstFiat, currency: 'USD', amount: '', destination: '', network: '' })
   const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const [cards, setCards] = useState([])
@@ -945,11 +958,14 @@ function WithdrawTab({ wallets, onDone }) {
   useEffect(() => { api.get('/cards').then(({cards}) => setCards(cards)).catch(()=>{}) }, [])
   useEffect(() => {
     if (isCrypto) setForm(f => ({ ...f, method: 'crypto', network: cryptoNetworks[0] || '' }))
-    else if (form.method === 'crypto') setForm(f => ({ ...f, method: 'bank_swift', network: '' }))
+    else if (form.method === 'crypto' || !enabledMethods.includes(form.method)) {
+      setForm(f => ({ ...f, method: enabledFiatMethods[0]?.[0] || 'bank_swift', network: '' }))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.currency])
+  }, [form.currency, enabledMethods.join(',')])
 
   const submit = async () => {
+    if (isCrypto && !cryptoEnabled) return toast.error('Crypto withdrawals are currently disabled by the platform.')
     if (!wallet || Number(form.amount) > wallet.balance) return toast.error('Insufficient balance')
     if (isCrypto) {
       if (!form.destination) return toast.error('Please enter the destination wallet address')
@@ -1047,7 +1063,8 @@ function WithdrawTab({ wallets, onDone }) {
               <Select value={form.method} onValueChange={v => { setForm({ ...form, method: v }); setDetails({}) }}>
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                 <SelectContent>
-                  {Object.entries(FIAT_METHODS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+                  {enabledFiatMethods.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">No fiat withdrawal methods enabled. Contact support.</div>}
+                  {enabledFiatMethods.map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>

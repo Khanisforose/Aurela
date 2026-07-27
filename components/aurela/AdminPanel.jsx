@@ -360,19 +360,51 @@ function TxAdmin() {
 }
 
 function SettingsAdmin() {
-  const { api } = useApp()
+  const { api, config } = useApp()
   const [s, setS] = useState(null)
-  const [form, setForm] = useState({ card_activation_wallet: '', card_activation_network: 'ERC20', card_activation_fees: { basic: 10, premium: 50, elite: 200 } })
+  const [form, setForm] = useState({
+    card_activation_wallet: '', card_activation_network: 'ERC20',
+    card_activation_fees: { basic: 10, premium: 50, elite: 200 },
+    enabled_deposit_methods: [], enabled_withdrawal_methods: []
+  })
 
-  useEffect(() => { api.get('/admin/settings').then(({settings}) => { setS(settings); setForm({ card_activation_wallet: settings.card_activation_wallet, card_activation_network: settings.card_activation_network, card_activation_fees: settings.card_activation_fees }) }).catch(()=>{}) }, [])
+  const METHOD_LABELS = {
+    bank_swift: 'International Bank (SWIFT)',
+    bank_indian: 'Indian Bank Transfer',
+    upi: 'UPI (India)',
+    paypal: 'PayPal',
+    stripe: 'Card Payment (Stripe)',
+    card: 'Debit / Credit Card',
+    sepa: 'SEPA (EU)',
+    ach: 'ACH (US Bank)',
+    wise: 'Wise Transfer',
+    crypto: 'Crypto (on-chain)',
+  }
+  const allMethods = config?.all_deposit_methods || Object.keys(METHOD_LABELS)
+
+  useEffect(() => {
+    api.get('/admin/settings').then(({settings}) => {
+      setS(settings)
+      setForm({
+        card_activation_wallet: settings.card_activation_wallet,
+        card_activation_network: settings.card_activation_network,
+        card_activation_fees: settings.card_activation_fees || { basic: 10, premium: 50, elite: 200 },
+        enabled_deposit_methods: settings.enabled_deposit_methods || allMethods,
+        enabled_withdrawal_methods: settings.enabled_withdrawal_methods || allMethods,
+      })
+    }).catch(()=>{})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const save = async () => {
     try {
       const upd = await api.put('/admin/settings', form)
-      toast.success('Settings saved')
+      toast.success('Settings saved — changes apply to users instantly')
       setS(upd.settings)
     } catch(e) { toast.error(e.message) }
   }
+
+  const toggle = (list, m) => list.includes(m) ? list.filter(x => x !== m) : [...list, m]
 
   if (!s) return <div className="text-muted-foreground">Loading…</div>
 
@@ -405,19 +437,72 @@ function SettingsAdmin() {
               </div>
             ))}
           </div>
-          <Button onClick={save} className="gold-btn w-full h-11 rounded-xl">Save settings</Button>
+        </div>
+      </div>
+
+      <div className="card-luxury rounded-2xl p-6">
+        <div className="font-display text-2xl">Deposit methods</div>
+        <div className="text-sm text-muted-foreground">Toggle which deposit methods users can select. Disabled methods are hidden from the deposit form.</div>
+        <div className="mt-4 space-y-2">
+          {allMethods.map(m => {
+            const on = form.enabled_deposit_methods.includes(m)
+            return (
+              <label key={m} className="flex items-center justify-between p-3 rounded-lg bg-secondary/60 border border-gold-500/10 cursor-pointer hover:border-gold-500/30 transition">
+                <div>
+                  <div className="text-sm">{METHOD_LABELS[m] || m}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{m}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, enabled_deposit_methods: toggle(form.enabled_deposit_methods, m) })}
+                  className={`w-11 h-6 rounded-full flex items-center px-0.5 transition ${on ? 'bg-gradient-to-r from-gold-500 to-gold-700 justify-end' : 'bg-secondary border border-gold-500/20 justify-start'}`}
+                >
+                  <span className={`h-5 w-5 rounded-full transition ${on ? 'bg-onyx-900' : 'bg-muted-foreground'}`}/>
+                </button>
+              </label>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="card-luxury rounded-2xl p-6">
+        <div className="font-display text-2xl">Withdrawal methods</div>
+        <div className="text-sm text-muted-foreground">Toggle which withdrawal methods users can select. Disabled methods are hidden from the withdraw form.</div>
+        <div className="mt-4 space-y-2">
+          {allMethods.map(m => {
+            const on = form.enabled_withdrawal_methods.includes(m)
+            return (
+              <label key={m} className="flex items-center justify-between p-3 rounded-lg bg-secondary/60 border border-gold-500/10 cursor-pointer hover:border-gold-500/30 transition">
+                <div>
+                  <div className="text-sm">{METHOD_LABELS[m] || m}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{m}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, enabled_withdrawal_methods: toggle(form.enabled_withdrawal_methods, m) })}
+                  className={`w-11 h-6 rounded-full flex items-center px-0.5 transition ${on ? 'bg-gradient-to-r from-gold-500 to-gold-700 justify-end' : 'bg-secondary border border-gold-500/20 justify-start'}`}
+                >
+                  <span className={`h-5 w-5 rounded-full transition ${on ? 'bg-onyx-900' : 'bg-muted-foreground'}`}/>
+                </button>
+              </label>
+            )
+          })}
         </div>
       </div>
 
       <div className="card-luxury rounded-2xl p-6">
         <div className="font-display text-2xl">Currencies</div>
-        <div className="text-sm text-muted-foreground">Enabled currencies for the platform.</div>
+        <div className="text-sm text-muted-foreground">Currently enabled currencies on the platform.</div>
         <div className="mt-4">
           <div className="text-xs uppercase tracking-widest text-muted-foreground">Fiat</div>
-          <div className="flex flex-wrap gap-2 mt-2">{s.enabled_fiat.map(c => <Badge key={c} variant="outline" className="border-gold-500/40 text-gold">{FIAT_META[c]?.flag} {c}</Badge>)}</div>
+          <div className="flex flex-wrap gap-2 mt-2">{s.enabled_fiat?.map(c => <Badge key={c} variant="outline" className="border-gold-500/40 text-gold">{FIAT_META[c]?.flag} {c}</Badge>)}</div>
           <div className="text-xs uppercase tracking-widest text-muted-foreground mt-4">Crypto</div>
-          <div className="flex flex-wrap gap-2 mt-2">{s.enabled_crypto.map(c => <Badge key={c} variant="outline" className="border-gold-500/40 text-gold">{c}</Badge>)}</div>
+          <div className="flex flex-wrap gap-2 mt-2">{s.enabled_crypto?.map(c => <Badge key={c} variant="outline" className="border-gold-500/40 text-gold">{c}</Badge>)}</div>
         </div>
+      </div>
+
+      <div className="lg:col-span-2">
+        <Button onClick={save} className="gold-btn w-full h-12 rounded-xl">Save all settings</Button>
       </div>
     </div>
   )
