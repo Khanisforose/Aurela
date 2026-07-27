@@ -191,6 +191,25 @@ async function ensureSeed(db) {
     )
   }
 
+  // v5: extend enabled_fiat / enabled_crypto to full supported lists (since we grew from 10 to 50/30)
+  if (!migration || migration.version !== 'v5_currency_toggle') {
+    const s = await db.collection('settings').findOne({ id: 'platform' })
+    if (s) {
+      const upd = {}
+      if (!Array.isArray(s.enabled_fiat) || s.enabled_fiat.length < FIAT.length) upd.enabled_fiat = FIAT
+      if (!Array.isArray(s.enabled_crypto) || s.enabled_crypto.length < CRYPTO.length) upd.enabled_crypto = CRYPTO
+      if (Object.keys(upd).length > 0) {
+        upd.updated_at = now()
+        await db.collection('settings').updateOne({ id: 'platform' }, { $set: upd })
+      }
+    }
+    await db.collection('system').updateOne(
+      { id: 'migration' },
+      { $set: { id: 'migration', version: 'v5_currency_toggle', ran_at: now() } },
+      { upsert: true }
+    )
+  }
+
   const existing = await db.collection('users').findOne({ role: 'super_admin' })
   if (!existing) {
     const salt = newSalt()
@@ -357,6 +376,10 @@ async function handleRoute(request, { params }) {
         activation_network: s?.card_activation_network,
         activation_fees: s?.card_activation_fees,
         platform_wallets: clean(platformWallets),
+        enabled_fiat: s?.enabled_fiat || FIAT,
+        enabled_crypto: s?.enabled_crypto || CRYPTO,
+        all_fiat: FIAT,
+        all_crypto: CRYPTO,
         enabled_deposit_methods: s?.enabled_deposit_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
         enabled_withdrawal_methods: s?.enabled_withdrawal_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
         all_deposit_methods: [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
@@ -754,6 +777,10 @@ async function handleRoute(request, { params }) {
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
       // Enforce admin-controlled method whitelist
       const s = await db.collection('settings').findOne({ id: 'platform' })
+      const enabledFiatList = s?.enabled_fiat || FIAT
+      const enabledCryptoList = s?.enabled_crypto || CRYPTO
+      if (FIAT.includes(currency) && !enabledFiatList.includes(currency)) return handleCORS(NextResponse.json({ error: `${currency} deposits are currently disabled by the platform.` }, { status: 400 }))
+      if (CRYPTO.includes(currency) && !enabledCryptoList.includes(currency)) return handleCORS(NextResponse.json({ error: `${currency} deposits are currently disabled by the platform.` }, { status: 400 }))
       const enabled = s?.enabled_deposit_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD]
       const chosen = pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift')
       if (!enabled.includes(chosen)) return handleCORS(NextResponse.json({ error: `The "${chosen}" deposit method is currently disabled. Please choose another method.` }, { status: 400 }))
@@ -776,8 +803,12 @@ async function handleRoute(request, { params }) {
       const amt = Number(amount)
       if (!amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid withdraw' }, { status: 400 }))
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
-      // Enforce admin-controlled method whitelist
+      // Enforce admin-controlled method + currency whitelist
       const s = await db.collection('settings').findOne({ id: 'platform' })
+      const enabledFiatList = s?.enabled_fiat || FIAT
+      const enabledCryptoList = s?.enabled_crypto || CRYPTO
+      if (FIAT.includes(currency) && !enabledFiatList.includes(currency)) return handleCORS(NextResponse.json({ error: `${currency} withdrawals are currently disabled by the platform.` }, { status: 400 }))
+      if (CRYPTO.includes(currency) && !enabledCryptoList.includes(currency)) return handleCORS(NextResponse.json({ error: `${currency} withdrawals are currently disabled by the platform.` }, { status: 400 }))
       const enabled = s?.enabled_withdrawal_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD]
       const chosen = pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift')
       if (!enabled.includes(chosen)) return handleCORS(NextResponse.json({ error: `The "${chosen}" withdrawal method is currently disabled. Please choose another method.` }, { status: 400 }))

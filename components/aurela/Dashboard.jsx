@@ -485,7 +485,9 @@ function ActivationCountdown({ usable_at }) {
 }
 
 function TransferTab({ wallets, onDone }) {
-  const { api, user } = useApp()
+  const { api, user, config } = useApp()
+  const enabledFiat = config?.enabled_fiat || Object.keys(FIAT_META)
+  const enabledCrypto = config?.enabled_crypto || Object.keys(CRYPTO_META)
   const [form, setForm] = useState({ recipient: '', currency: 'USD', amount: '', note: '' })
   const [loading, setLoading] = useState(false)
 
@@ -518,10 +520,10 @@ function TransferTab({ wallets, onDone }) {
               <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}>
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                 <SelectContent>
-                  <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>
-                  {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
-                  <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>
-                  {Object.keys(CRYPTO_META).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
+                  {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
+                  {enabledCrypto.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>}
+                  {Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -800,15 +802,29 @@ function MethodFields({ method, details, setDetails }) {
 function DepositTab({ wallets, onDone }) {
   const { api, user, config } = useApp()
   const enabledMethods = config?.enabled_deposit_methods || Object.keys(FIAT_METHODS)
+  const enabledFiat = config?.enabled_fiat || Object.keys(FIAT_META)
+  const enabledCrypto = config?.enabled_crypto || Object.keys(CRYPTO_META)
   const enabledFiatMethods = Object.entries(FIAT_METHODS).filter(([k]) => enabledMethods.includes(k))
   const cryptoEnabled = enabledMethods.includes('crypto')
   const firstFiat = enabledFiatMethods[0]?.[0] || 'bank_swift'
-  const [form, setForm] = useState({ method: firstFiat, currency: 'USD', amount: '', network: '', note: '', tx_hash: '' })
+  const defaultCurrency = enabledFiat[0] || enabledCrypto[0] || 'USD'
+  const [form, setForm] = useState({ method: firstFiat, currency: defaultCurrency, amount: '', network: '', note: '', tx_hash: '' })
   const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const isCrypto = wallets.find(w => w.currency === form.currency)?.type === 'crypto'
   const platformWallets = (config?.platform_wallets || []).filter(p => p.asset === form.currency)
   const activePlatformWallet = form.network ? platformWallets.find(p => p.network === form.network) : platformWallets[0]
+
+  // Auto-swap currency if the current selection got disabled
+  useEffect(() => {
+    if (FIAT_META[form.currency] && !enabledFiat.includes(form.currency)) {
+      setForm(f => ({ ...f, currency: enabledFiat[0] || enabledCrypto[0] || 'USD' }))
+    }
+    if (CRYPTO_META[form.currency] && !enabledCrypto.includes(form.currency)) {
+      setForm(f => ({ ...f, currency: enabledFiat[0] || enabledCrypto[0] || 'USD' }))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabledFiat.join(','), enabledCrypto.join(',')])
 
   // Reset method when switching between fiat and crypto or when method list changes
   useEffect(() => {
@@ -863,10 +879,10 @@ function DepositTab({ wallets, onDone }) {
               <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v, network: '' })}>
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                 <SelectContent className="max-h-72">
-                  <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>
-                  {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
-                  <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>
-                  {Object.keys(CRYPTO_META).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
+                  {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
+                  {cryptoEnabled && enabledCrypto.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>}
+                  {cryptoEnabled && Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -939,10 +955,13 @@ function DepositTab({ wallets, onDone }) {
 function WithdrawTab({ wallets, onDone }) {
   const { api, user, config } = useApp()
   const enabledMethods = config?.enabled_withdrawal_methods || Object.keys(FIAT_METHODS)
+  const enabledFiat = config?.enabled_fiat || Object.keys(FIAT_META)
+  const enabledCrypto = config?.enabled_crypto || Object.keys(CRYPTO_META)
   const enabledFiatMethods = Object.entries(FIAT_METHODS).filter(([k]) => enabledMethods.includes(k))
   const cryptoEnabled = enabledMethods.includes('crypto')
   const firstFiat = enabledFiatMethods[0]?.[0] || 'bank_swift'
-  const [form, setForm] = useState({ method: firstFiat, currency: 'USD', amount: '', destination: '', network: '' })
+  const defaultCurrency = enabledFiat[0] || enabledCrypto[0] || 'USD'
+  const [form, setForm] = useState({ method: firstFiat, currency: defaultCurrency, amount: '', destination: '', network: '' })
   const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const [cards, setCards] = useState([])
@@ -1026,10 +1045,10 @@ function WithdrawTab({ wallets, onDone }) {
             <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}>
               <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
               <SelectContent className="max-h-72">
-                <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>
-                {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
-                <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>
-                {Object.keys(CRYPTO_META).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
+                {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
+                {cryptoEnabled && enabledCrypto.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>}
+                {cryptoEnabled && Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
               </SelectContent>
             </Select>
             {wallet && <div className="text-xs text-muted-foreground mt-1">Available: {fmt(wallet.balance, wallet.currency)}</div>}

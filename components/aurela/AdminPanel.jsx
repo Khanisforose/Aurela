@@ -365,7 +365,8 @@ function SettingsAdmin() {
   const [form, setForm] = useState({
     card_activation_wallet: '', card_activation_network: 'ERC20',
     card_activation_fees: { basic: 10, premium: 50, elite: 200 },
-    enabled_deposit_methods: [], enabled_withdrawal_methods: []
+    enabled_deposit_methods: [], enabled_withdrawal_methods: [],
+    enabled_fiat: [], enabled_crypto: []
   })
 
   const METHOD_LABELS = {
@@ -391,6 +392,8 @@ function SettingsAdmin() {
         card_activation_fees: settings.card_activation_fees || { basic: 10, premium: 50, elite: 200 },
         enabled_deposit_methods: settings.enabled_deposit_methods || allMethods,
         enabled_withdrawal_methods: settings.enabled_withdrawal_methods || allMethods,
+        enabled_fiat: settings.enabled_fiat || (config?.all_fiat || []),
+        enabled_crypto: settings.enabled_crypto || (config?.all_crypto || []),
       })
     }).catch(()=>{})
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -491,13 +494,59 @@ function SettingsAdmin() {
       </div>
 
       <div className="card-luxury rounded-2xl p-6">
-        <div className="font-display text-2xl">Currencies</div>
-        <div className="text-sm text-muted-foreground">Currently enabled currencies on the platform.</div>
-        <div className="mt-4">
-          <div className="text-xs uppercase tracking-widest text-muted-foreground">Fiat</div>
-          <div className="flex flex-wrap gap-2 mt-2">{s.enabled_fiat?.map(c => <Badge key={c} variant="outline" className="border-gold-500/40 text-gold">{FIAT_META[c]?.flag} {c}</Badge>)}</div>
-          <div className="text-xs uppercase tracking-widest text-muted-foreground mt-4">Crypto</div>
-          <div className="flex flex-wrap gap-2 mt-2">{s.enabled_crypto?.map(c => <Badge key={c} variant="outline" className="border-gold-500/40 text-gold">{c}</Badge>)}</div>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="font-display text-2xl">Fiat currencies</div>
+            <div className="text-sm text-muted-foreground">Enable/disable individual fiat currencies for deposits and withdrawals.</div>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setForm({ ...form, enabled_fiat: config?.all_fiat || [] })} className="text-[10px] uppercase tracking-widest text-gold hover:underline">Enable all</button>
+            <span className="text-muted-foreground text-[10px]">·</span>
+            <button type="button" onClick={() => setForm({ ...form, enabled_fiat: [] })} className="text-[10px] uppercase tracking-widest text-muted-foreground hover:underline">Disable all</button>
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[420px] overflow-y-auto pr-1">
+          {(config?.all_fiat || []).map(c => {
+            const on = form.enabled_fiat.includes(c)
+            return (
+              <button key={c} type="button" onClick={() => setForm({ ...form, enabled_fiat: toggle(form.enabled_fiat, c) })} className={`flex items-center justify-between p-3 rounded-lg border transition ${on ? 'bg-gold-500/10 border-gold-500/50' : 'bg-secondary/60 border-gold-500/10 opacity-60'}`}>
+                <div className="text-sm flex items-center gap-2">
+                  <span>{FIAT_META[c]?.flag}</span>
+                  <span className="font-mono">{c}</span>
+                </div>
+                <span className={`w-8 h-4 rounded-full flex items-center px-0.5 transition ${on ? 'bg-gradient-to-r from-gold-500 to-gold-700 justify-end' : 'bg-secondary border border-gold-500/20 justify-start'}`}>
+                  <span className={`h-3 w-3 rounded-full ${on ? 'bg-onyx-900' : 'bg-muted-foreground'}`}/>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="card-luxury rounded-2xl p-6">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="font-display text-2xl">Cryptocurrencies</div>
+            <div className="text-sm text-muted-foreground">Enable/disable individual crypto assets for deposits and withdrawals.</div>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setForm({ ...form, enabled_crypto: config?.all_crypto || [] })} className="text-[10px] uppercase tracking-widest text-gold hover:underline">Enable all</button>
+            <span className="text-muted-foreground text-[10px]">·</span>
+            <button type="button" onClick={() => setForm({ ...form, enabled_crypto: [] })} className="text-[10px] uppercase tracking-widest text-muted-foreground hover:underline">Disable all</button>
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[420px] overflow-y-auto pr-1">
+          {(config?.all_crypto || []).map(c => {
+            const on = form.enabled_crypto.includes(c)
+            return (
+              <button key={c} type="button" onClick={() => setForm({ ...form, enabled_crypto: toggle(form.enabled_crypto, c) })} className={`flex items-center justify-between p-3 rounded-lg border transition ${on ? 'bg-gold-500/10 border-gold-500/50' : 'bg-secondary/60 border-gold-500/10 opacity-60'}`}>
+                <div className="text-sm font-mono">{c}</div>
+                <span className={`w-8 h-4 rounded-full flex items-center px-0.5 transition ${on ? 'bg-gradient-to-r from-gold-500 to-gold-700 justify-end' : 'bg-secondary border border-gold-500/20 justify-start'}`}>
+                  <span className={`h-3 w-3 rounded-full ${on ? 'bg-onyx-900' : 'bg-muted-foreground'}`}/>
+                </span>
+              </button>
+            )
+          })}
         </div>
       </div>
 
