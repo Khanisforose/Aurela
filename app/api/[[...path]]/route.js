@@ -530,10 +530,9 @@ async function handleRoute(request, { params }) {
       if (hashPassword(password, user.salt) !== user.password_hash) return handleCORS(NextResponse.json({ error: 'Invalid credentials' }, { status: 401 }))
       if (user.two_fa_enabled && user.two_fa_secret) {
         if (!totp) return handleCORS(NextResponse.json({ error: '2FA code required', requires_2fa: true }, { status: 401 }))
-        const { authenticator } = await import('otplib')
-        authenticator.options = { window: 1 }
-        const ok = authenticator.check(String(totp).replace(/\s/g,''), user.two_fa_secret)
-        if (!ok) return handleCORS(NextResponse.json({ error: 'Invalid 2FA code', requires_2fa: true }, { status: 401 }))
+        const otp = await import('otplib')
+        const res = otp.verifySync({ secret: user.two_fa_secret, token: String(totp).replace(/\s/g,''), window: 1 })
+        if (!res?.valid) return handleCORS(NextResponse.json({ error: 'Invalid 2FA code', requires_2fa: true }, { status: 401 }))
       }
       const token = newToken()
       await db.collection('sessions').insertOne({ token, user_id: user.id, created_at: now(), expires_at: new Date(Date.now() + 1000*60*60*24*30) })
@@ -575,12 +574,12 @@ async function handleRoute(request, { params }) {
 
     // 2FA setup: returns a fresh secret + otpauth uri + qr svg
     if (route === '/profile/2fa/setup' && method === 'POST') {
-      const { authenticator } = await import('otplib')
+      const otp = await import('otplib')
       const QRCode = (await import('qrcode')).default
-      const secret = authenticator.generateSecret()
+      const secret = otp.generateSecret()
       const label = encodeURIComponent(`Aurela:${user.email}`)
       const issuer = encodeURIComponent('Aurela Wallet')
-      const uri = `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&period=30&digits=6`
+      const uri = `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&period=30&digits=6&algorithm=SHA1`
       const qr_svg = await QRCode.toString(uri, { type: 'svg', margin: 1, color: { dark: '#d4af37', light: '#00000000' }, width: 220 })
       // store secret as pending until confirmed
       await db.collection('users').updateOne({ id: user.id }, { $set: { two_fa_pending_secret: secret } })
@@ -592,9 +591,9 @@ async function handleRoute(request, { params }) {
       const u2 = await db.collection('users').findOne({ id: user.id })
       const secret = u2?.two_fa_pending_secret
       if (!secret) return handleCORS(NextResponse.json({ error: 'Start setup first' }, { status: 400 }))
-      const { authenticator } = await import('otplib')
-      authenticator.options = { window: 1 }
-      if (!authenticator.check(code, secret)) return handleCORS(NextResponse.json({ error: 'Invalid code' }, { status: 400 }))
+      const otp = await import('otplib')
+      const res = otp.verifySync({ secret, token: code, window: 1 })
+      if (!res?.valid) return handleCORS(NextResponse.json({ error: 'Invalid code' }, { status: 400 }))
       await db.collection('users').updateOne({ id: user.id }, { $set: { two_fa_enabled: true, two_fa_secret: secret }, $unset: { two_fa_pending_secret: '' } })
       await audit(db, user.id, 'profile.2fa.enable', {})
       return handleCORS(NextResponse.json({ ok: true }))
@@ -604,9 +603,9 @@ async function handleRoute(request, { params }) {
       const code = String(body?.code || '').replace(/\s/g,'')
       const u2 = await db.collection('users').findOne({ id: user.id })
       if (!u2?.two_fa_enabled) return handleCORS(NextResponse.json({ error: 'Not enabled' }, { status: 400 }))
-      const { authenticator } = await import('otplib')
-      authenticator.options = { window: 1 }
-      if (!authenticator.check(code, u2.two_fa_secret)) return handleCORS(NextResponse.json({ error: 'Invalid code' }, { status: 400 }))
+      const otp = await import('otplib')
+      const res = otp.verifySync({ secret: u2.two_fa_secret, token: code, window: 1 })
+      if (!res?.valid) return handleCORS(NextResponse.json({ error: 'Invalid code' }, { status: 400 }))
       await db.collection('users').updateOne({ id: user.id }, { $set: { two_fa_enabled: false }, $unset: { two_fa_secret: '', two_fa_pending_secret: '' } })
       await audit(db, user.id, 'profile.2fa.disable', {})
       return handleCORS(NextResponse.json({ ok: true }))

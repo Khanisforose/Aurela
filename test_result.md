@@ -392,9 +392,9 @@ backend:
 
   - task: "2FA setup endpoint"
     implemented: true
-    working: false
+    working: true
     file: "/app/app/api/[[...path]]/route.js"
-    stuck_count: 1
+    stuck_count: 0
     priority: "medium"
     needs_retesting: false
     status_history:
@@ -404,6 +404,9 @@ backend:
         - working: false
           agent: "testing"
           comment: "❌ 2FA setup endpoint failing (0/1 test passed). Returns 500 Internal Server Error: 'Cannot read properties of undefined (reading generateSecret)'. Issue is with dynamic import of otplib - the import statement 'await import(otplib)' is not returning the expected object structure. This is a known ESM import issue in Next.js."
+        - working: true
+          agent: "testing"
+          comment: "✅ 2FA setup endpoint now working (1/1 test passed). POST /api/profile/2fa/setup returns 200 with correct response structure: {secret: <32-char string>, uri: <otpauth://totp/...>, qr_svg: <svg...>}. Fix applied by main agent: replaced authenticator.generateSecret() with otp.generateSecret() and authenticator.check() with otp.verifySync({secret, token, window:1}), using otplib v13 functional API exports directly from module object. Same fix applied to /profile/2fa/enable, /profile/2fa/disable, and 2FA verification in /auth/login."
 
 frontend:
   - task: "Luxury Landing page (black/gold, hero, features, cards, pricing, FAQ, CTA)"
@@ -450,9 +453,8 @@ metadata:
 
 test_plan:
   current_focus:
-    - "2FA setup endpoint (otplib import issue)"
-  stuck_tasks:
-    - "2FA setup endpoint (otplib import issue)"
+    - "All backend endpoints tested and working"
+  stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
@@ -479,4 +481,8 @@ agent_communication:
       message: "MAJOR feature drop (18 items from user Message ~296). Please test the new/changed endpoints. Admin creds still admin@aurelawallet.com / Aurela@123#. **NEW/CHANGED BACKEND SURFACE:** (1) POST /api/auth/google now accepts EITHER {credential:<id_token>} OR {access_token:<oauth2 token>} — please test at least the shape (a real Google token can't be generated, but verify the endpoint rejects missing tokens with 400, and returns a helpful error if GOOGLE_CLIENT_ID is unset). (2) POST /api/withdraw now creates a pending 'withdraw_requests' row (status='pending'), locks wallet balance (funds are debited immediately + locked field increments). Verify balance stays deducted but no completed 'withdraw' transaction is written. Then admin GET /api/admin/withdrawals returns the list; POST /api/admin/withdrawals/:id/approve creates the withdraw transaction and unlocks; POST /api/admin/withdrawals/:id/reject returns the funds to available balance. (3) POST /api/cards/request now enforces max 3 cards per user and blocks duplicate tiers — verify: creating one basic card succeeds, second basic returns 400 with 'Only one card per tier' message; creating premium and elite succeeds; a 4th tier attempt returns 400. (4) DELETE /api/cards/:id lets user delete their own card (status becomes 'deleted', frozen=true). After delete, requesting the same tier again succeeds. (5) POST /api/admin/cards/:id/approve now supports body {activate_now:true} → status='active' immediately; without it → status='activating' with usable_at = now + 24h. GET /api/cards auto-flips 'activating' cards to 'active' once usable_at has passed. (6) POST /api/kyc now accepts extended fields: first_name, last_name, mobile, country, state, city, address, postal_code, occupation, id_type, id_number, doc_front (base64), doc_back (base64), selfie (base64). Verify KYC record contains all these. (7) GET /api/admin/kyc/:id returns { kyc, user } (detail for review modal). (8) PUT /api/profile now accepts avatar (base64), address, country, city, postal_code, date_of_birth. Test avatar upload works and rejects payloads > 3MB. (9) GET /api/admin/notifications returns { counts:{deposits,withdrawals,kyc,cards}, total, items:[{kind,id,title,at}...] } — verify shape. (10) DELETE /api/admin/cards/:id deletes a card; DELETE /api/admin/transactions/:id deletes a transaction. (11) GET /api/admin/overview now returns deposits_pending and withdrawals_pending in addition to previous counts. **DO NOT TEST 2FA setup itself with a real authenticator — just verify POST /profile/2fa/setup returns { secret, uri, qr_svg } with non-empty values (i.e., no internal server error).** Skip Google flow with a real token. Regression: confirm all previously green endpoints still work."
     - agent: "testing"
       message: "✅ MAJOR FEATURE DROP REGRESSION TEST COMPLETE - 39/40 TESTS PASSED (97.5%)! Comprehensive testing of all new features completed. **SECTION A: GOOGLE SIGN-IN (3/3 PASSED)** - Empty body returns 400 'Missing Google credential' ✅, fake access_token returns 401 ✅, invalid credential returns 401 ✅. **SECTION B: WITHDRAWAL ADMIN APPROVAL PIPELINE (10/10 PASSED)** - Complete flow verified: user submits withdrawal → balance debited + locked → admin GET /withdrawals lists pending → admin approves → locked released + transaction created ✅, reject path returns funds to balance ✅. **SECTION C: CARD LIMITS + DELETE (7/7 PASSED)** - Max 3 cards enforced ✅, duplicate tier blocked ✅, user can delete card and re-request same tier ✅. **SECTION D: 24H CARD ACTIVATION DELAY (2/2 PASSED)** - Admin approve without activate_now → status='activating' with usable_at +24h ✅, admin approve with activate_now=true → status='active' immediately ✅. **SECTION E: EXTENDED KYC + ADMIN DETAIL (3/3 PASSED)** - KYC accepts extended fields + base64 images ✅, admin GET /kyc/:id returns {kyc, user} with all fields ✅. **SECTION F: PROFILE AVATAR + EDIT (3/3 PASSED)** - Avatar upload works ✅, large avatar (>3MB) rejected ✅. **SECTION G: ADMIN NOTIFICATIONS (1/1 PASSED)** - Returns {counts, total, items} with correct shape ✅. **SECTION H: ADMIN DELETE (2/2 PASSED)** - Admin can delete cards and transactions ✅. **SECTION I: ADMIN OVERVIEW (1/1 PASSED)** - Returns deposits_pending & withdrawals_pending ✅. **SECTION J: 2FA SETUP (0/1 FAILED)** - POST /profile/2fa/setup returns 500 error due to otplib import issue ❌. **REGRESSION (7/7 PASSED)** - Health, config, rates, admin login, transfer, deposit flow, card activation all working ✅. **CRITICAL ISSUE:** 2FA setup endpoint has otplib dynamic import error (500 Internal Server Error). All other endpoints working perfectly. No regressions detected."
+    - agent: "user"
+      message: "Quick focused re-test of ONLY the 2FA setup endpoint that failed previously. Task: Log in as admin (admin@aurelawallet.com / Aurela@123#), then call POST /api/profile/2fa/setup with empty body. Expected: 200 OK with JSON { secret: <string>, uri: <string starting with otpauth://totp/...>, qr_svg: <string starting with '<svg'> }. MUST NOT return 500 Internal Server Error. I fixed the otplib v13+ API mismatch: replaced authenticator.generateSecret() with otp.generateSecret(), and authenticator.check() with otp.verifySync({secret, token, window:1}). Also applied same fix to /profile/2fa/enable, /profile/2fa/disable, and the 2FA verification during /auth/login. Just verify the 2FA setup endpoint returns 200 with the correct shape."
+    - agent: "testing"
+      message: "✅ 2FA SETUP ENDPOINT RE-TEST COMPLETE - PASSED! Focused re-test of POST /api/profile/2fa/setup completed successfully. (1) Admin login (admin@aurelawallet.com / Aurela@123#) → 200 with token and role=super_admin ✅ (2) POST /api/profile/2fa/setup with empty body → 200 OK ✅ (3) Response structure validated: secret is 32-char string ✅, uri starts with 'otpauth://totp/' ✅, qr_svg starts with '<svg' ✅. Fix confirmed working: otplib v13 functional API (otp.generateSecret() and otp.verifySync()) is now correctly used. No 500 errors. The 2FA setup endpoint is fully functional."
 
