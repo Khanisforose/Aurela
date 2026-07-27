@@ -4,7 +4,6 @@ import { useApp } from '@/components/aurela/store'
 import { Landing } from '@/components/aurela/Landing'
 import { Auth } from '@/components/aurela/Auth'
 import { Dashboard } from '@/components/aurela/Dashboard'
-import { AdminPanel } from '@/components/aurela/AdminPanel'
 import { AurelaLogo } from '@/components/aurela/Logo'
 
 function App() {
@@ -19,8 +18,7 @@ function App() {
   }
 
   if (route === 'auth') return <Auth />
-  if (route === 'dashboard' && user) return <Dashboard />
-  if (route === 'admin' && user && (user.role === 'admin' || user.role === 'super_admin')) return <AdminPanel />
+  if (user) return <Dashboard />
   return <Landing />
 }
 

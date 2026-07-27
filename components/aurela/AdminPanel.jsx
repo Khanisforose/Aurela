@@ -518,3 +518,6 @@ function PlatformWalletsAdmin() {
   )
 }
 
+
+export { OverviewAdmin as AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin }
+

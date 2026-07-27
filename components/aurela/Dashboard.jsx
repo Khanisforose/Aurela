@@ -16,10 +16,13 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
-  ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks
+  ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
+  Users, Settings, ScrollText, ChevronDown
 } from 'lucide-react'
+import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin } from './AdminPanel'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 
-const NAV = [
+const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'fiat', label: 'Fiat Wallets', icon: Wallet },
   { id: 'crypto', label: 'Crypto Wallets', icon: Bitcoin },
@@ -29,8 +32,15 @@ const NAV = [
   { id: 'withdraw', label: 'Withdraw', icon: ArrowUpFromLine },
   { id: 'transactions', label: 'Activity', icon: Receipt },
   { id: 'chain', label: 'Aurela Chain', icon: Blocks },
-  { id: 'kyc', label: 'Verification', icon: ShieldCheck },
-  { id: 'profile', label: 'Profile', icon: User },
+]
+const ADMIN_NAV = [
+  { id: 'admin_overview', label: 'Admin Overview', icon: LayoutDashboard },
+  { id: 'admin_users', label: 'Users', icon: Users },
+  { id: 'admin_kyc', label: 'KYC Review', icon: ShieldCheck },
+  { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
+  { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
+  { id: 'admin_settings', label: 'Platform Settings', icon: Settings },
+  { id: 'admin_audit', label: 'Audit Log', icon: ScrollText },
 ]
 
 export function Dashboard() {
@@ -40,6 +50,8 @@ export function Dashboard() {
   const [totals, setTotals] = useState({ usd: 0, preferred: 0, preferred_currency: 'USD' })
   const [txs, setTxs] = useState([])
   const [cards, setCards] = useState([])
+  const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
+  const NAV = isAdmin ? [...USER_NAV, ...ADMIN_NAV] : USER_NAV
 
   const loadWallets = async () => {
     try { const { wallets, totals } = await api.get('/wallets'); setWallets(wallets); setTotals(totals) } catch(e) {}
@@ -62,13 +74,24 @@ export function Dashboard() {
       {/* Sidebar */}
       <aside className="fixed left-0 top-0 h-screen w-64 border-r border-gold-500/10 bg-onyx-900/60 backdrop-blur-xl p-6 hidden lg:flex flex-col">
         <AurelaWordmark />
-        <div className="mt-8 space-y-1 flex-1">
-          {NAV.map(n => (
+        <div className="mt-8 space-y-1 flex-1 overflow-y-auto">
+          {USER_NAV.map(n => (
             <button key={n.id} onClick={() => setTab(n.id)}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${tab === n.id ? 'gold-btn' : 'text-muted-foreground hover:text-gold hover:bg-gold-500/5'}`}>
               <n.icon className="h-4 w-4"/> {n.label}
             </button>
           ))}
+          {isAdmin && (
+            <>
+              <div className="pt-4 pb-1 px-3 text-[10px] uppercase tracking-widest text-gold">Administration</div>
+              {ADMIN_NAV.map(n => (
+                <button key={n.id} onClick={() => setTab(n.id)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${tab === n.id ? 'gold-btn' : 'text-muted-foreground hover:text-gold hover:bg-gold-500/5'}`}>
+                  <n.icon className="h-4 w-4"/> {n.label}
+                </button>
+              ))}
+            </>
+          )}
         </div>
         <Button variant="ghost" onClick={logout} className="justify-start text-muted-foreground hover:text-gold">
           <LogOut className="h-4 w-4 mr-2"/> Sign out
@@ -85,9 +108,48 @@ export function Dashboard() {
             </div>
             <div className="flex items-center gap-3">
               <CurrencySwitcher onSaved={async () => { await refreshUser(); await loadWallets() }} />
-              <div className="h-10 w-10 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 font-bold">
-                {(user?.full_name || user?.username || 'A').charAt(0).toUpperCase()}
-              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="flex items-center gap-2 pr-2 pl-1 py-1 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 transition">
+                    <div className="h-9 w-9 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 font-bold">
+                      {(user?.full_name || user?.username || 'A').charAt(0).toUpperCase()}
+                    </div>
+                    <div className="hidden sm:block text-left pr-2">
+                      <div className="text-xs text-muted-foreground leading-tight">@{user?.username}</div>
+                      <div className="text-[10px] text-gold uppercase tracking-widest leading-tight">{isAdmin ? user?.role?.replace('_',' ') : 'Member'}</div>
+                    </div>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground"/>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64 bg-onyx-900 border-gold-500/25">
+                  <DropdownMenuLabel className="text-muted-foreground">
+                    <div className="text-sm text-foreground truncate">{user?.full_name || user?.username}</div>
+                    <div className="text-xs text-muted-foreground truncate">{user?.email}</div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator className="bg-gold-500/15"/>
+                  <DropdownMenuItem onClick={() => setTab('profile')} className="cursor-pointer focus:bg-gold-500/10 focus:text-gold">
+                    <User className="h-4 w-4 mr-2"/> Profile &amp; 2FA
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setTab('kyc')} className="cursor-pointer focus:bg-gold-500/10 focus:text-gold">
+                    <ShieldCheck className="h-4 w-4 mr-2"/> Identity verification
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setTab('transactions')} className="cursor-pointer focus:bg-gold-500/10 focus:text-gold">
+                    <Receipt className="h-4 w-4 mr-2"/> Activity
+                  </DropdownMenuItem>
+                  {isAdmin && (
+                    <>
+                      <DropdownMenuSeparator className="bg-gold-500/15"/>
+                      <DropdownMenuItem onClick={() => setTab('admin_overview')} className="cursor-pointer focus:bg-gold-500/10 focus:text-gold">
+                        <Sparkles className="h-4 w-4 mr-2"/> Admin console
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                  <DropdownMenuSeparator className="bg-gold-500/15"/>
+                  <DropdownMenuItem onClick={logout} className="cursor-pointer text-red-400 focus:bg-red-500/10 focus:text-red-300">
+                    <LogOut className="h-4 w-4 mr-2"/> Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
           {/* Mobile nav */}
@@ -114,6 +176,13 @@ export function Dashboard() {
               {tab === 'chain' && <ChainTab/>}
               {tab === 'kyc' && <KycTab user={user} onDone={refreshUser}/>}
               {tab === 'profile' && <ProfileTab user={user} onDone={refreshUser}/>}
+              {tab === 'admin_overview' && isAdmin && <AdminOverview/>}
+              {tab === 'admin_users' && isAdmin && <UsersAdmin/>}
+              {tab === 'admin_kyc' && isAdmin && <KycAdmin/>}
+              {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
+              {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
+              {tab === 'admin_settings' && isAdmin && <SettingsAdmin/>}
+              {tab === 'admin_audit' && isAdmin && <AuditAdmin/>}
             </motion.div>
           </AnimatePresence>
         </div>
