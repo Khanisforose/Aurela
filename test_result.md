@@ -255,6 +255,156 @@ backend:
           agent: "testing"
           comment: "✅ Card activation via external USDT working perfectly (7/7 tests passed). (1) POST /cards/request creates card with status='pending_activation' ✅ (2) POST /cards/:id/activate without tx_hash returns 400 with error about tx_hash requirement ✅ (3) POST /cards/:id/activate with tx_hash sets status='pending_verification' ✅ (4) USDT wallet balance NOT auto-debited (remains unchanged) ✅ (5) Admin GET /cards returns pending cards ✅ (6) Admin POST /cards/:id/approve sets status='active' + writes block ✅ (7) User GET /cards shows card with status='active' ✅. Complete flow from request → tx_hash submission → admin approval → activation verified working correctly."
 
+  - task: "Google Sign-In (both credential and access_token flows)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "POST /api/auth/google accepts EITHER {credential:<id_token>} OR {access_token:<oauth2 token>}. Verifies JWT signature via google-auth-library for credential flow, fetches userinfo for access_token flow."
+        - working: true
+          agent: "testing"
+          comment: "✅ Google Sign-In working (3/3 tests passed). Empty body returns 400 'Missing Google credential' ✅. Fake access_token returns 401 ✅. Invalid credential returns 401 ✅. Both flows properly reject invalid tokens without 500 errors."
+
+  - task: "Withdrawal admin approval pipeline with balance locking"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "POST /api/withdraw creates pending withdraw_request, debits balance immediately and locks funds. Admin GET /admin/withdrawals lists pending. Admin approve releases lock + creates transaction. Admin reject returns funds to available balance."
+        - working: true
+          agent: "testing"
+          comment: "✅ Withdrawal pipeline working perfectly (10/10 tests passed). User submits withdrawal → balance debited (500→400) + locked (0→100) ✅. Admin sees pending withdrawal ✅. Admin approves → locked released (100→0), transaction created ✅. Reject path tested: funds returned to balance (350→400), locked cleared (50→0) ✅. Complete flow verified with proper balance tracking."
+
+  - task: "Card limits (max 3, 1 per tier) + user delete card"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "POST /cards/request enforces max 3 cards per user and blocks duplicate tiers. DELETE /cards/:id lets user delete their own card (status='deleted', frozen=true). After delete, same tier can be requested again."
+        - working: true
+          agent: "testing"
+          comment: "✅ Card limits working perfectly (7/7 tests passed). Basic card created ✅. Duplicate basic tier blocked with 'Only one card per tier' ✅. Premium and elite cards created ✅. 4th card blocked with 'maximum of 3' ✅. User deletes basic card ✅. Basic card re-requested successfully after delete ✅."
+
+  - task: "24h card activation delay with activate_now option"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "POST /admin/cards/:id/approve supports {activate_now:true} → status='active' immediately. Without it → status='activating' with usable_at = now + 24h. GET /cards auto-flips 'activating' cards to 'active' once usable_at has passed."
+        - working: true
+          agent: "testing"
+          comment: "✅ 24h activation delay working (2/2 tests passed). Admin approve without activate_now → status='activating' with usable_at +24h ✅. Admin approve with activate_now=true → status='active' immediately ✅."
+
+  - task: "Extended KYC form fields + admin detail endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "POST /api/kyc accepts extended fields: first_name, last_name, mobile, country, state, city, address, postal_code, occupation, id_type, id_number, doc_front (base64), doc_back (base64), selfie (base64). GET /admin/kyc/:id returns {kyc, user} for review modal."
+        - working: true
+          agent: "testing"
+          comment: "✅ Extended KYC working (3/3 tests passed). KYC submission with all extended fields + base64 images successful ✅. Admin GET /kyc lists record ✅. Admin GET /kyc/:id returns {kyc, user} with all fields including doc_front intact ✅."
+
+  - task: "Profile avatar update with size validation"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "PUT /api/profile accepts avatar (base64), address, country, city, postal_code, date_of_birth. Avatar size guard rejects payloads > 3MB."
+        - working: true
+          agent: "testing"
+          comment: "✅ Profile avatar working (3/3 tests passed). Avatar upload with address/city successful ✅. GET /auth/me returns avatar and address ✅. Large avatar (>3MB) rejected with 'too large' error ✅."
+
+  - task: "Admin notifications endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "GET /api/admin/notifications returns {counts:{deposits,withdrawals,kyc,cards}, total, items:[{kind,id,title,at}...]} aggregating pending actionable items."
+        - working: true
+          agent: "testing"
+          comment: "✅ Admin notifications working (1/1 test passed). Returns correct shape with counts (deposits, withdrawals, kyc, cards), total, and items array ✅."
+
+  - task: "Admin delete card and transaction endpoints"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "DELETE /api/admin/cards/:id deletes a card. DELETE /api/admin/transactions/:id deletes a transaction (audit-logged; does NOT reverse balances)."
+        - working: true
+          agent: "testing"
+          comment: "✅ Admin delete endpoints working (2/2 tests passed). Admin can delete cards ✅. Admin can delete transactions ✅."
+
+  - task: "Admin overview enhancements (deposits_pending & withdrawals_pending)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "GET /api/admin/overview now returns deposits_pending and withdrawals_pending counts in addition to previous metrics."
+        - working: true
+          agent: "testing"
+          comment: "✅ Admin overview enhancements working (1/1 test passed). Returns deposits_pending and withdrawals_pending keys ✅."
+
+  - task: "2FA setup endpoint"
+    implemented: true
+    working: false
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 1
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "POST /api/profile/2fa/setup returns {secret, uri, qr_svg} for authenticator app setup."
+        - working: false
+          agent: "testing"
+          comment: "❌ 2FA setup endpoint failing (0/1 test passed). Returns 500 Internal Server Error: 'Cannot read properties of undefined (reading generateSecret)'. Issue is with dynamic import of otplib - the import statement 'await import(otplib)' is not returning the expected object structure. This is a known ESM import issue in Next.js."
+
 frontend:
   - task: "Luxury Landing page (black/gold, hero, features, cards, pricing, FAQ, CTA)"
     implemented: true
@@ -295,12 +445,14 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 3
+  test_sequence: 4
   run_ui: false
 
 test_plan:
-  current_focus: []
-  stuck_tasks: []
+  current_focus:
+    - "2FA setup endpoint (otplib import issue)"
+  stuck_tasks:
+    - "2FA setup endpoint (otplib import issue)"
   test_all: false
   test_priority: "high_first"
 
@@ -323,3 +475,8 @@ agent_communication:
       message: "Run focused regression + new-feature test on Message 295 changes: (1) KYC gating on deposit/withdraw/cards - verify 403 with KYC_REQUIRED for unverified users. (2) Deposit request flow - verify pending status, no auto-credit, admin approve/reject. (3) Card activation via external USDT - verify tx_hash requirement, pending_verification status, no auto-debit, admin approve/reject. (4) Regression sanity - health, config, rates, transfer."
     - agent: "testing"
       message: "✅ FOCUSED REGRESSION + NEW FEATURE TEST COMPLETE - ALL 25/25 TESTS PASSED! Comprehensive testing of Message 295 business logic changes completed successfully. **SECTION 1: KYC GATING (4/4 PASSED)** - Fresh user with kyc_status='unverified' correctly blocked from deposit/withdraw/card request/card activate, all return 403 with code=KYC_REQUIRED ✅. **SECTION 2: DEPOSIT REQUEST FLOW (10/10 PASSED)** - Complete flow verified: user creates deposit request (status='pending') → wallet balance NOT auto-credited → admin GET /deposits lists pending requests → admin approves → wallet credited + transaction created + block written → reject path also works (balance unchanged) ✅. **SECTION 3: CARD ACTIVATION VIA EXTERNAL USDT (7/7 PASSED)** - Complete flow verified: user requests card (status='pending_activation') → activation without tx_hash returns 400 error → activation with tx_hash sets status='pending_verification' → USDT wallet NOT auto-debited → admin GET /cards lists pending → admin approves → card status='active' ✅. **SECTION 4: REGRESSION SANITY (4/4 PASSED)** - Health endpoint (200 ok=true) ✅, Config endpoint (200 with all keys) ✅, Rates endpoint (200 with fx + crypto_usd) ✅, Transfer between users (balances update correctly) ✅. All new business logic working correctly. No regressions detected. Backend is production-ready."
+    - agent: "main"
+      message: "MAJOR feature drop (18 items from user Message ~296). Please test the new/changed endpoints. Admin creds still admin@aurelawallet.com / Aurela@123#. **NEW/CHANGED BACKEND SURFACE:** (1) POST /api/auth/google now accepts EITHER {credential:<id_token>} OR {access_token:<oauth2 token>} — please test at least the shape (a real Google token can't be generated, but verify the endpoint rejects missing tokens with 400, and returns a helpful error if GOOGLE_CLIENT_ID is unset). (2) POST /api/withdraw now creates a pending 'withdraw_requests' row (status='pending'), locks wallet balance (funds are debited immediately + locked field increments). Verify balance stays deducted but no completed 'withdraw' transaction is written. Then admin GET /api/admin/withdrawals returns the list; POST /api/admin/withdrawals/:id/approve creates the withdraw transaction and unlocks; POST /api/admin/withdrawals/:id/reject returns the funds to available balance. (3) POST /api/cards/request now enforces max 3 cards per user and blocks duplicate tiers — verify: creating one basic card succeeds, second basic returns 400 with 'Only one card per tier' message; creating premium and elite succeeds; a 4th tier attempt returns 400. (4) DELETE /api/cards/:id lets user delete their own card (status becomes 'deleted', frozen=true). After delete, requesting the same tier again succeeds. (5) POST /api/admin/cards/:id/approve now supports body {activate_now:true} → status='active' immediately; without it → status='activating' with usable_at = now + 24h. GET /api/cards auto-flips 'activating' cards to 'active' once usable_at has passed. (6) POST /api/kyc now accepts extended fields: first_name, last_name, mobile, country, state, city, address, postal_code, occupation, id_type, id_number, doc_front (base64), doc_back (base64), selfie (base64). Verify KYC record contains all these. (7) GET /api/admin/kyc/:id returns { kyc, user } (detail for review modal). (8) PUT /api/profile now accepts avatar (base64), address, country, city, postal_code, date_of_birth. Test avatar upload works and rejects payloads > 3MB. (9) GET /api/admin/notifications returns { counts:{deposits,withdrawals,kyc,cards}, total, items:[{kind,id,title,at}...] } — verify shape. (10) DELETE /api/admin/cards/:id deletes a card; DELETE /api/admin/transactions/:id deletes a transaction. (11) GET /api/admin/overview now returns deposits_pending and withdrawals_pending in addition to previous counts. **DO NOT TEST 2FA setup itself with a real authenticator — just verify POST /profile/2fa/setup returns { secret, uri, qr_svg } with non-empty values (i.e., no internal server error).** Skip Google flow with a real token. Regression: confirm all previously green endpoints still work."
+    - agent: "testing"
+      message: "✅ MAJOR FEATURE DROP REGRESSION TEST COMPLETE - 39/40 TESTS PASSED (97.5%)! Comprehensive testing of all new features completed. **SECTION A: GOOGLE SIGN-IN (3/3 PASSED)** - Empty body returns 400 'Missing Google credential' ✅, fake access_token returns 401 ✅, invalid credential returns 401 ✅. **SECTION B: WITHDRAWAL ADMIN APPROVAL PIPELINE (10/10 PASSED)** - Complete flow verified: user submits withdrawal → balance debited + locked → admin GET /withdrawals lists pending → admin approves → locked released + transaction created ✅, reject path returns funds to balance ✅. **SECTION C: CARD LIMITS + DELETE (7/7 PASSED)** - Max 3 cards enforced ✅, duplicate tier blocked ✅, user can delete card and re-request same tier ✅. **SECTION D: 24H CARD ACTIVATION DELAY (2/2 PASSED)** - Admin approve without activate_now → status='activating' with usable_at +24h ✅, admin approve with activate_now=true → status='active' immediately ✅. **SECTION E: EXTENDED KYC + ADMIN DETAIL (3/3 PASSED)** - KYC accepts extended fields + base64 images ✅, admin GET /kyc/:id returns {kyc, user} with all fields ✅. **SECTION F: PROFILE AVATAR + EDIT (3/3 PASSED)** - Avatar upload works ✅, large avatar (>3MB) rejected ✅. **SECTION G: ADMIN NOTIFICATIONS (1/1 PASSED)** - Returns {counts, total, items} with correct shape ✅. **SECTION H: ADMIN DELETE (2/2 PASSED)** - Admin can delete cards and transactions ✅. **SECTION I: ADMIN OVERVIEW (1/1 PASSED)** - Returns deposits_pending & withdrawals_pending ✅. **SECTION J: 2FA SETUP (0/1 FAILED)** - POST /profile/2fa/setup returns 500 error due to otplib import issue ❌. **REGRESSION (7/7 PASSED)** - Health, config, rates, admin login, transfer, deposit flow, card activation all working ✅. **CRITICAL ISSUE:** 2FA setup endpoint has otplib dynamic import error (500 Internal Server Error). All other endpoints working perfectly. No regressions detected."
+

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useMemo } from 'react'
-import { useApp, FIAT_META, CRYPTO_META, fmt } from './store'
+import { useApp, FIAT_META, CRYPTO_META, fmt, KYC_DOCS_BY_COUNTRY, KYC_COUNTRIES, FIAT_METHODS } from './store'
 import { AurelaLogo, AurelaWordmark } from './Logo'
 import { CardVisual } from './Landing'
 import { Button } from '@/components/ui/button'
@@ -17,9 +17,9 @@ import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
-  Users, Settings, ScrollText, ChevronDown
+  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon
 } from 'lucide-react'
-import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin } from './AdminPanel'
+import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 
 const USER_NAV = [
@@ -38,6 +38,7 @@ const ADMIN_NAV = [
   { id: 'admin_users', label: 'Users', icon: Users },
   { id: 'admin_kyc', label: 'KYC Review', icon: ShieldCheck },
   { id: 'admin_deposits', label: 'Deposit Requests', icon: ArrowDownToLine },
+  { id: 'admin_withdrawals', label: 'Withdraw Requests', icon: ArrowUpFromLine },
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
@@ -46,12 +47,13 @@ const ADMIN_NAV = [
 ]
 
 export function Dashboard() {
-  const { user, logout, api, refreshUser } = useApp()
+  const { user, logout, api, refreshUser, tick } = useApp()
   const [tab, setTab] = useState('overview')
   const [wallets, setWallets] = useState([])
   const [totals, setTotals] = useState({ usd: 0, preferred: 0, preferred_currency: 'USD' })
   const [txs, setTxs] = useState([])
   const [cards, setCards] = useState([])
+  const [notif, setNotif] = useState({ total: 0, counts: {}, items: [] })
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const NAV = isAdmin ? [...USER_NAV, ...ADMIN_NAV] : USER_NAV
 
@@ -64,21 +66,34 @@ export function Dashboard() {
   const loadCards = async () => {
     try { const { cards } = await api.get('/cards'); setCards(cards) } catch(e) {}
   }
-  const loadAll = async () => { await Promise.all([loadWallets(), loadTxs(), loadCards()]) }
+  const loadNotif = async () => {
+    if (!isAdmin) return
+    try { const n = await api.get('/admin/notifications'); setNotif(n) } catch(e) {}
+  }
+  const loadAll = async () => { await Promise.all([loadWallets(), loadTxs(), loadCards(), loadNotif()]) }
 
   useEffect(() => { loadAll() }, [])
+  // Auto-refresh every 5s (driven by store `tick`)
+  useEffect(() => {
+    if (!user) return
+    loadWallets(); loadTxs(); loadCards(); loadNotif()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick])
 
   // Global navigation via custom events (used from KycGate, WithdrawTab card gate, etc.)
   useEffect(() => {
     const go = (id) => () => setTab(id)
     const kyc = go('kyc'), cards = go('cards'), transfer = go('transfer')
+    const goTab = (e) => { if (e.detail) setTab(e.detail) }
     window.addEventListener('aurela:goto-kyc', kyc)
     window.addEventListener('aurela:goto-cards', cards)
     window.addEventListener('aurela:goto-transfer', transfer)
+    window.addEventListener('aurela:go-tab', goTab)
     return () => {
       window.removeEventListener('aurela:goto-kyc', kyc)
       window.removeEventListener('aurela:goto-cards', cards)
       window.removeEventListener('aurela:goto-transfer', transfer)
+      window.removeEventListener('aurela:go-tab', goTab)
     }
   }, [])
 
@@ -124,6 +139,55 @@ export function Dashboard() {
             </div>
             <div className="flex items-center gap-3">
               <CurrencySwitcher onSaved={async () => { await refreshUser(); await loadWallets() }} />
+              {isAdmin && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="relative h-10 w-10 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 flex items-center justify-center transition">
+                      <Bell className="h-4 w-4 text-gold"/>
+                      {notif.total > 0 && (
+                        <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+                          {notif.total > 99 ? '99+' : notif.total}
+                        </span>
+                      )}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-80 bg-onyx-900 border-gold-500/25">
+                    <DropdownMenuLabel className="text-muted-foreground flex items-center justify-between">
+                      <span className="text-foreground text-sm">Pending actions</span>
+                      <span className="text-[10px] text-gold uppercase tracking-widest">{notif.total} open</span>
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator className="bg-gold-500/15"/>
+                    <div className="grid grid-cols-4 gap-1 p-2">
+                      {[
+                        { k: 'deposits', tab: 'admin_deposits', label: 'Deposits' },
+                        { k: 'withdrawals', tab: 'admin_withdrawals', label: 'Withdraw' },
+                        { k: 'cards', tab: 'admin_card_approvals', label: 'Cards' },
+                        { k: 'kyc', tab: 'admin_kyc', label: 'KYC' },
+                      ].map(x => (
+                        <button key={x.k} onClick={() => setTab(x.tab)} className="rounded-lg bg-secondary/60 hover:bg-gold-500/10 p-2 text-center border border-gold-500/10">
+                          <div className="text-lg font-display text-gold">{notif.counts?.[x.k] ?? 0}</div>
+                          <div className="text-[9px] uppercase tracking-widest text-muted-foreground">{x.label}</div>
+                        </button>
+                      ))}
+                    </div>
+                    <DropdownMenuSeparator className="bg-gold-500/15"/>
+                    <div className="max-h-64 overflow-y-auto">
+                      {notif.items?.length === 0 && <div className="p-4 text-xs text-muted-foreground text-center">No pending requests 🎉</div>}
+                      {notif.items?.map(it => {
+                        const targetTab = it.kind === 'deposit' ? 'admin_deposits' : it.kind === 'withdraw' ? 'admin_withdrawals' : it.kind === 'card' ? 'admin_card_approvals' : 'admin_kyc'
+                        return (
+                          <DropdownMenuItem key={it.kind + it.id} onClick={() => setTab(targetTab)} className="cursor-pointer focus:bg-gold-500/10 focus:text-gold">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs truncate">{it.title}</div>
+                              <div className="text-[10px] text-muted-foreground">{new Date(it.at).toLocaleString()}</div>
+                            </div>
+                          </DropdownMenuItem>
+                        )
+                      })}
+                    </div>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="flex items-center gap-2 pr-2 pl-1 py-1 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 transition">
@@ -196,6 +260,7 @@ export function Dashboard() {
               {tab === 'admin_users' && isAdmin && <UsersAdmin/>}
               {tab === 'admin_kyc' && isAdmin && <KycAdmin/>}
               {tab === 'admin_deposits' && isAdmin && <DepositsAdmin/>}
+              {tab === 'admin_withdrawals' && isAdmin && <WithdrawalsAdmin/>}
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
@@ -400,6 +465,25 @@ function WalletsTab({ wallets, kind }) {
   )
 }
 
+function timeUntil(ts) {
+  if (!ts) return ''
+  const diff = new Date(ts).getTime() - Date.now()
+  if (diff <= 0) return 'now'
+  const h = Math.floor(diff / 3_600_000)
+  const m = Math.floor((diff % 3_600_000) / 60_000)
+  if (h > 0) return `${h}h ${m}m`
+  const s = Math.floor((diff % 60_000) / 1000)
+  return `${m}m ${s}s`
+}
+function ActivationCountdown({ usable_at }) {
+  const [, setT] = useState(0)
+  useEffect(() => {
+    const iv = setInterval(() => setT(x => x + 1), 1000)
+    return () => clearInterval(iv)
+  }, [])
+  return <Badge variant="outline" className="border-blue-500/40 text-blue-400 text-[10px]"><Timer className="h-3 w-3 mr-1"/>Unlocks in {timeUntil(usable_at)}</Badge>
+}
+
 function TransferTab({ wallets, onDone }) {
   const { api, user } = useApp()
   const [form, setForm] = useState({ recipient: '', currency: 'USD', amount: '', note: '' })
@@ -512,6 +596,15 @@ function CardsTab({ cards, onChange, onWalletChange }) {
       toast.success(frozen ? 'Card frozen' : 'Card unfrozen'); onChange && onChange()
     } catch(e) { toast.error(e.message) }
   }
+  const deleteCard = async (card) => {
+    if (typeof window !== 'undefined' && !window.confirm(`Delete this ${card.tier_name}? You will have to re-apply and repay the activation fee to get a new card.`)) return
+    setLoading(true)
+    try {
+      await api.del(`/cards/${card.id}`)
+      toast.success('Card deleted')
+      onChange && onChange()
+    } catch(e) { toast.error(e.message) } finally { setLoading(false) }
+  }
 
   return (
     <div className="space-y-6">
@@ -564,16 +657,28 @@ function CardsTab({ cards, onChange, onWalletChange }) {
               {c.frozen && <div className="absolute inset-0 bg-onyx-900/60 backdrop-blur-sm flex items-center justify-center"><Snowflake className="h-10 w-10 text-gold"/></div>}
             </div>
             <div className="mt-4 flex items-center gap-2 flex-wrap">
-              <Badge variant="outline" className={`${c.status==='active'?'border-gold-500 text-gold':'border-muted text-muted-foreground'}`}>{c.status.replace('_',' ')}</Badge>
+              <Badge variant="outline" className={`${c.status==='active'?'border-gold-500 text-gold':c.status==='activating'?'border-blue-500/50 text-blue-400':c.status==='pending_verification'?'border-gold-500/40 text-gold':c.status==='rejected'?'border-red-500/40 text-red-400':'border-muted text-muted-foreground'}`}>{c.status.replace('_',' ')}</Badge>
               <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Daily spend {c.daily_spend_limit.toLocaleString()}</Badge>
+              {c.status === 'activating' && c.usable_at && <ActivationCountdown usable_at={c.usable_at}/>}
             </div>
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex gap-2 flex-wrap">
               {c.status === 'pending_activation' && (
                 <Button onClick={() => setOpenAct(c)} className="gold-btn flex-1 rounded-full"><Sparkles className="h-4 w-4 mr-2"/> Activate</Button>
               )}
+              {c.status === 'pending_verification' && (
+                <div className="flex-1 text-xs text-muted-foreground">⏳ Waiting for admin to verify your USDT transfer…</div>
+              )}
+              {c.status === 'activating' && (
+                <div className="flex-1 text-xs text-muted-foreground">🎉 Approved! Your card unlocks in {timeUntil(c.usable_at)}.</div>
+              )}
               {c.status === 'active' && (
-                <Button onClick={() => freeze(c, !c.frozen)} variant="outline" className="flex-1 rounded-full border-gold-500/40">
+                <Button onClick={() => freeze(c, !c.frozen)} variant="outline" className="rounded-full border-gold-500/40">
                   {c.frozen ? <><Flame className="h-4 w-4 mr-2"/> Unfreeze</> : <><Snowflake className="h-4 w-4 mr-2"/> Freeze</>}
+                </Button>
+              )}
+              {c.status !== 'pending_verification' && (
+                <Button onClick={() => deleteCard(c)} variant="outline" className="rounded-full border-red-500/40 text-red-400 hover:bg-red-500/10">
+                  <Trash2 className="h-4 w-4 mr-2"/> Delete
                 </Button>
               )}
             </div>
@@ -676,22 +781,63 @@ function KycGate({ children, action }) {
   )
 }
 
+// Small helper: render a method-specific set of Input fields
+function MethodFields({ method, details, setDetails }) {
+  const spec = FIAT_METHODS[method]
+  if (!spec) return null
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {spec.fields.map(f => (
+        <div key={f.key} className={f.key === 'bank_address' ? 'sm:col-span-2' : ''}>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">{f.label}{f.required ? ' *' : ''}</Label>
+          <Input value={details[f.key] || ''} onChange={e => setDetails({ ...details, [f.key]: e.target.value })} type={f.type === 'number' ? 'number' : 'text'} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function DepositTab({ wallets, onDone }) {
   const { api, user, config } = useApp()
-  const [form, setForm] = useState({ method: 'bank', currency: 'USD', amount: '', network: '', note: '', tx_hash: '' })
+  const [form, setForm] = useState({ method: 'bank_swift', currency: 'USD', amount: '', network: '', note: '', tx_hash: '' })
+  const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const isCrypto = wallets.find(w => w.currency === form.currency)?.type === 'crypto'
-  const cryptoWallet = wallets.find(w => w.type === 'crypto' && w.currency === form.currency)
   const platformWallets = (config?.platform_wallets || []).filter(p => p.asset === form.currency)
   const activePlatformWallet = form.network ? platformWallets.find(p => p.network === form.network) : platformWallets[0]
 
+  // Reset method when switching between fiat and crypto
+  useEffect(() => {
+    if (isCrypto) setForm(f => ({ ...f, method: 'crypto', network: '' }))
+    else if (form.method === 'crypto') setForm(f => ({ ...f, method: 'bank_swift' }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.currency])
+
   const submit = async () => {
+    // Validate required fields for the chosen method
+    if (!isCrypto) {
+      const spec = FIAT_METHODS[form.method]
+      if (spec) {
+        for (const f of spec.fields) {
+          if (f.required && !details[f.key]) return toast.error(`Please fill "${f.label}"`)
+        }
+      }
+    } else {
+      if (!activePlatformWallet) return toast.error('No Aurela deposit address configured for this asset — please contact support.')
+    }
     setLoading(true)
     try {
-      await api.post('/deposit', { method: isCrypto ? 'crypto' : form.method, currency: form.currency, amount: Number(form.amount), note: form.note, tx_hash: form.tx_hash })
+      await api.post('/deposit', {
+        method: form.method,
+        currency: form.currency, amount: Number(form.amount),
+        note: form.note, tx_hash: form.tx_hash,
+        network: activePlatformWallet?.network || form.network || '',
+        details,
+      })
       toast.success('Deposit request submitted — awaiting admin verification')
       onDone && onDone()
       setForm({ ...form, amount: '', note: '', tx_hash: '' })
+      setDetails({})
     } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
 
@@ -703,12 +849,12 @@ function DepositTab({ wallets, onDone }) {
         <div className="font-display text-2xl">Deposit funds</div>
         <div className="text-sm text-muted-foreground">Bank, UPI, card or crypto. All deposits go through a short admin verification before being credited — this protects our network from fraud.</div>
         <div className="mt-6 space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <Label className="text-xs uppercase tracking-widest text-muted-foreground">Currency</Label>
               <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v, network: '' })}>
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-72">
                   <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>
                   {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
                   <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>
@@ -716,34 +862,26 @@ function DepositTab({ wallets, onDone }) {
                 </SelectContent>
               </Select>
             </div>
-            <div>
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Method</Label>
-              <Select value={form.method} onValueChange={v => setForm({ ...form, method: v })}>
-                <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
-                <SelectContent>
-                  {isCrypto ? (
-                    <SelectItem value="crypto">On-chain</SelectItem>
-                  ) : (
-                    <>
-                      <SelectItem value="bank">Bank Transfer</SelectItem>
-                      <SelectItem value="upi">UPI</SelectItem>
-                      <SelectItem value="stripe">Stripe (card)</SelectItem>
-                      <SelectItem value="paypal">PayPal</SelectItem>
-                      <SelectItem value="debit">Debit card</SelectItem>
-                      <SelectItem value="credit">Credit card</SelectItem>
-                    </>
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
+            {!isCrypto && (
+              <div>
+                <Label className="text-xs uppercase tracking-widest text-muted-foreground">Payment method</Label>
+                <Select value={form.method} onValueChange={v => { setForm({ ...form, method: v }); setDetails({}) }}>
+                  <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(FIAT_METHODS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Amount</Label>
             <Input type="number" step="any" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
           </div>
+          {!isCrypto && <MethodFields method={form.method} details={details} setDetails={setDetails}/>}
           {isCrypto && (
             <div>
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Transaction hash (optional but recommended)</Label>
+              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Transaction hash (recommended)</Label>
               <Input value={form.tx_hash} onChange={e => setForm({ ...form, tx_hash: e.target.value })} placeholder="0x… on-chain tx hash" className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-xs"/>
             </div>
           )}
@@ -791,29 +929,51 @@ function DepositTab({ wallets, onDone }) {
 
 function WithdrawTab({ wallets, onDone }) {
   const { api, user } = useApp()
-  const [form, setForm] = useState({ method: 'bank', currency: 'USD', amount: '', destination: '' })
+  const [form, setForm] = useState({ method: 'bank_swift', currency: 'USD', amount: '', destination: '', network: '' })
+  const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const [cards, setCards] = useState([])
   const wallet = wallets.find(w => w.currency === form.currency)
   const isCrypto = wallet?.type === 'crypto'
   const hasActiveCard = cards.some(c => c.status === 'active' && !c.frozen)
+  const cryptoNetworks = (isCrypto && ({
+    BTC:['Bitcoin'], ETH:['ERC20'], USDT:['ERC20','TRC20','BEP20'], USDC:['ERC20','BEP20','Polygon'],
+    BNB:['BEP20'], SOL:['Solana'], XRP:['XRP'], ADA:['Cardano'], DOGE:['Dogecoin'], MATIC:['Polygon','ERC20'],
+    AVAX:['Avalanche'], DOT:['Polkadot'], TRX:['TRC20'], LINK:['ERC20','BEP20'], LTC:['Litecoin'],
+  }[form.currency] || ['External'])) || []
 
   useEffect(() => { api.get('/cards').then(({cards}) => setCards(cards)).catch(()=>{}) }, [])
+  useEffect(() => {
+    if (isCrypto) setForm(f => ({ ...f, method: 'crypto', network: cryptoNetworks[0] || '' }))
+    else if (form.method === 'crypto') setForm(f => ({ ...f, method: 'bank_swift', network: '' }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.currency])
 
   const submit = async () => {
+    if (!wallet || Number(form.amount) > wallet.balance) return toast.error('Insufficient balance')
+    if (isCrypto) {
+      if (!form.destination) return toast.error('Please enter the destination wallet address')
+      if (!form.network) return toast.error('Please choose the network')
+    } else {
+      const spec = FIAT_METHODS[form.method]
+      if (spec) {
+        for (const f of spec.fields) {
+          if (f.required && !details[f.key]) return toast.error(`Please fill "${f.label}"`)
+        }
+      }
+    }
     setLoading(true)
     try {
-      await api.post('/withdraw', { method: isCrypto?'crypto':form.method, currency: form.currency, amount: Number(form.amount), destination: form.destination })
-      toast.success('Withdrawal submitted')
+      await api.post('/withdraw', {
+        method: form.method, currency: form.currency, amount: Number(form.amount),
+        destination: isCrypto ? form.destination : (details.account_number || details.upi_id || details.paypal_email || details.iban || details.card_last4 || ''),
+        network: form.network, details,
+      })
+      toast.success('Withdrawal request submitted — funds locked until admin approval')
       onDone && onDone()
       setForm({ ...form, amount: '', destination: '' })
-    } catch(e) {
-      if (e.message && e.message.toLowerCase().includes('card activation required')) {
-        toast.error('Activate an Aurela card to withdraw externally')
-      } else {
-        toast.error(e.message)
-      }
-    } finally { setLoading(false) }
+      setDetails({})
+    } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
 
   if (user?.kyc_status !== 'approved') return <KycGate action="withdraw funds"/>
@@ -822,10 +982,10 @@ function WithdrawTab({ wallets, onDone }) {
     return (
       <div className="card-luxury rounded-2xl p-8 max-w-2xl">
         <div className="flex items-start gap-4">
-          <div className="h-12 w-12 rounded-xl flex items-center justify-center bg-gradient-to-br from-gold-500/25 to-gold-800/10 border border-gold-500/40">
+          <div className="h-12 w-12 rounded-xl flex items-center justify-center bg-gradient-to-br from-gold-500/25 to-gold-800/10 border border-gold-500/40 shrink-0">
             <CreditCard className="h-6 w-6 text-gold-bright"/>
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <div className="font-display text-2xl">Activate a card to withdraw externally</div>
             <p className="text-sm text-muted-foreground mt-2">External withdrawals — to bank accounts, UPI or crypto wallets outside Aurela — require an active Aurela card. This protects our network and ensures every outbound payment is bound to a verified spending profile.</p>
             <p className="text-sm text-muted-foreground mt-3">You can still send fiat and crypto to any Aurela member instantly and for free from the <span className="text-gold">Send</span> tab, using their email or username.</p>
@@ -840,16 +1000,16 @@ function WithdrawTab({ wallets, onDone }) {
   }
 
   return (
-    <div className="card-luxury rounded-2xl p-6 max-w-2xl">
+    <div className="card-luxury rounded-2xl p-6 max-w-3xl">
       <div className="font-display text-2xl">Withdraw funds</div>
-      <div className="text-sm text-muted-foreground">Send fiat to bank/UPI or crypto to an external wallet.</div>
+      <div className="text-sm text-muted-foreground">Send fiat to bank/UPI or crypto to an external wallet. Every withdrawal is reviewed by admin before it is released.</div>
       <div className="mt-6 space-y-4">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Currency</Label>
             <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}>
               <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
-              <SelectContent className="max-h-64">
+              <SelectContent className="max-h-72">
                 <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>
                 {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
                 <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>
@@ -864,29 +1024,38 @@ function WithdrawTab({ wallets, onDone }) {
           </div>
         </div>
         {isCrypto ? (
-          <div>
-            <Label className="text-xs uppercase tracking-widest text-muted-foreground">External wallet address</Label>
-            <Input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value })} placeholder="0x... / bc1... / T..." className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Network *</Label>
+              <Select value={form.network} onValueChange={v => setForm({ ...form, network: v })}>
+                <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue placeholder="Choose network"/></SelectTrigger>
+                <SelectContent>
+                  {cryptoNetworks.map(n => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="sm:col-span-2">
+              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Destination wallet address *</Label>
+              <Input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value })} placeholder="0x... / bc1... / T..." className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-xs"/>
+              <div className="text-[10px] text-muted-foreground mt-1">⚠️ Sending to the wrong network will result in permanent loss of funds.</div>
+            </div>
           </div>
         ) : (
           <>
             <div>
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Method</Label>
-              <Select value={form.method} onValueChange={v => setForm({ ...form, method: v })}>
+              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Withdrawal method</Label>
+              <Select value={form.method} onValueChange={v => { setForm({ ...form, method: v }); setDetails({}) }}>
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="bank">Bank Account</SelectItem>
-                  <SelectItem value="upi">UPI</SelectItem>
+                  {Object.entries(FIAT_METHODS).map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
-            <div>
-              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Destination (account / UPI id)</Label>
-              <Input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
-            </div>
+            <MethodFields method={form.method} details={details} setDetails={setDetails}/>
           </>
         )}
-        <Button onClick={submit} disabled={loading || !form.amount} className="gold-btn w-full h-12 rounded-xl">{loading?'Processing…':'Withdraw'}</Button>
+        <Button onClick={submit} disabled={loading || !form.amount} className="gold-btn w-full h-12 rounded-xl">{loading?'Processing…':'Submit withdrawal request'}</Button>
+        <div className="text-xs text-muted-foreground">All withdrawal requests are reviewed by an Aurela administrator. Funds are held in escrow and released only after approval.</div>
       </div>
     </div>
   )
@@ -930,13 +1099,43 @@ function TransactionsTab({ txs }) {
 
 function KycTab({ user, onDone }) {
   const { api } = useApp()
-  const [form, setForm] = useState({ full_name: user?.full_name || '', dob: '', country: '', address: '', id_type: 'passport', id_number: '' })
+  const [form, setForm] = useState({
+    first_name: '', last_name: '', dob: '', country: '', state: '', city: '',
+    address: '', postal_code: '', mobile: user?.phone || '', occupation: '',
+    id_type: '', id_number: '', doc_front: '', doc_back: '', selfie: ''
+  })
   const [loading, setLoading] = useState(false)
   const status = user?.kyc_status || 'unverified'
+  const availableDocs = form.country ? (KYC_DOCS_BY_COUNTRY[form.country] || KYC_DOCS_BY_COUNTRY.DEFAULT) : []
+
+  useEffect(() => {
+    if (form.country && form.id_type && !availableDocs.includes(form.id_type)) {
+      setForm(f => ({ ...f, id_type: '' }))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.country])
+
+  const readFile = (file, cb) => {
+    if (!file) return
+    if (file.size > 2_500_000) return toast.error('File too large — max 2.5MB')
+    const r = new FileReader()
+    r.onload = () => cb(r.result)
+    r.readAsDataURL(file)
+  }
 
   const submit = async () => {
+    if (!form.first_name || !form.last_name) return toast.error('First and last name are required')
+    if (!form.country) return toast.error('Please select your country')
+    if (!form.mobile) return toast.error('Mobile number is required')
+    if (!form.id_type) return toast.error('Please select an identity document')
+    if (!form.id_number) return toast.error('Document number is required')
+    if (!form.doc_front) return toast.error('Please upload the front of your document')
     setLoading(true)
-    try { await api.post('/kyc', form); toast.success('KYC submitted for review'); onDone && onDone() } catch(e) { toast.error(e.message) } finally { setLoading(false) }
+    try {
+      await api.post('/kyc', form)
+      toast.success('KYC submitted for review')
+      onDone && onDone()
+    } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
 
   const statusBadge = {
@@ -946,52 +1145,116 @@ function KycTab({ user, onDone }) {
     rejected: <Badge variant="outline" className="border-red-500/50 text-red-400">Rejected</Badge>,
   }[status]
 
+  if (status === 'pending' || status === 'approved') {
+    return (
+      <div className="card-luxury rounded-2xl p-8 max-w-2xl">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-display text-2xl">Identity verification</div>
+            <div className="text-sm text-muted-foreground mt-1">
+              {status === 'pending' ? 'Our compliance team is reviewing your submission. This usually takes a few hours.' : 'You are fully verified. All features are unlocked.'}
+            </div>
+          </div>
+          {statusBadge}
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="card-luxury rounded-2xl p-6 max-w-2xl">
-      <div className="flex items-center justify-between">
+    <div className="card-luxury rounded-2xl p-6 max-w-4xl">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <div className="font-display text-2xl">Identity verification</div>
-          <div className="text-sm text-muted-foreground">Required for withdrawals and higher card tiers.</div>
+          <div className="text-sm text-muted-foreground">Required by our banking partners. All data is encrypted and used only for compliance.</div>
         </div>
         {statusBadge}
       </div>
 
-      <div className="mt-6 grid grid-cols-2 gap-3">
+      <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Full legal name</Label>
-          <Input value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">First name *</Label>
+          <Input value={form.first_name} onChange={e => setForm({ ...form, first_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Last name *</Label>
+          <Input value={form.last_name} onChange={e => setForm({ ...form, last_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
         </div>
         <div>
           <Label className="text-xs uppercase tracking-widest text-muted-foreground">Date of birth</Label>
           <Input type="date" value={form.dob} onChange={e => setForm({ ...form, dob: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Country</Label>
-          <Input value={form.country} onChange={e => setForm({ ...form, country: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Mobile number *</Label>
+          <Input value={form.mobile} onChange={e => setForm({ ...form, mobile: e.target.value })} placeholder="+1 555 000 0000" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Address</Label>
-          <Input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
-        </div>
-        <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">ID type</Label>
-          <Select value={form.id_type} onValueChange={v => setForm({ ...form, id_type: v })}>
-            <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="passport">Passport</SelectItem>
-              <SelectItem value="national_id">National ID</SelectItem>
-              <SelectItem value="drivers_license">Driver&apos;s license</SelectItem>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Country *</Label>
+          <Select value={form.country} onValueChange={v => setForm({ ...form, country: v })}>
+            <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue placeholder="Choose your country"/></SelectTrigger>
+            <SelectContent className="max-h-64">
+              {KYC_COUNTRIES.map(([code, label]) => <SelectItem key={code} value={code}>{label}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">ID number</Label>
-          <Input value={form.id_number} onChange={e => setForm({ ...form, id_number: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">State / Province</Label>
+          <Input value={form.state} onChange={e => setForm({ ...form, state: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">City</Label>
+          <Input value={form.city} onChange={e => setForm({ ...form, city: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Postal / ZIP code</Label>
+          <Input value={form.postal_code} onChange={e => setForm({ ...form, postal_code: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+        <div className="sm:col-span-2">
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Full address</Label>
+          <Input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Occupation</Label>
+          <Input value={form.occupation} onChange={e => setForm({ ...form, occupation: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Document type *</Label>
+          <Select value={form.id_type} onValueChange={v => setForm({ ...form, id_type: v })} disabled={!form.country}>
+            <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue placeholder={form.country ? 'Choose a document' : 'Select country first'}/></SelectTrigger>
+            <SelectContent>
+              {availableDocs.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="sm:col-span-2">
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Document number *</Label>
+          <Input value={form.id_number} onChange={e => setForm({ ...form, id_number: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono"/>
         </div>
       </div>
 
-      <Button onClick={submit} disabled={loading || status === 'approved'} className="gold-btn mt-6 h-12 rounded-xl px-8">
-        {status === 'approved' ? 'Verified' : (loading ? 'Submitting…' : 'Submit for review')}
+      <div className="mt-6 grid sm:grid-cols-3 gap-3">
+        {[
+          { key: 'doc_front', label: 'Document front *' },
+          { key: 'doc_back', label: 'Document back (if applicable)' },
+          { key: 'selfie', label: 'Selfie holding document (optional)' },
+        ].map(f => (
+          <label key={f.key} className="relative block border border-dashed border-gold-500/30 rounded-xl p-4 bg-secondary/40 cursor-pointer hover:border-gold-500/60 transition min-h-[140px]">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{f.label}</div>
+            {form[f.key] ? (
+              <>
+                <img src={form[f.key]} alt="" className="mt-2 rounded-lg max-h-24 w-auto object-cover"/>
+                <div className="text-xs text-gold mt-2">Click to replace</div>
+              </>
+            ) : (
+              <div className="mt-4 text-sm text-muted-foreground">📎 Click to upload (JPG/PNG, ≤ 2.5MB)</div>
+            )}
+            <input type="file" accept="image/*" className="hidden" onChange={e => readFile(e.target.files?.[0], data => setForm(fx => ({ ...fx, [f.key]: data })))}/>
+          </label>
+        ))}
+      </div>
+
+      <Button onClick={submit} disabled={loading} className="gold-btn mt-6 h-12 rounded-xl px-8">
+        {loading ? 'Submitting…' : 'Submit for review'}
       </Button>
     </div>
   )
@@ -999,45 +1262,96 @@ function KycTab({ user, onDone }) {
 
 function ProfileTab({ user, onDone }) {
   const { api } = useApp()
-  const [form, setForm] = useState({ full_name: user?.full_name || '', phone: user?.phone || '' })
+  const [form, setForm] = useState({
+    full_name: user?.full_name || '', phone: user?.phone || '',
+    address: user?.address || '', city: user?.city || '', country: user?.country || '', postal_code: user?.postal_code || '',
+    date_of_birth: user?.date_of_birth || '', avatar: user?.avatar || ''
+  })
+  const [editing, setEditing] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [twofa, setTwofa] = useState(null) // { secret, uri, qr_svg }
+  const [twofa, setTwofa] = useState(null)
   const [twofaCode, setTwofaCode] = useState('')
   const [disableCode, setDisableCode] = useState('')
   const [qr, setQr] = useState(null)
 
+  useEffect(() => { api.get('/profile/qr').then(setQr).catch(()=>{}) }, [])
   useEffect(() => {
-    api.get('/profile/qr').then(setQr).catch(()=>{})
-  }, [])
+    setForm(f => ({ ...f, full_name: user?.full_name || f.full_name, phone: user?.phone || f.phone, avatar: user?.avatar || f.avatar }))
+  }, [user])
 
   const save = async () => {
     setLoading(true)
-    try { await api.put('/profile', form); toast.success('Profile updated'); onDone && onDone() } catch(e) { toast.error(e.message) } finally { setLoading(false) }
+    try { await api.put('/profile', form); toast.success('Profile updated'); setEditing(false); onDone && onDone() } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
+  const cancel = () => {
+    setForm({
+      full_name: user?.full_name || '', phone: user?.phone || '',
+      address: user?.address || '', city: user?.city || '', country: user?.country || '', postal_code: user?.postal_code || '',
+      date_of_birth: user?.date_of_birth || '', avatar: user?.avatar || ''
+    })
+    setEditing(false)
+  }
+  const onAvatarPick = (file) => {
+    if (!file) return
+    if (file.size > 2_000_000) return toast.error('Image too large — max 2MB')
+    const r = new FileReader()
+    r.onload = () => setForm(f => ({ ...f, avatar: r.result }))
+    r.readAsDataURL(file)
+  }
+
   const setup2fa = async () => {
-    try { const res = await api.post('/profile/2fa/setup', {}); setTwofa(res) } catch(e) { toast.error(e.message) }
+    try { const res = await api.post('/profile/2fa/setup', {}); setTwofa(res) }
+    catch(e) { toast.error(e.message || 'Could not start 2FA setup. Please try again.') }
   }
   const enable2fa = async () => {
-    try {
-      await api.post('/profile/2fa/enable', { code: twofaCode })
-      toast.success('2FA enabled')
-      setTwofa(null); setTwofaCode(''); onDone && onDone()
-    } catch(e) { toast.error(e.message) }
+    try { await api.post('/profile/2fa/enable', { code: twofaCode }); toast.success('2FA enabled'); setTwofa(null); setTwofaCode(''); onDone && onDone() } catch(e) { toast.error(e.message) }
   }
   const disable2fa = async () => {
-    try {
-      await api.post('/profile/2fa/disable', { code: disableCode })
-      toast.success('2FA disabled')
-      setDisableCode(''); onDone && onDone()
-    } catch(e) { toast.error(e.message) }
+    try { await api.post('/profile/2fa/disable', { code: disableCode }); toast.success('2FA disabled'); setDisableCode(''); onDone && onDone() } catch(e) { toast.error(e.message) }
   }
 
   return (
     <div className="grid lg:grid-cols-2 gap-6 max-w-6xl">
       <div className="card-luxury rounded-2xl p-6">
-        <div className="font-display text-2xl">Your profile</div>
-        <div className="text-sm text-muted-foreground">Public identity across the Aurela network.</div>
-        <div className="mt-6 grid grid-cols-2 gap-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-display text-2xl">Your profile</div>
+            <div className="text-sm text-muted-foreground">Public identity across the Aurela network.</div>
+          </div>
+          {!editing ? (
+            <Button variant="outline" onClick={() => setEditing(true)} className="border-gold-500/40 rounded-full"><Edit3 className="h-3.5 w-3.5 mr-1.5"/> Edit</Button>
+          ) : (
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={cancel} className="text-muted-foreground rounded-full">Cancel</Button>
+              <Button onClick={save} disabled={loading} className="gold-btn rounded-full">{loading ? 'Saving…' : 'Save'}</Button>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 flex items-center gap-4">
+          <div className="relative">
+            {form.avatar ? (
+              <img src={form.avatar} alt="avatar" className="h-20 w-20 rounded-full object-cover border-2 border-gold-500/40"/>
+            ) : (
+              <div className="h-20 w-20 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 font-bold text-2xl">
+                {(user?.full_name || user?.username || 'A').charAt(0).toUpperCase()}
+              </div>
+            )}
+            {editing && (
+              <label className="absolute -bottom-1 -right-1 h-8 w-8 rounded-full bg-onyx-900 border border-gold-500/40 flex items-center justify-center cursor-pointer hover:bg-gold-500/10">
+                <Copy className="h-3.5 w-3.5 text-gold rotate-45" />
+                <input type="file" accept="image/*" className="hidden" onChange={e => onAvatarPick(e.target.files?.[0])}/>
+              </label>
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-display text-xl truncate">{user?.full_name || user?.username}</div>
+            <div className="text-xs text-muted-foreground truncate">@{user?.username} · {user?.email}</div>
+            {editing && <div className="text-[10px] text-gold mt-1">Click the badge to change avatar</div>}
+          </div>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Username</Label>
             <Input value={user?.username || ''} disabled className="mt-2 bg-secondary border-gold-500/20 h-11 opacity-60"/>
@@ -1048,24 +1362,35 @@ function ProfileTab({ user, onDone }) {
           </div>
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Full name</Label>
-            <Input value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+            <Input value={form.full_name} disabled={!editing} onChange={e => setForm({ ...form, full_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
           </div>
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Phone</Label>
-            <Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+            <Input value={form.phone} disabled={!editing} onChange={e => setForm({ ...form, phone: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">Country</Label>
+            <Input value={form.country} disabled={!editing} onChange={e => setForm({ ...form, country: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">City</Label>
+            <Input value={form.city} disabled={!editing} onChange={e => setForm({ ...form, city: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          </div>
+          <div className="sm:col-span-2">
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">Address</Label>
+            <Input value={form.address} disabled={!editing} onChange={e => setForm({ ...form, address: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
           </div>
         </div>
-        <Button onClick={save} disabled={loading} className="gold-btn mt-6 rounded-xl px-8 h-12">Save changes</Button>
       </div>
 
       <div className="card-luxury rounded-2xl p-6">
         <div className="font-display text-2xl">Receive by QR</div>
         <div className="text-sm text-muted-foreground">Others can scan this QR to send you fiat or crypto instantly.</div>
-        <div className="mt-4 flex items-start gap-6">
+        <div className="mt-4 flex items-start gap-6 flex-wrap">
           <div className="p-4 rounded-xl bg-onyx-950 border border-gold-500/20 shrink-0">
             {qr ? <div dangerouslySetInnerHTML={{ __html: qr.qr_svg }} /> : <div className="w-[220px] h-[220px] flex items-center justify-center text-xs text-muted-foreground">Loading QR…</div>}
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-[180px]">
             <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Username</div>
             <div className="font-mono text-gold text-lg">@{user?.username}</div>
             <div className="text-[10px] uppercase tracking-widest text-muted-foreground mt-4">Email</div>
@@ -1091,7 +1416,6 @@ function ProfileTab({ user, onDone }) {
             {user?.two_fa_enabled ? '2FA enabled' : '2FA disabled'}
           </Badge>
         </div>
-
         {!user?.two_fa_enabled && !twofa && (
           <Button onClick={setup2fa} className="gold-btn mt-4 rounded-full"><ShieldCheck className="h-4 w-4 mr-2"/> Set up 2FA</Button>
         )}

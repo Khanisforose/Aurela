@@ -55,7 +55,7 @@ export function HomePage({ goAuth, goPage }) {
             </div>
             <div className="mt-10 flex flex-wrap gap-6 text-sm text-muted-foreground">
               <span className="flex items-center gap-2"><Check className="h-4 w-4 text-gold"/> Instant transfers</span>
-              <span className="flex items-center gap-2"><Check className="h-4 w-4 text-gold"/> 10 currencies · 10 cryptos</span>
+              <span className="flex items-center gap-2"><Check className="h-4 w-4 text-gold"/> 50+ fiat currencies · 30+ cryptocurrencies</span>
               <span className="flex items-center gap-2"><Check className="h-4 w-4 text-gold"/> 3-tier virtual cards</span>
             </div>
           </motion.div>

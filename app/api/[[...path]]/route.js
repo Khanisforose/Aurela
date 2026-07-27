@@ -440,22 +440,41 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json(response))
     }
 
-    // Google Sign-In (verifies id_token and logs in / creates user)
+    // Google Sign-In (accepts either an id_token 'credential' OR an OAuth2 'access_token')
     if (route === '/auth/google' && method === 'POST') {
       const body = await request.json()
-      const { credential } = body || {}
-      if (!credential) return handleCORS(NextResponse.json({ error: 'Missing Google credential' }, { status: 400 }))
+      const { credential, access_token } = body || {}
+      if (!credential && !access_token) return handleCORS(NextResponse.json({ error: 'Missing Google credential' }, { status: 400 }))
+      if (!process.env.GOOGLE_CLIENT_ID) {
+        console.error('[Google] GOOGLE_CLIENT_ID env variable not set')
+        return handleCORS(NextResponse.json({ error: 'Google sign-in is not configured on this server (missing GOOGLE_CLIENT_ID).' }, { status: 500 }))
+      }
       let payload
       try {
-        const { OAuth2Client } = await import('google-auth-library')
-        const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
-        const ticket = await client.verifyIdToken({ idToken: credential, audience: process.env.GOOGLE_CLIENT_ID })
-        payload = ticket.getPayload()
+        if (credential) {
+          // GSI id_token flow — verify JWT signature via google-auth-library
+          const { OAuth2Client } = await import('google-auth-library')
+          const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
+          const ticket = await client.verifyIdToken({ idToken: credential, audience: process.env.GOOGLE_CLIENT_ID })
+          payload = ticket.getPayload()
+        } else {
+          // Implicit OAuth2 access_token flow — fetch userinfo from Google
+          const uiRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+            headers: { Authorization: `Bearer ${access_token}` }
+          })
+          if (!uiRes.ok) {
+            const t = await uiRes.text()
+            console.error('[Google] userinfo failed', uiRes.status, t)
+            return handleCORS(NextResponse.json({ error: 'Google sign-in rejected the access token.' }, { status: 401 }))
+          }
+          payload = await uiRes.json()
+          // Normalise: google id in `sub`, email verified in `email_verified`
+        }
       } catch (e) {
-        console.error('[Google] verify failed', e?.message)
-        return handleCORS(NextResponse.json({ error: 'Invalid Google credential' }, { status: 401 }))
+        console.error('[Google] verify failed', e?.message, e?.stack)
+        return handleCORS(NextResponse.json({ error: 'Invalid Google credential — ' + (e?.message || 'unknown error') }, { status: 401 }))
       }
-      if (!payload || !payload.email) return handleCORS(NextResponse.json({ error: 'Invalid Google payload' }, { status: 401 }))
+      if (!payload || !payload.email) return handleCORS(NextResponse.json({ error: 'Google did not return an email for this account.' }, { status: 401 }))
       if (payload.email_verified === false) return handleCORS(NextResponse.json({ error: 'Google email not verified' }, { status: 403 }))
       const email = payload.email.toLowerCase()
       let existing = await db.collection('users').findOne({ email })
@@ -611,31 +630,47 @@ async function handleRoute(request, { params }) {
     if (route === '/profile' && method === 'PUT') {
       const body = await request.json()
       const upd = {}
-      for (const k of ['full_name','phone','preferred_currency','two_fa_enabled']) if (k in body) upd[k] = body[k]
+      for (const k of ['full_name','phone','preferred_currency','two_fa_enabled','avatar','address','country','city','postal_code','date_of_birth']) if (k in body) upd[k] = body[k]
       if (upd.preferred_currency && !FIAT.includes(upd.preferred_currency)) return handleCORS(NextResponse.json({ error: 'Invalid currency' }, { status: 400 }))
+      // Avatar size guard (base64 length ~4/3 * bytes)
+      if (upd.avatar && typeof upd.avatar === 'string' && upd.avatar.length > 3_000_000) return handleCORS(NextResponse.json({ error: 'Profile picture is too large (max ~2MB).' }, { status: 400 }))
       await db.collection('users').updateOne({ id: user.id }, { $set: upd })
       const u2 = await db.collection('users').findOne({ id: user.id })
-      await audit(db, user.id, 'profile.update', upd)
+      await audit(db, user.id, 'profile.update', { keys: Object.keys(upd) })
       return handleCORS(NextResponse.json({ user: clean(u2) }))
     }
 
-    // KYC
+    // KYC — accepts extended fields (first_name, last_name, mobile, country, doc_type, doc_data base64)
     if (route === '/kyc' && method === 'POST') {
       const body = await request.json()
+      const fullName = body.full_name || [body.first_name, body.last_name].filter(Boolean).join(' ').trim() || user.full_name
       const doc = {
         id: uuidv4(), user_id: user.id,
-        full_name: body.full_name || user.full_name,
+        first_name: body.first_name || '',
+        last_name: body.last_name || '',
+        full_name: fullName,
         dob: body.dob || '',
         country: body.country || '',
+        state: body.state || '',
+        city: body.city || '',
         address: body.address || '',
+        postal_code: body.postal_code || '',
+        mobile: body.mobile || body.phone || '',
+        occupation: body.occupation || '',
         id_type: body.id_type || 'passport',
         id_number: body.id_number || '',
+        doc_front: body.doc_front || '',   // base64 data URI
+        doc_back: body.doc_back || '',     // base64 data URI
+        selfie: body.selfie || '',         // base64 data URI (optional)
         status: 'pending',
         submitted_at: now()
       }
       await db.collection('kyc').insertOne(doc)
-      await db.collection('users').updateOne({ id: user.id }, { $set: { kyc_status: 'pending' } })
-      await audit(db, user.id, 'kyc.submit', { id_type: doc.id_type })
+      const userUpd = { kyc_status: 'pending' }
+      if (body.mobile || body.phone) userUpd.phone = body.mobile || body.phone
+      if (fullName && fullName !== user.full_name) userUpd.full_name = fullName
+      await db.collection('users').updateOne({ id: user.id }, { $set: userUpd })
+      await audit(db, user.id, 'kyc.submit', { id_type: doc.id_type, country: doc.country })
       return handleCORS(NextResponse.json({ ok: true, kyc: clean(doc) }))
     }
 
@@ -645,6 +680,8 @@ async function handleRoute(request, { params }) {
       const rates = await getRates(db)
       const enriched = wallets.map(w => ({
         ...clean(w),
+        locked: w.locked || 0,
+        available_balance: (w.balance || 0),  // balance is already post-lock; locked is informational
         balance_usd: convertToUSD(w.balance, w.currency, rates),
         preferred_value: convertUSDTo(convertToUSD(w.balance, w.currency, rates), user.preferred_currency, rates),
       }))
@@ -704,14 +741,14 @@ async function handleRoute(request, { params }) {
     if (route === '/deposit' && method === 'POST') {
       if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required before you can deposit.', code: 'KYC_REQUIRED' }, { status: 403 }))
       const body = await request.json()
-      const { method: pm, amount, currency, note, tx_hash } = body || {}
+      const { method: pm, amount, currency, note, tx_hash, network, details } = body || {}
       const amt = Number(amount)
       if (!amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid deposit' }, { status: 400 }))
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
       const req = {
         id: uuidv4(), type: 'deposit_request', method: pm || 'bank', currency, amount: amt,
-        user_id: user.id, from_username: pm || 'external', to_username: user.username,
-        tx_hash: tx_hash || '', note: note || '',
+        user_id: user.id, username: user.username, from_username: pm || 'external', to_username: user.username,
+        tx_hash: tx_hash || '', note: note || '', network: network || '', details: details || {},
         status: 'pending', created_at: now()
       }
       await db.collection('deposit_requests').insertOne(req)
@@ -719,39 +756,40 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ ok: true, message: 'Deposit request submitted. It will be credited after admin verification.', request: clean(req) }))
     }
 
-    // Withdraw (external — requires active Aurela card AND KYC)
+    // Withdraw (creates pending request — admin must approve; still requires KYC + active card)
     if (route === '/withdraw' && method === 'POST') {
       if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required before you can withdraw.', code: 'KYC_REQUIRED' }, { status: 403 }))
       const body = await request.json()
-      const { method: pm, amount, currency, destination } = body || {}
+      const { method: pm, amount, currency, destination, network, details } = body || {}
       const amt = Number(amount)
       if (!amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid withdraw' }, { status: 400 }))
+      if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
       const cardOk = await hasActiveCard(db, user.id)
       if (!cardOk) return handleCORS(NextResponse.json({ error: 'Card activation required. External withdrawals are enabled only after you activate an Aurela card.', code: 'CARD_REQUIRED' }, { status: 403 }))
       const wallet = await db.collection('wallets').findOne({ user_id: user.id, currency })
-      if (!wallet || wallet.balance < amt) return handleCORS(NextResponse.json({ error: 'Insufficient balance' }, { status: 400 }))
-      await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: -amt } })
-      const isCrypto = CRYPTO.includes(currency)
-      const tx = {
-        id: uuidv4(), type: 'withdraw', method: pm || (isCrypto ? 'crypto' : 'bank'), currency, amount: amt,
-        user_id: user.id, destination: destination || '',
-        from_username: user.username, to_username: pm || 'external',
-        status: 'completed', created_at: now()
+      if (!wallet || (wallet.balance - (wallet.locked || 0)) < amt) return handleCORS(NextResponse.json({ error: 'Insufficient balance' }, { status: 400 }))
+      // Lock funds on the wallet until admin approves/rejects
+      await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: -amt, locked: amt } })
+      const wreq = {
+        id: uuidv4(), type: 'withdraw_request', method: pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank'),
+        currency, amount: amt, user_id: user.id, username: user.username,
+        destination: destination || '', network: network || '', details: details || {},
+        wallet_id: wallet.id, status: 'pending', created_at: now()
       }
-      await db.collection('transactions').insertOne(tx)
-      const block = await writeBlock(db, {
-        type: 'withdraw', tx_id: tx.id, currency, amount: amt,
-        network: isCrypto ? 'external' : 'fiat_rail',
-        from_user_id: user.id, from_username: user.username, to_username: 'external',
-        destination: destination || '', method: pm
-      })
-      await audit(db, user.id, 'withdraw', { method: pm, amount: amt, currency, destination, block: block.block_number })
-      return handleCORS(NextResponse.json({ ok: true, transaction: clean(tx), block: clean(block) }))
+      await db.collection('withdraw_requests').insertOne(wreq)
+      await audit(db, user.id, 'withdraw.request', { method: pm, amount: amt, currency })
+      return handleCORS(NextResponse.json({ ok: true, message: 'Withdrawal request submitted. Funds are held on your account until admin approval.', request: clean(wreq) }))
     }
 
     // Cards
     if (route === '/cards' && method === 'GET') {
-      const cards = await db.collection('cards').find({ user_id: user.id }).sort({ created_at: -1 }).toArray()
+      // Auto-flip cards whose 24h activation window has elapsed
+      const nowTs = Date.now()
+      const dueCards = await db.collection('cards').find({ user_id: user.id, status: 'activating', usable_at: { $lte: new Date(nowTs) } }).toArray()
+      if (dueCards.length) {
+        await db.collection('cards').updateMany({ id: { $in: dueCards.map(c=>c.id) } }, { $set: { status: 'active', activated_at: now() } })
+      }
+      const cards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' } }).sort({ created_at: -1 }).toArray()
       return handleCORS(NextResponse.json({ cards: clean(cards) }))
     }
     if (route === '/cards/request' && method === 'POST') {
@@ -759,6 +797,10 @@ async function handleRoute(request, { params }) {
       const body = await request.json()
       const tier = (body?.tier || 'basic').toLowerCase()
       if (!CARD_TIERS[tier]) return handleCORS(NextResponse.json({ error: 'Invalid tier' }, { status: 400 }))
+      // Enforce: max 3 cards per user (one per tier), non-deleted only
+      const existingCards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' } }).toArray()
+      if (existingCards.length >= 3) return handleCORS(NextResponse.json({ error: 'You already hold the maximum of 3 Aurela cards. Delete one to request another.' }, { status: 400 }))
+      if (existingCards.some(c => c.tier === tier)) return handleCORS(NextResponse.json({ error: `You already have an Aurela ${tier} card. Only one card per tier is permitted.` }, { status: 400 }))
       const settings = await db.collection('settings').findOne({ id: 'platform' })
       const fee = settings?.card_activation_fees?.[tier] ?? CARD_TIERS[tier].activation_fee_usdt
       const card = {
@@ -777,6 +819,15 @@ async function handleRoute(request, { params }) {
       await db.collection('cards').insertOne(card)
       await audit(db, user.id, 'card.request', { tier })
       return handleCORS(NextResponse.json({ card: clean(card) }))
+    }
+    // User deletes their own card (must reapply + repay fee to get another of the same tier)
+    if (route.startsWith('/cards/') && method === 'DELETE') {
+      const cardId = route.split('/')[2]
+      const card = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
+      if (!card) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'deleted', deleted_at: now(), frozen: true } })
+      await audit(db, user.id, 'card.delete', { card_id: cardId, tier: card.tier })
+      return handleCORS(NextResponse.json({ ok: true, message: 'Card deleted. You may request a new one — the activation fee will need to be paid again.' }))
     }
     if (route.startsWith('/cards/') && route.endsWith('/activate') && method === 'POST') {
       if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required to activate a card.', code: 'KYC_REQUIRED' }, { status: 403 }))
@@ -819,13 +870,18 @@ async function handleRoute(request, { params }) {
       }
 
       if (route === '/admin/overview' && method === 'GET') {
-        const [users, txs, cards, kyc] = await Promise.all([
+        const [users, txs, cards, kyc, dw, ww] = await Promise.all([
           db.collection('users').countDocuments({}),
           db.collection('transactions').countDocuments({}),
-          db.collection('cards').countDocuments({}),
+          db.collection('cards').countDocuments({ status: { $ne: 'deleted' } }),
           db.collection('kyc').countDocuments({ status: 'pending' }),
+          db.collection('deposit_requests').countDocuments({ status: 'pending' }),
+          db.collection('withdraw_requests').countDocuments({ status: 'pending' }),
         ])
-        return handleCORS(NextResponse.json({ users, transactions: txs, cards, kyc_pending: kyc }))
+        return handleCORS(NextResponse.json({
+          users, transactions: txs, cards, kyc_pending: kyc,
+          deposits_pending: dw, withdrawals_pending: ww
+        }))
       }
       if (route === '/admin/users' && method === 'GET') {
         const url = new URL(request.url)
@@ -934,17 +990,98 @@ async function handleRoute(request, { params }) {
       }
       // Card activation admin approval
       if (route === '/admin/cards' && method === 'GET') {
-        const list = await db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation'] } }).sort({ activation_submitted_at: -1 }).toArray()
+        const list = await db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation','activating'] } }).sort({ activation_submitted_at: -1 }).toArray()
         return handleCORS(NextResponse.json({ cards: clean(list) }))
+      }
+      // Admin: withdrawal requests
+      if (route === '/admin/withdrawals' && method === 'GET') {
+        const list = await db.collection('withdraw_requests').find({}).sort({ created_at: -1 }).limit(500).toArray()
+        return handleCORS(NextResponse.json({ withdrawals: clean(list) }))
+      }
+      if (route.startsWith('/admin/withdrawals/') && method === 'POST') {
+        const parts = route.split('/')
+        const wid = parts[3]
+        const action = parts[4] // approve | reject
+        const wreq = await db.collection('withdraw_requests').findOne({ id: wid })
+        if (!wreq) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (wreq.status !== 'pending') return handleCORS(NextResponse.json({ error: 'Already processed' }, { status: 400 }))
+        const wallet = await db.collection('wallets').findOne({ id: wreq.wallet_id })
+        if (action === 'approve') {
+          // Funds already deducted at request time; just release the lock and mint transaction
+          if (wallet) await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { locked: -wreq.amount } })
+          const isCrypto = CRYPTO.includes(wreq.currency)
+          const tx = { id: uuidv4(), type: 'withdraw', method: wreq.method, currency: wreq.currency, amount: wreq.amount, user_id: wreq.user_id, destination: wreq.destination, network: wreq.network, from_username: wreq.username, to_username: 'external', status: 'completed', created_at: now(), withdraw_request_id: wreq.id }
+          await db.collection('transactions').insertOne(tx)
+          await writeBlock(db, { type: 'withdraw', tx_id: tx.id, currency: wreq.currency, amount: wreq.amount, network: isCrypto ? (wreq.network || 'external') : 'fiat_rail', from_user_id: wreq.user_id, from_username: wreq.username, to_username: 'external', destination: wreq.destination, method: wreq.method })
+          await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
+        } else {
+          // Rejected — return the locked funds to available balance
+          if (wallet) await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: wreq.amount, locked: -wreq.amount } })
+          await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id } })
+        }
+        await audit(db, user.id, `admin.withdraw.${action}`, { withdraw_id: wid })
+        return handleCORS(NextResponse.json({ ok: true }))
+      }
+      // Admin: single KYC detail (used for review modal)
+      if (route.startsWith('/admin/kyc/') && route.split('/').length === 4 && method === 'GET') {
+        const kycId = route.split('/')[3]
+        const rec = await db.collection('kyc').findOne({ id: kycId })
+        if (!rec) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        const owner = await db.collection('users').findOne({ id: rec.user_id })
+        return handleCORS(NextResponse.json({ kyc: clean(rec), user: clean(owner) }))
+      }
+      // Admin: notifications = aggregate of pending actionable items
+      if (route === '/admin/notifications' && method === 'GET') {
+        const [depositPending, withdrawPending, kycPending, cardPending] = await Promise.all([
+          db.collection('deposit_requests').countDocuments({ status: 'pending' }),
+          db.collection('withdraw_requests').countDocuments({ status: 'pending' }),
+          db.collection('kyc').countDocuments({ status: 'pending' }),
+          db.collection('cards').countDocuments({ status: { $in: ['pending_verification','pending_activation'] } })
+        ])
+        const recent = await Promise.all([
+          db.collection('deposit_requests').find({ status: 'pending' }).sort({ created_at: -1 }).limit(5).toArray(),
+          db.collection('withdraw_requests').find({ status: 'pending' }).sort({ created_at: -1 }).limit(5).toArray(),
+          db.collection('kyc').find({ status: 'pending' }).sort({ submitted_at: -1 }).limit(5).toArray(),
+          db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation'] } }).sort({ activation_submitted_at: -1 }).limit(5).toArray()
+        ])
+        const items = []
+        recent[0].forEach(d => items.push({ kind: 'deposit', id: d.id, title: `${d.username || d.to_username || 'user'} → deposit ${d.amount} ${d.currency}`, at: d.created_at }))
+        recent[1].forEach(w => items.push({ kind: 'withdraw', id: w.id, title: `${w.username} → withdraw ${w.amount} ${w.currency}`, at: w.created_at }))
+        recent[2].forEach(k => items.push({ kind: 'kyc', id: k.id, title: `${k.full_name || 'user'} submitted KYC`, at: k.submitted_at }))
+        recent[3].forEach(c => items.push({ kind: 'card', id: c.id, title: `Card activation (${c.tier})`, at: c.activation_submitted_at || c.created_at }))
+        items.sort((a,b) => new Date(b.at) - new Date(a.at))
+        return handleCORS(NextResponse.json({
+          counts: { deposits: depositPending, withdrawals: withdrawPending, kyc: kycPending, cards: cardPending },
+          total: depositPending + withdrawPending + kycPending + cardPending,
+          items: items.slice(0, 20)
+        }))
+      }
+      // Admin: delete a card entirely (also user-facing effect: card removed)
+      if (route.startsWith('/admin/cards/') && route.split('/').length === 4 && method === 'DELETE') {
+        const cardId = route.split('/')[3]
+        await db.collection('cards').deleteOne({ id: cardId })
+        await audit(db, user.id, 'admin.card.delete', { card_id: cardId })
+        return handleCORS(NextResponse.json({ ok: true }))
+      }
+      // Admin: delete a transaction (audit-logged; does NOT reverse balances)
+      if (route.startsWith('/admin/transactions/') && method === 'DELETE') {
+        const txId = route.split('/')[3]
+        await db.collection('transactions').deleteOne({ id: txId })
+        await audit(db, user.id, 'admin.tx.delete', { tx_id: txId })
+        return handleCORS(NextResponse.json({ ok: true }))
       }
       if (route.startsWith('/admin/cards/') && method === 'POST') {
         const parts = route.split('/')
         const cardId = parts[3]
         const action = parts[4] // approve | reject
+        const body = await request.json().catch(()=>({}))
         const card = await db.collection('cards').findOne({ id: cardId })
         if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
         if (action === 'approve') {
-          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'active', activated_at: now() } })
+          const immediate = !!body?.activate_now
+          const finalStatus = immediate ? 'active' : 'activating'
+          const finalUsable = immediate ? now() : new Date(Date.now() + 24*60*60*1000)
+          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), usable_at: finalUsable, activated_at: immediate ? now() : null } })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
         } else {
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'rejected' } })
