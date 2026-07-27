@@ -19,7 +19,7 @@ import {
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
   Users, Settings, ScrollText, ChevronDown
 } from 'lucide-react'
-import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin } from './AdminPanel'
+import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 
 const USER_NAV = [
@@ -37,6 +37,8 @@ const ADMIN_NAV = [
   { id: 'admin_overview', label: 'Admin Overview', icon: LayoutDashboard },
   { id: 'admin_users', label: 'Users', icon: Users },
   { id: 'admin_kyc', label: 'KYC Review', icon: ShieldCheck },
+  { id: 'admin_deposits', label: 'Deposit Requests', icon: ArrowDownToLine },
+  { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
   { id: 'admin_settings', label: 'Platform Settings', icon: Settings },
@@ -65,6 +67,20 @@ export function Dashboard() {
   const loadAll = async () => { await Promise.all([loadWallets(), loadTxs(), loadCards()]) }
 
   useEffect(() => { loadAll() }, [])
+
+  // Global navigation via custom events (used from KycGate, WithdrawTab card gate, etc.)
+  useEffect(() => {
+    const go = (id) => () => setTab(id)
+    const kyc = go('kyc'), cards = go('cards'), transfer = go('transfer')
+    window.addEventListener('aurela:goto-kyc', kyc)
+    window.addEventListener('aurela:goto-cards', cards)
+    window.addEventListener('aurela:goto-transfer', transfer)
+    return () => {
+      window.removeEventListener('aurela:goto-kyc', kyc)
+      window.removeEventListener('aurela:goto-cards', cards)
+      window.removeEventListener('aurela:goto-transfer', transfer)
+    }
+  }, [])
 
   const fiatWallets = wallets.filter(w => w.type === 'fiat')
   const cryptoWallets = wallets.filter(w => w.type === 'crypto')
@@ -179,6 +195,8 @@ export function Dashboard() {
               {tab === 'admin_overview' && isAdmin && <AdminOverview/>}
               {tab === 'admin_users' && isAdmin && <UsersAdmin/>}
               {tab === 'admin_kyc' && isAdmin && <KycAdmin/>}
+              {tab === 'admin_deposits' && isAdmin && <DepositsAdmin/>}
+              {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
               {tab === 'admin_settings' && isAdmin && <SettingsAdmin/>}
@@ -454,32 +472,38 @@ function TransferTab({ wallets, onDone }) {
 }
 
 function CardsTab({ cards, onChange, onWalletChange }) {
-  const { api, config } = useApp()
+  const { api, user, config } = useApp()
   const [openReq, setOpenReq] = useState(false)
   const [openAct, setOpenAct] = useState(null)
   const [tier, setTier] = useState('basic')
-  const [actNetwork, setActNetwork] = useState('ERC20')
+  const [actNetwork, setActNetwork] = useState('TRC20')
+  const [actTxHash, setActTxHash] = useState('')
   const [showCvv, setShowCvv] = useState({})
   const [loading, setLoading] = useState(false)
+  const kycOK = user?.kyc_status === 'approved'
 
   const usdtWallets = (config?.platform_wallets || []).filter(p => p.asset === 'USDT')
   const activeActWallet = usdtWallets.find(p => p.network === actNetwork) || usdtWallets[0]
 
   const request = async () => {
+    if (!kycOK) return toast.error('Complete identity verification (KYC) first')
     setLoading(true)
     try {
       await api.post('/cards/request', { tier })
       toast.success('Card issued — activate to use')
       setOpenReq(false); onChange && onChange()
-    } catch(e) { toast.error(e.message) } finally { setLoading(false) }
+    } catch(e) {
+      if (e.message.includes('verification')) toast.error(e.message)
+      else toast.error(e.message)
+    } finally { setLoading(false) }
   }
-  const activate = async (card, method) => {
+  const activate = async (card) => {
+    if (!actTxHash || actTxHash.length < 8) return toast.error('Paste a valid on-chain USDT transaction hash')
     setLoading(true)
     try {
-      const body = method === 'wallet' ? { pay_from_wallet: true } : { tx_hash: 'DEMO' + Date.now(), network: actNetwork }
-      await api.post(`/cards/${card.id}/activate`, body)
-      toast.success('Card activated ⚡')
-      setOpenAct(null); onChange && onChange(); onWalletChange && onWalletChange()
+      await api.post(`/cards/${card.id}/activate`, { tx_hash: actTxHash.trim(), network: actNetwork })
+      toast.success('Activation submitted — waiting for admin verification')
+      setOpenAct(null); setActTxHash(''); onChange && onChange()
     } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
   const freeze = async (card, frozen) => {
@@ -583,13 +607,12 @@ function CardsTab({ cards, onChange, onWalletChange }) {
         </DialogContent>
       </Dialog>
 
-      {/* Activate dialog */}
       <Dialog open={!!openAct} onOpenChange={v => !v && setOpenAct(null)}>
-        <DialogContent className="bg-onyx-900 border-gold-500/20">
+        <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-lg">
           <DialogHeader><DialogTitle className="font-display">Activate your card</DialogTitle></DialogHeader>
           {openAct && (
             <div className="space-y-4">
-              <div className="text-sm text-muted-foreground">Pay <span className="text-gold">{openAct.activation_fee_usdt} USDT</span> to activate. Choose your preferred network.</div>
+              <div className="text-sm text-muted-foreground">Send exactly <span className="text-gold font-semibold">{openAct.activation_fee_usdt} USDT</span> from your external wallet to the Aurela treasury address below, then paste the transaction hash for verification.</div>
               <div>
                 <Label className="text-xs uppercase tracking-widest text-muted-foreground">USDT network</Label>
                 <Select value={actNetwork} onValueChange={setActNetwork}>
@@ -601,15 +624,21 @@ function CardsTab({ cards, onChange, onWalletChange }) {
               </div>
               {activeActWallet && (
                 <div className="p-3 rounded-lg bg-secondary">
-                  <div className="text-[10px] uppercase text-muted-foreground">Aurela Treasury · {activeActWallet.network}</div>
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] uppercase text-muted-foreground">Aurela Treasury · {activeActWallet.network}</div>
+                    <button onClick={() => { navigator.clipboard.writeText(activeActWallet.address); toast.success('Copied') }} className="text-muted-foreground hover:text-gold"><Copy className="h-3.5 w-3.5"/></button>
+                  </div>
                   <div className="font-mono text-gold text-sm break-all mt-1">{activeActWallet.address}</div>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3">
-                <Button onClick={() => activate(openAct, 'wallet')} disabled={loading} className="gold-btn">Pay from USDT balance</Button>
-                <Button onClick={() => activate(openAct, 'tx')} disabled={loading} variant="outline" className="border-gold-500/40">I sent USDT (verify)</Button>
+              <div>
+                <Label className="text-xs uppercase tracking-widest text-muted-foreground">Transaction hash</Label>
+                <Input value={actTxHash} onChange={e => setActTxHash(e.target.value)} placeholder="0x… or the on-chain tx hash" className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-xs"/>
               </div>
-              <div className="text-xs text-muted-foreground">The verify button simulates on-chain confirmation for the demo. Real deposits are credited by administration after network confirmation.</div>
+              <Button onClick={() => activate(openAct)} disabled={loading || !actTxHash} className="gold-btn w-full h-12 rounded-xl">
+                {loading ? 'Submitting…' : 'Submit for verification'}
+              </Button>
+              <div className="text-xs text-muted-foreground">Your card will activate after Aurela admins verify the on-chain transaction. Payments from your internal balance are not accepted — funds must arrive from an external wallet.</div>
             </div>
           )}
         </DialogContent>
@@ -618,9 +647,38 @@ function CardsTab({ cards, onChange, onWalletChange }) {
   )
 }
 
+function KycGate({ children, action }) {
+  const { user } = useApp()
+  if (user?.kyc_status === 'approved') return children
+  const status = user?.kyc_status || 'unverified'
+  const msg = status === 'pending'
+    ? 'Your identity verification is under review. This usually takes a few hours. You will be notified once it is approved.'
+    : status === 'rejected'
+      ? 'Your identity verification was rejected. Please review your submission and try again.'
+      : 'To ' + action + ', please complete identity verification (KYC) first. This is required by our banking partners and takes only a few minutes.'
+  return (
+    <div className="card-luxury rounded-2xl p-6 sm:p-8 max-w-2xl">
+      <div className="flex items-start gap-4">
+        <div className="h-12 w-12 rounded-xl flex items-center justify-center bg-gradient-to-br from-gold-500/25 to-gold-800/10 border border-gold-500/40 shrink-0">
+          <ShieldCheck className="h-6 w-6 text-gold-bright"/>
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-display text-xl sm:text-2xl">Identity verification required</div>
+          <p className="text-sm text-muted-foreground mt-2">{msg}</p>
+          <div className="mt-6">
+            <Button className="gold-btn rounded-full" onClick={() => window.dispatchEvent(new CustomEvent('aurela:goto-kyc'))}>
+              {status === 'pending' ? 'View KYC status' : 'Start verification'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function DepositTab({ wallets, onDone }) {
-  const { api, config } = useApp()
-  const [form, setForm] = useState({ method: 'bank', currency: 'USD', amount: '', network: '' })
+  const { api, user, config } = useApp()
+  const [form, setForm] = useState({ method: 'bank', currency: 'USD', amount: '', network: '', note: '', tx_hash: '' })
   const [loading, setLoading] = useState(false)
   const isCrypto = wallets.find(w => w.currency === form.currency)?.type === 'crypto'
   const cryptoWallet = wallets.find(w => w.type === 'crypto' && w.currency === form.currency)
@@ -630,18 +688,20 @@ function DepositTab({ wallets, onDone }) {
   const submit = async () => {
     setLoading(true)
     try {
-      await api.post('/deposit', { method: isCrypto ? 'crypto' : form.method, currency: form.currency, amount: Number(form.amount) })
-      toast.success('Deposit received')
+      await api.post('/deposit', { method: isCrypto ? 'crypto' : form.method, currency: form.currency, amount: Number(form.amount), note: form.note, tx_hash: form.tx_hash })
+      toast.success('Deposit request submitted — awaiting admin verification')
       onDone && onDone()
-      setForm({ ...form, amount: '' })
+      setForm({ ...form, amount: '', note: '', tx_hash: '' })
     } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
+
+  if (user?.kyc_status !== 'approved') return <KycGate action="deposit funds"/>
 
   return (
     <div className="grid lg:grid-cols-2 gap-6">
       <div className="card-luxury rounded-2xl p-6">
         <div className="font-display text-2xl">Deposit funds</div>
-        <div className="text-sm text-muted-foreground">Bank, UPI, card or crypto. Fiat is instant for the demo. Crypto deposits use Aurela treasury addresses.</div>
+        <div className="text-sm text-muted-foreground">Bank, UPI, card or crypto. All deposits go through a short admin verification before being credited — this protects our network from fraud.</div>
         <div className="mt-6 space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -681,8 +741,18 @@ function DepositTab({ wallets, onDone }) {
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Amount</Label>
             <Input type="number" step="any" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
           </div>
-          <Button onClick={submit} disabled={loading || !form.amount} className="gold-btn w-full h-12 rounded-xl">{loading?'Processing…':'Confirm deposit'}</Button>
-          {isCrypto && <div className="text-xs text-muted-foreground">For crypto, send from your external wallet to the address on the right. This form records the deposit against your account after admin credits it.</div>}
+          {isCrypto && (
+            <div>
+              <Label className="text-xs uppercase tracking-widest text-muted-foreground">Transaction hash (optional but recommended)</Label>
+              <Input value={form.tx_hash} onChange={e => setForm({ ...form, tx_hash: e.target.value })} placeholder="0x… on-chain tx hash" className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-xs"/>
+            </div>
+          )}
+          <div>
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">Note for admin (optional)</Label>
+            <Input value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} placeholder={isCrypto ? 'e.g. sent from Binance' : 'e.g. sender UTR / reference'} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          </div>
+          <Button onClick={submit} disabled={loading || !form.amount} className="gold-btn w-full h-12 rounded-xl">{loading?'Processing…':'Submit deposit request'}</Button>
+          <div className="text-xs text-muted-foreground">All deposits require manual admin verification. Once verified, funds will appear in your balance automatically.</div>
         </div>
       </div>
 
@@ -720,7 +790,7 @@ function DepositTab({ wallets, onDone }) {
 }
 
 function WithdrawTab({ wallets, onDone }) {
-  const { api } = useApp()
+  const { api, user } = useApp()
   const [form, setForm] = useState({ method: 'bank', currency: 'USD', amount: '', destination: '' })
   const [loading, setLoading] = useState(false)
   const [cards, setCards] = useState([])
@@ -745,6 +815,8 @@ function WithdrawTab({ wallets, onDone }) {
       }
     } finally { setLoading(false) }
   }
+
+  if (user?.kyc_status !== 'approved') return <KycGate action="withdraw funds"/>
 
   if (!hasActiveCard) {
     return (

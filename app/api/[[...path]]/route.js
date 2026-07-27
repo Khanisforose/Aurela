@@ -697,28 +697,31 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ ok: true, transaction: clean(tx), block: clean(block) }))
     }
 
-    // Deposit (mocked instant credit)
+    // Helper: KYC gate
+    const requireKyc = () => user.kyc_status !== 'approved'
+
+    // Deposit (creates pending request — admin must approve)
     if (route === '/deposit' && method === 'POST') {
+      if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required before you can deposit.', code: 'KYC_REQUIRED' }, { status: 403 }))
       const body = await request.json()
-      const { method: pm, amount, currency } = body || {}
+      const { method: pm, amount, currency, note, tx_hash } = body || {}
       const amt = Number(amount)
       if (!amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid deposit' }, { status: 400 }))
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
-      const wallet = await db.collection('wallets').findOne({ user_id: user.id, currency })
-      if (!wallet) return handleCORS(NextResponse.json({ error: 'Wallet not found' }, { status: 400 }))
-      await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: amt } })
-      const tx = {
-        id: uuidv4(), type: 'deposit', method: pm || 'bank', currency, amount: amt,
+      const req = {
+        id: uuidv4(), type: 'deposit_request', method: pm || 'bank', currency, amount: amt,
         user_id: user.id, from_username: pm || 'external', to_username: user.username,
-        status: 'completed', created_at: now()
+        tx_hash: tx_hash || '', note: note || '',
+        status: 'pending', created_at: now()
       }
-      await db.collection('transactions').insertOne(tx)
-      await audit(db, user.id, 'deposit', { method: pm, amount: amt, currency })
-      return handleCORS(NextResponse.json({ ok: true, transaction: clean(tx) }))
+      await db.collection('deposit_requests').insertOne(req)
+      await audit(db, user.id, 'deposit.request', { method: pm, amount: amt, currency })
+      return handleCORS(NextResponse.json({ ok: true, message: 'Deposit request submitted. It will be credited after admin verification.', request: clean(req) }))
     }
 
-    // Withdraw (external — requires active Aurela card)
+    // Withdraw (external — requires active Aurela card AND KYC)
     if (route === '/withdraw' && method === 'POST') {
+      if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required before you can withdraw.', code: 'KYC_REQUIRED' }, { status: 403 }))
       const body = await request.json()
       const { method: pm, amount, currency, destination } = body || {}
       const amt = Number(amount)
@@ -752,6 +755,7 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ cards: clean(cards) }))
     }
     if (route === '/cards/request' && method === 'POST') {
+      if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required to request a card.', code: 'KYC_REQUIRED' }, { status: 403 }))
       const body = await request.json()
       const tier = (body?.tier || 'basic').toLowerCase()
       if (!CARD_TIERS[tier]) return handleCORS(NextResponse.json({ error: 'Invalid tier' }, { status: 400 }))
@@ -775,34 +779,18 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ card: clean(card) }))
     }
     if (route.startsWith('/cards/') && route.endsWith('/activate') && method === 'POST') {
+      if (requireKyc()) return handleCORS(NextResponse.json({ error: 'Identity verification required to activate a card.', code: 'KYC_REQUIRED' }, { status: 403 }))
       const cardId = route.split('/')[2]
       const body = await request.json()
-      const { tx_hash, pay_from_wallet, network } = body || {}
+      const { tx_hash, network } = body || {}
       const card = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
       if (!card) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
       if (card.status === 'active') return handleCORS(NextResponse.json({ error: 'Already active' }, { status: 400 }))
-      // Two activation paths for MVP: (1) provide USDT tx_hash (mock accepted), (2) pay from internal USDT wallet
-      if (pay_from_wallet) {
-        const usdt = await db.collection('wallets').findOne({ user_id: user.id, currency: 'USDT' })
-        if (!usdt || usdt.balance < card.activation_fee_usdt) return handleCORS(NextResponse.json({ error: 'Insufficient USDT balance' }, { status: 400 }))
-        await db.collection('wallets').updateOne({ id: usdt.id }, { $inc: { balance: -card.activation_fee_usdt } })
-        const actTx = {
-          id: uuidv4(), type: 'card_activation', currency: 'USDT', amount: card.activation_fee_usdt,
-          user_id: user.id, from_username: user.username, to_username: 'aurela_treasury',
-          card_id: card.id, status: 'completed', created_at: now()
-        }
-        await db.collection('transactions').insertOne(actTx)
-        await writeBlock(db, {
-          type: 'card_activation', tx_id: actTx.id, currency: 'USDT', amount: card.activation_fee_usdt,
-          network: 'AURELA', from_user_id: user.id, from_username: user.username, to_username: 'aurela_treasury', card_id: card.id
-        })
-      } else {
-        if (!tx_hash || tx_hash.length < 8) return handleCORS(NextResponse.json({ error: 'Invalid tx hash' }, { status: 400 }))
-      }
-      await db.collection('cards').updateOne({ id: card.id }, { $set: { status: 'active', activated_at: now(), activation_tx_hash: tx_hash || 'internal', activation_network_used: network || card.activation_network } })
-      await audit(db, user.id, 'card.activate', { card_id: card.id, method: pay_from_wallet ? 'wallet' : 'tx_hash', network })
+      if (!tx_hash || tx_hash.length < 8) return handleCORS(NextResponse.json({ error: 'A valid on-chain USDT transaction hash is required.' }, { status: 400 }))
+      await db.collection('cards').updateOne({ id: card.id }, { $set: { status: 'pending_verification', activation_tx_hash: tx_hash, activation_network_used: network || card.activation_network, activation_submitted_at: now() } })
+      await audit(db, user.id, 'card.activate.submit', { card_id: card.id, tx_hash, network })
       const upd = await db.collection('cards').findOne({ id: card.id })
-      return handleCORS(NextResponse.json({ card: clean(upd) }))
+      return handleCORS(NextResponse.json({ card: clean(upd), message: 'Transaction hash submitted. Card will be activated after on-chain verification by admin.' }))
     }
     if (route.startsWith('/cards/') && route.endsWith('/freeze') && method === 'POST') {
       const cardId = route.split('/')[2]
@@ -918,6 +906,53 @@ async function handleRoute(request, { params }) {
         const txs = await db.collection('transactions').find({}).sort({ created_at: -1 }).limit(500).toArray()
         return handleCORS(NextResponse.json({ transactions: clean(txs) }))
       }
+      // Deposit request admin endpoints
+      if (route === '/admin/deposits' && method === 'GET') {
+        const list = await db.collection('deposit_requests').find({}).sort({ created_at: -1 }).limit(500).toArray()
+        return handleCORS(NextResponse.json({ deposits: clean(list) }))
+      }
+      if (route.startsWith('/admin/deposits/') && method === 'POST') {
+        const parts = route.split('/')
+        const depId = parts[3]
+        const action = parts[4] // approve | reject
+        const req = await db.collection('deposit_requests').findOne({ id: depId })
+        if (!req) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (req.status !== 'pending') return handleCORS(NextResponse.json({ error: 'Already processed' }, { status: 400 }))
+        if (action === 'approve') {
+          const wallet = await db.collection('wallets').findOne({ user_id: req.user_id, currency: req.currency })
+          if (!wallet) return handleCORS(NextResponse.json({ error: 'Wallet missing' }, { status: 400 }))
+          await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: req.amount } })
+          const tx = { id: uuidv4(), type: 'deposit', method: req.method, currency: req.currency, amount: req.amount, user_id: req.user_id, from_username: req.method, to_username: req.to_username, status: 'completed', created_at: now(), deposit_request_id: req.id }
+          await db.collection('transactions').insertOne(tx)
+          await writeBlock(db, { type: 'deposit', tx_id: tx.id, currency: req.currency, amount: req.amount, network: CRYPTO.includes(req.currency) ? 'external' : 'fiat_rail', to_user_id: req.user_id, to_username: req.to_username, from_username: req.method })
+          await db.collection('deposit_requests').updateOne({ id: depId }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
+        } else {
+          await db.collection('deposit_requests').updateOne({ id: depId }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id } })
+        }
+        await audit(db, user.id, `admin.deposit.${action}`, { deposit_id: depId })
+        return handleCORS(NextResponse.json({ ok: true }))
+      }
+      // Card activation admin approval
+      if (route === '/admin/cards' && method === 'GET') {
+        const list = await db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation'] } }).sort({ activation_submitted_at: -1 }).toArray()
+        return handleCORS(NextResponse.json({ cards: clean(list) }))
+      }
+      if (route.startsWith('/admin/cards/') && method === 'POST') {
+        const parts = route.split('/')
+        const cardId = parts[3]
+        const action = parts[4] // approve | reject
+        const card = await db.collection('cards').findOne({ id: cardId })
+        if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (action === 'approve') {
+          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'active', activated_at: now() } })
+          await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
+        } else {
+          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'rejected' } })
+        }
+        await audit(db, user.id, `admin.card.${action}`, { card_id: cardId })
+        return handleCORS(NextResponse.json({ ok: true }))
+      }
+
       if (route === '/admin/audit' && method === 'GET') {
         const logs = await db.collection('audit_logs').find({}).sort({ timestamp: -1 }).limit(500).toArray()
         return handleCORS(NextResponse.json({ audit: clean(logs) }))

@@ -1,1339 +1,937 @@
 #!/usr/bin/env python3
 """
-Aurela Backend API Test Suite
-Tests all backend endpoints as per review request
+Aurela Backend Regression + New Feature Test
+Focused on: KYC gating, deposit request flow, card activation via external USDT, regression sanity
 """
-
 import requests
 import json
+import os
 import sys
-from typing import Dict, Any
+from datetime import datetime
+from pymongo import MongoClient
 
 # Base URL from environment
-BASE_URL = "https://aurela-preview.preview.emergentagent.com/api"
+BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://aurela-preview.preview.emergentagent.com')
+API_URL = f"{BASE_URL}/api"
 
-# Test data
-ADMIN_EMAIL = "admin@aurela.io"
-ADMIN_PASSWORD = "Admin@123"
+# MongoDB connection
+MONGO_URL = os.getenv('MONGO_URL', 'mongodb://localhost:27017')
+DB_NAME = os.getenv('DB_NAME', 'aurela')
 
-# Test users
-USER1_DATA = {
-    "email": "sophia.martinez@example.com",
-    "username": "sophia_m",
-    "password": "SecurePass123!",
-    "full_name": "Sophia Martinez",
-    "phone": "+1-555-0101"
+# Test credentials
+ADMIN_EMAIL = "admin@aurelawallet.com"
+ADMIN_PASSWORD = "Aurela@123#"
+
+def get_otp_from_db(email):
+    """Fetch OTP code from MongoDB for testing purposes"""
+    try:
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        pending = db.pending_signups.find_one({'email': email.lower()})
+        if pending:
+            return pending.get('code')
+        return None
+    except Exception as e:
+        log_fail(f"Failed to fetch OTP from DB: {e}")
+        return None
+
+# Color codes for output
+GREEN = '\033[92m'
+RED = '\033[91m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
+RESET = '\033[0m'
+
+def log(msg, color=RESET):
+    print(f"{color}{msg}{RESET}")
+
+def log_pass(msg):
+    log(f"✅ PASS: {msg}", GREEN)
+
+def log_fail(msg):
+    log(f"❌ FAIL: {msg}", RED)
+
+def log_info(msg):
+    log(f"ℹ️  INFO: {msg}", BLUE)
+
+def log_section(msg):
+    log(f"\n{'='*80}\n{msg}\n{'='*80}", YELLOW)
+
+# Test state
+test_results = {
+    'section_1_kyc_gating': {'passed': 0, 'failed': 0, 'tests': []},
+    'section_2_deposit_flow': {'passed': 0, 'failed': 0, 'tests': []},
+    'section_3_card_activation': {'passed': 0, 'failed': 0, 'tests': []},
+    'section_4_regression': {'passed': 0, 'failed': 0, 'tests': []},
 }
 
-USER2_DATA = {
-    "email": "james.chen@example.com",
-    "username": "james_chen",
-    "password": "SecurePass456!",
-    "full_name": "James Chen",
-    "phone": "+1-555-0202"
-}
+def record_test(section, test_name, passed, details=''):
+    result = 'PASS' if passed else 'FAIL'
+    test_results[section]['tests'].append({
+        'name': test_name,
+        'result': result,
+        'details': details
+    })
+    if passed:
+        test_results[section]['passed'] += 1
+        log_pass(f"{test_name}: {details}")
+    else:
+        test_results[section]['failed'] += 1
+        log_fail(f"{test_name}: {details}")
 
-# Global state
-admin_token = None
-user1_token = None
-user2_token = None
-user1_id = None
-user2_id = None
-test_card_id = None
-test_kyc_id = None
+def print_summary():
+    log_section("TEST SUMMARY")
+    total_passed = 0
+    total_failed = 0
+    
+    for section, data in test_results.items():
+        section_name = section.replace('_', ' ').title()
+        passed = data['passed']
+        failed = data['failed']
+        total = passed + failed
+        total_passed += passed
+        total_failed += failed
+        
+        status = GREEN if failed == 0 else RED
+        log(f"{status}{section_name}: {passed}/{total} passed{RESET}")
+        
+        for test in data['tests']:
+            color = GREEN if test['result'] == 'PASS' else RED
+            log(f"  {color}{test['result']}: {test['name']}{RESET}")
+            if test['details']:
+                log(f"       {test['details']}", BLUE)
+    
+    log(f"\n{'='*80}")
+    overall_status = GREEN if total_failed == 0 else RED
+    log(f"{overall_status}OVERALL: {total_passed}/{total_passed + total_failed} tests passed{RESET}")
+    log(f"{'='*80}\n")
+    
+    return total_failed == 0
 
-def log_test(name: str):
-    """Log test name"""
-    print(f"\n{'='*80}")
-    print(f"TEST: {name}")
-    print('='*80)
-
-def log_success(msg: str):
-    """Log success message"""
-    print(f"✅ SUCCESS: {msg}")
-
-def log_error(msg: str):
-    """Log error message"""
-    print(f"❌ FAILURE: {msg}")
-
-def log_info(msg: str):
-    """Log info message"""
-    print(f"ℹ️  INFO: {msg}")
-
-def make_request(method: str, endpoint: str, token: str = None, data: Dict = None, params: Dict = None) -> tuple:
-    """Make HTTP request and return (success, response_data, status_code)"""
-    url = f"{BASE_URL}{endpoint}"
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+# ============================================================
+# SECTION 1: KYC GATING (P0)
+# ============================================================
+def test_section_1_kyc_gating():
+    log_section("SECTION 1: KYC GATING (P0)")
+    
+    # Register a fresh user
+    log_info("Registering fresh user with kyc_status='unverified'...")
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    test_email = f"kyctest_{timestamp}@test.com"
+    test_username = f"kyctest_{timestamp}"
+    test_password = "TestPass123!"
     
     try:
-        if method == "GET":
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
-        elif method == "POST":
-            resp = requests.post(url, headers=headers, json=data, timeout=10)
-        elif method == "PUT":
-            resp = requests.put(url, headers=headers, json=data, timeout=10)
-        elif method == "DELETE":
-            resp = requests.delete(url, headers=headers, timeout=10)
-        else:
-            return False, {"error": "Invalid method"}, 0
+        # Step 1: Init registration
+        init_res = requests.post(f"{API_URL}/auth/register/init", json={
+            'email': test_email,
+            'username': test_username,
+            'password': test_password,
+            'full_name': 'KYC Test User'
+        }, timeout=10)
         
-        try:
-            response_data = resp.json()
-        except Exception:
-            response_data = {"raw": resp.text}
+        if init_res.status_code != 200:
+            record_test('section_1_kyc_gating', 'User Registration Init', False, f"Init failed: {init_res.status_code} {init_res.text}")
+            return None
         
-        return resp.ok, response_data, resp.status_code
-    except Exception as e:
-        return False, {"error": str(e)}, 0
-
-# ============================================================
-# 1. PUBLIC ENDPOINTS
-# ============================================================
-
-def test_health():
-    """Test GET /health"""
-    log_test("Public: GET /health")
-    success, data, status = make_request("GET", "/health")
-    
-    if not success or status != 200:
-        log_error(f"Health check failed: {status} - {data}")
-        return False
-    
-    if data.get("ok") != True:
-        log_error(f"Health check returned unexpected data: {data}")
-        return False
-    
-    log_success("Health endpoint working")
-    return True
-
-def test_config():
-    """Test GET /config"""
-    log_test("Public: GET /config")
-    success, data, status = make_request("GET", "/config")
-    
-    if not success or status != 200:
-        log_error(f"Config failed: {status} - {data}")
-        return False
-    
-    # Verify required fields
-    required = ["fiat", "crypto", "networks", "card_tiers", "activation_wallet", "activation_fees"]
-    for field in required:
-        if field not in data:
-            log_error(f"Config missing field: {field}")
-            return False
-    
-    # Verify counts
-    if len(data["fiat"]) != 10:
-        log_error(f"Expected 10 fiat currencies, got {len(data['fiat'])}")
-        return False
-    
-    if len(data["crypto"]) != 10:
-        log_error(f"Expected 10 crypto currencies, got {len(data['crypto'])}")
-        return False
-    
-    log_success(f"Config endpoint working: {len(data['fiat'])} fiat, {len(data['crypto'])} crypto")
-    return True
-
-def test_rates():
-    """Test GET /rates"""
-    log_test("Public: GET /rates")
-    success, data, status = make_request("GET", "/rates")
-    
-    if not success or status != 200:
-        log_error(f"Rates failed: {status} - {data}")
-        return False
-    
-    if "fx" not in data or "crypto_usd" not in data:
-        log_error(f"Rates missing fx or crypto_usd: {data}")
-        return False
-    
-    log_success(f"Rates endpoint working: {len(data['fx'])} fx rates, {len(data['crypto_usd'])} crypto rates")
-    return True
-
-# ============================================================
-# 2. AUTH
-# ============================================================
-
-def test_register_user1():
-    """Test POST /auth/register for user1"""
-    global user1_token, user1_id
-    log_test("Auth: Register User 1")
-    
-    success, data, status = make_request("POST", "/auth/register", data=USER1_DATA)
-    
-    if not success or status != 200:
-        log_error(f"Registration failed: {status} - {data}")
-        return False
-    
-    if "token" not in data or "user" not in data:
-        log_error(f"Registration response missing token or user: {data}")
-        return False
-    
-    user = data["user"]
-    
-    # Verify user fields
-    if user.get("email") != USER1_DATA["email"].lower():
-        log_error(f"Email mismatch: {user.get('email')} != {USER1_DATA['email'].lower()}")
-        return False
-    
-    if user.get("role") != "user":
-        log_error(f"Expected role=user, got {user.get('role')}")
-        return False
-    
-    if user.get("kyc_status") != "unverified":
-        log_error(f"Expected kyc_status=unverified, got {user.get('kyc_status')}")
-        return False
-    
-    user1_token = data["token"]
-    user1_id = user["id"]
-    
-    log_success(f"User1 registered: {user['username']} (ID: {user1_id})")
-    return True
-
-def test_verify_wallets_user1():
-    """Verify user1 has 20 wallets with welcome bonuses"""
-    log_test("Auth: Verify User1 Wallets (20 wallets, USD=1000, USDT=100)")
-    
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Failed to get wallets: {status} - {data}")
-        return False
-    
-    wallets = data.get("wallets", [])
-    
-    if len(wallets) != 20:
-        log_error(f"Expected 20 wallets, got {len(wallets)}")
-        return False
-    
-    # Find USD and USDT wallets
-    usd_wallet = next((w for w in wallets if w["currency"] == "USD"), None)
-    usdt_wallet = next((w for w in wallets if w["currency"] == "USDT"), None)
-    
-    if not usd_wallet:
-        log_error("USD wallet not found")
-        return False
-    
-    if not usdt_wallet:
-        log_error("USDT wallet not found")
-        return False
-    
-    if usd_wallet["balance"] != 1000:
-        log_error(f"Expected USD balance=1000, got {usd_wallet['balance']}")
-        return False
-    
-    if usdt_wallet["balance"] != 100:
-        log_error(f"Expected USDT balance=100, got {usdt_wallet['balance']}")
-        return False
-    
-    log_success(f"User1 has 20 wallets: USD={usd_wallet['balance']}, USDT={usdt_wallet['balance']}")
-    return True
-
-def test_register_user2():
-    """Test POST /auth/register for user2"""
-    global user2_token, user2_id
-    log_test("Auth: Register User 2")
-    
-    success, data, status = make_request("POST", "/auth/register", data=USER2_DATA)
-    
-    if not success or status != 200:
-        log_error(f"Registration failed: {status} - {data}")
-        return False
-    
-    user2_token = data["token"]
-    user2_id = data["user"]["id"]
-    
-    log_success(f"User2 registered: {data['user']['username']} (ID: {user2_id})")
-    return True
-
-def test_login():
-    """Test POST /auth/login"""
-    log_test("Auth: Login with email")
-    
-    success, data, status = make_request("POST", "/auth/login", data={
-        "identifier": USER1_DATA["email"],
-        "password": USER1_DATA["password"]
-    })
-    
-    if not success or status != 200:
-        log_error(f"Login failed: {status} - {data}")
-        return False
-    
-    if "token" not in data or "user" not in data:
-        log_error(f"Login response missing token or user: {data}")
-        return False
-    
-    log_success(f"Login successful for {data['user']['username']}")
-    return True
-
-def test_auth_me():
-    """Test GET /auth/me"""
-    log_test("Auth: GET /auth/me")
-    
-    success, data, status = make_request("GET", "/auth/me", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Auth me failed: {status} - {data}")
-        return False
-    
-    if "user" not in data:
-        log_error(f"Auth me response missing user: {data}")
-        return False
-    
-    log_success(f"Auth me successful: {data['user']['username']}")
-    return True
-
-def test_login_wrong_password():
-    """Test POST /auth/login with wrong password"""
-    log_test("Auth: Login with wrong password (should fail)")
-    
-    success, data, status = make_request("POST", "/auth/login", data={
-        "identifier": USER1_DATA["email"],
-        "password": "WrongPassword123!"
-    })
-    
-    if status != 401:
-        log_error(f"Expected 401, got {status}")
-        return False
-    
-    log_success("Wrong password correctly rejected with 401")
-    return True
-
-def test_register_duplicate():
-    """Test POST /auth/register with duplicate email"""
-    log_test("Auth: Register duplicate email (should fail)")
-    
-    success, data, status = make_request("POST", "/auth/register", data=USER1_DATA)
-    
-    if status != 400:
-        log_error(f"Expected 400, got {status}")
-        return False
-    
-    log_success("Duplicate email correctly rejected with 400")
-    return True
-
-# ============================================================
-# 3. WALLETS & RATES
-# ============================================================
-
-def test_wallets_with_totals():
-    """Test GET /wallets with totals"""
-    log_test("Wallets: GET /wallets with totals")
-    
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Failed to get wallets: {status} - {data}")
-        return False
-    
-    if "totals" not in data:
-        log_error(f"Wallets response missing totals: {data}")
-        return False
-    
-    totals = data["totals"]
-    required = ["usd", "preferred", "preferred_currency"]
-    for field in required:
-        if field not in totals:
-            log_error(f"Totals missing field: {field}")
-            return False
-    
-    # Verify enriched fields in wallets
-    wallets = data.get("wallets", [])
-    if wallets:
-        wallet = wallets[0]
-        if "balance_usd" not in wallet or "preferred_value" not in wallet:
-            log_error(f"Wallet missing enriched fields: {wallet}")
-            return False
-    
-    log_success(f"Wallets with totals: USD={totals['usd']:.2f}, Preferred={totals['preferred']:.2f} {totals['preferred_currency']}")
-    return True
-
-def test_preferred_currency():
-    """Test PUT /profile to change preferred currency and verify wallets"""
-    log_test("Wallets: Change preferred currency to EUR")
-    
-    # Update to EUR
-    success, data, status = make_request("PUT", "/profile", token=user1_token, data={
-        "preferred_currency": "EUR"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Failed to update profile: {status} - {data}")
-        return False
-    
-    # Get wallets and verify
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Failed to get wallets: {status} - {data}")
-        return False
-    
-    totals = data.get("totals", {})
-    if totals.get("preferred_currency") != "EUR":
-        log_error(f"Expected preferred_currency=EUR, got {totals.get('preferred_currency')}")
-        return False
-    
-    log_success(f"Preferred currency changed to EUR: {totals['preferred']:.2f} EUR")
-    return True
-
-# ============================================================
-# 4. INTERNAL TRANSFER
-# ============================================================
-
-def test_transfer_by_username():
-    """Test POST /transfer by username"""
-    log_test("Transfer: Send 50 USD from User1 to User2 by username")
-    
-    # Get initial balances
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    user1_usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    success, data, status = make_request("GET", "/wallets", token=user2_token)
-    user2_usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    # Transfer
-    success, data, status = make_request("POST", "/transfer", token=user1_token, data={
-        "recipient": USER2_DATA["username"],
-        "currency": "USD",
-        "amount": 50,
-        "note": "Test transfer by username"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Transfer failed: {status} - {data}")
-        return False
-    
-    # Verify balances
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    user1_usd_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    success, data, status = make_request("GET", "/wallets", token=user2_token)
-    user2_usd_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    if user1_usd_after != user1_usd_before - 50:
-        log_error(f"User1 balance incorrect: {user1_usd_before} -> {user1_usd_after} (expected {user1_usd_before - 50})")
-        return False
-    
-    if user2_usd_after != user2_usd_before + 50:
-        log_error(f"User2 balance incorrect: {user2_usd_before} -> {user2_usd_after} (expected {user2_usd_before + 50})")
-        return False
-    
-    log_success(f"Transfer by username successful: User1 {user1_usd_before} -> {user1_usd_after}, User2 {user2_usd_before} -> {user2_usd_after}")
-    return True
-
-def test_transfer_by_email():
-    """Test POST /transfer by email"""
-    log_test("Transfer: Send 5 USDT from User1 to User2 by email")
-    
-    # Get initial balances
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    user1_usdt_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USDT"), 0)
-    
-    success, data, status = make_request("GET", "/wallets", token=user2_token)
-    user2_usdt_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USDT"), 0)
-    
-    # Transfer
-    success, data, status = make_request("POST", "/transfer", token=user1_token, data={
-        "recipient": USER2_DATA["email"],
-        "currency": "USDT",
-        "amount": 5,
-        "note": "Test transfer by email"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Transfer failed: {status} - {data}")
-        return False
-    
-    # Verify balances
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    user1_usdt_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USDT"), 0)
-    
-    success, data, status = make_request("GET", "/wallets", token=user2_token)
-    user2_usdt_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USDT"), 0)
-    
-    if user1_usdt_after != user1_usdt_before - 5:
-        log_error(f"User1 USDT balance incorrect: {user1_usdt_before} -> {user1_usdt_after}")
-        return False
-    
-    if user2_usdt_after != user2_usdt_before + 5:
-        log_error(f"User2 USDT balance incorrect: {user2_usdt_before} -> {user2_usdt_after}")
-        return False
-    
-    log_success(f"Transfer by email successful: User1 {user1_usdt_before} -> {user1_usdt_after}, User2 {user2_usdt_before} -> {user2_usdt_after}")
-    return True
-
-def test_transfer_by_id():
-    """Test POST /transfer by user ID"""
-    log_test("Transfer: Send 10 USD from User2 to User1 by user ID")
-    
-    # Get initial balances
-    success, data, status = make_request("GET", "/wallets", token=user2_token)
-    user2_usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    user1_usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    # Transfer
-    success, data, status = make_request("POST", "/transfer", token=user2_token, data={
-        "recipient": user1_id,
-        "currency": "USD",
-        "amount": 10,
-        "note": "Test transfer by ID"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Transfer failed: {status} - {data}")
-        return False
-    
-    log_success("Transfer by user ID successful")
-    return True
-
-def test_transfer_insufficient_balance():
-    """Test POST /transfer with insufficient balance"""
-    log_test("Transfer: Insufficient balance (should fail)")
-    
-    success, data, status = make_request("POST", "/transfer", token=user1_token, data={
-        "recipient": USER2_DATA["username"],
-        "currency": "USD",
-        "amount": 999999,
-        "note": "Should fail"
-    })
-    
-    if status != 400:
-        log_error(f"Expected 400, got {status}")
-        return False
-    
-    log_success("Insufficient balance correctly rejected with 400")
-    return True
-
-def test_transfer_self():
-    """Test POST /transfer to self"""
-    log_test("Transfer: Self-transfer (should fail)")
-    
-    success, data, status = make_request("POST", "/transfer", token=user1_token, data={
-        "recipient": USER1_DATA["username"],
-        "currency": "USD",
-        "amount": 10,
-        "note": "Should fail"
-    })
-    
-    if status != 400:
-        log_error(f"Expected 400, got {status}")
-        return False
-    
-    log_success("Self-transfer correctly rejected with 400")
-    return True
-
-def test_transfer_unknown_recipient():
-    """Test POST /transfer to unknown recipient"""
-    log_test("Transfer: Unknown recipient (should fail)")
-    
-    success, data, status = make_request("POST", "/transfer", token=user1_token, data={
-        "recipient": "nonexistent_user_xyz",
-        "currency": "USD",
-        "amount": 10,
-        "note": "Should fail"
-    })
-    
-    if status != 404:
-        log_error(f"Expected 404, got {status}")
-        return False
-    
-    log_success("Unknown recipient correctly rejected with 404")
-    return True
-
-def test_verify_transaction_record():
-    """Test GET /transactions to verify transfer records"""
-    log_test("Transfer: Verify transaction records")
-    
-    success, data, status = make_request("GET", "/transactions", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Failed to get transactions: {status} - {data}")
-        return False
-    
-    transactions = data.get("transactions", [])
-    
-    if len(transactions) == 0:
-        log_error("No transactions found")
-        return False
-    
-    # Find transfer transactions
-    transfers = [tx for tx in transactions if tx.get("type") == "internal_transfer"]
-    
-    if len(transfers) == 0:
-        log_error("No transfer transactions found")
-        return False
-    
-    log_success(f"Transaction records verified: {len(transfers)} transfers found")
-    return True
-
-# ============================================================
-# 5. DEPOSIT & WITHDRAW
-# ============================================================
-
-def test_deposit():
-    """Test POST /deposit"""
-    log_test("Deposit: Add 200 USD via bank")
-    
-    # Get initial balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    # Deposit
-    success, data, status = make_request("POST", "/deposit", token=user1_token, data={
-        "method": "bank",
-        "currency": "USD",
-        "amount": 200
-    })
-    
-    if not success or status != 200:
-        log_error(f"Deposit failed: {status} - {data}")
-        return False
-    
-    # Verify balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    if usd_after != usd_before + 200:
-        log_error(f"Balance incorrect: {usd_before} -> {usd_after} (expected {usd_before + 200})")
-        return False
-    
-    log_success(f"Deposit successful: {usd_before} -> {usd_after}")
-    return True
-
-def test_withdraw():
-    """Test POST /withdraw"""
-    log_test("Withdraw: Remove 100 USD via bank")
-    
-    # Get initial balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    # Withdraw
-    success, data, status = make_request("POST", "/withdraw", token=user1_token, data={
-        "method": "bank",
-        "currency": "USD",
-        "amount": 100,
-        "destination": "acct-x"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Withdraw failed: {status} - {data}")
-        return False
-    
-    # Verify balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    if usd_after != usd_before - 100:
-        log_error(f"Balance incorrect: {usd_before} -> {usd_after} (expected {usd_before - 100})")
-        return False
-    
-    log_success(f"Withdraw successful: {usd_before} -> {usd_after}")
-    return True
-
-def test_transactions_list():
-    """Test GET /transactions includes deposits and withdrawals"""
-    log_test("Transactions: Verify deposits and withdrawals in list")
-    
-    success, data, status = make_request("GET", "/transactions", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Failed to get transactions: {status} - {data}")
-        return False
-    
-    transactions = data.get("transactions", [])
-    
-    # Find deposit and withdraw
-    deposits = [tx for tx in transactions if tx.get("type") == "deposit"]
-    withdrawals = [tx for tx in transactions if tx.get("type") == "withdraw"]
-    
-    if len(deposits) == 0:
-        log_error("No deposit transactions found")
-        return False
-    
-    if len(withdrawals) == 0:
-        log_error("No withdraw transactions found")
-        return False
-    
-    log_success(f"Transactions list verified: {len(deposits)} deposits, {len(withdrawals)} withdrawals")
-    return True
-
-# ============================================================
-# 6. CARDS
-# ============================================================
-
-def test_card_request_basic():
-    """Test POST /cards/request for basic tier"""
-    global test_card_id
-    log_test("Cards: Request basic tier card")
-    
-    success, data, status = make_request("POST", "/cards/request", token=user1_token, data={
-        "tier": "basic"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Card request failed: {status} - {data}")
-        return False
-    
-    card = data.get("card", {})
-    
-    if card.get("status") != "pending_activation":
-        log_error(f"Expected status=pending_activation, got {card.get('status')}")
-        return False
-    
-    if card.get("activation_fee_usdt") != 10:
-        log_error(f"Expected activation_fee_usdt=10, got {card.get('activation_fee_usdt')}")
-        return False
-    
-    if not card.get("activation_wallet"):
-        log_error("Missing activation_wallet")
-        return False
-    
-    test_card_id = card.get("id")
-    
-    log_success(f"Basic card requested: {card['number']}, fee={card['activation_fee_usdt']} USDT")
-    return True
-
-def test_card_activate_wallet():
-    """Test POST /cards/{id}/activate with pay_from_wallet"""
-    log_test("Cards: Activate card with wallet payment")
-    
-    # Get initial USDT balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usdt_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USDT"), 0)
-    
-    # Activate
-    success, data, status = make_request("POST", f"/cards/{test_card_id}/activate", token=user1_token, data={
-        "pay_from_wallet": True
-    })
-    
-    if not success or status != 200:
-        log_error(f"Card activation failed: {status} - {data}")
-        return False
-    
-    card = data.get("card", {})
-    
-    if card.get("status") != "active":
-        log_error(f"Expected status=active, got {card.get('status')}")
-        return False
-    
-    # Verify USDT balance decreased
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usdt_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USDT"), 0)
-    
-    if usdt_after != usdt_before - 10:
-        log_error(f"USDT balance incorrect: {usdt_before} -> {usdt_after} (expected {usdt_before - 10})")
-        return False
-    
-    log_success(f"Card activated with wallet: USDT {usdt_before} -> {usdt_after}")
-    return True
-
-def test_card_request_premium():
-    """Test POST /cards/request for premium tier"""
-    log_test("Cards: Request premium tier card")
-    
-    success, data, status = make_request("POST", "/cards/request", token=user1_token, data={
-        "tier": "premium"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Card request failed: {status} - {data}")
-        return False
-    
-    card = data.get("card", {})
-    premium_card_id = card.get("id")
-    
-    # Activate with tx_hash
-    success, data, status = make_request("POST", f"/cards/{premium_card_id}/activate", token=user1_token, data={
-        "tx_hash": "0xdeadbeef1234567890abcdef"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Card activation failed: {status} - {data}")
-        return False
-    
-    card = data.get("card", {})
-    
-    if card.get("status") != "active":
-        log_error(f"Expected status=active, got {card.get('status')}")
-        return False
-    
-    log_success(f"Premium card activated with tx_hash")
-    return True
-
-def test_card_freeze():
-    """Test POST /cards/{id}/freeze"""
-    log_test("Cards: Freeze and unfreeze card")
-    
-    # Freeze
-    success, data, status = make_request("POST", f"/cards/{test_card_id}/freeze", token=user1_token, data={
-        "frozen": True
-    })
-    
-    if not success or status != 200:
-        log_error(f"Card freeze failed: {status} - {data}")
-        return False
-    
-    card = data.get("card", {})
-    
-    if card.get("frozen") != True:
-        log_error(f"Expected frozen=True, got {card.get('frozen')}")
-        return False
-    
-    # Unfreeze
-    success, data, status = make_request("POST", f"/cards/{test_card_id}/freeze", token=user1_token, data={
-        "frozen": False
-    })
-    
-    if not success or status != 200:
-        log_error(f"Card unfreeze failed: {status} - {data}")
-        return False
-    
-    card = data.get("card", {})
-    
-    if card.get("frozen") != False:
-        log_error(f"Expected frozen=False, got {card.get('frozen')}")
-        return False
-    
-    log_success("Card freeze/unfreeze successful")
-    return True
-
-def test_cards_list():
-    """Test GET /cards"""
-    log_test("Cards: GET /cards list")
-    
-    success, data, status = make_request("GET", "/cards", token=user1_token)
-    
-    if not success or status != 200:
-        log_error(f"Failed to get cards: {status} - {data}")
-        return False
-    
-    cards = data.get("cards", [])
-    
-    if len(cards) < 2:
-        log_error(f"Expected at least 2 cards, got {len(cards)}")
-        return False
-    
-    log_success(f"Cards list retrieved: {len(cards)} cards")
-    return True
-
-# ============================================================
-# 7. KYC
-# ============================================================
-
-def test_kyc_submit():
-    """Test POST /kyc"""
-    global test_kyc_id
-    log_test("KYC: Submit KYC application")
-    
-    success, data, status = make_request("POST", "/kyc", token=user1_token, data={
-        "full_name": "Sophia Martinez",
-        "dob": "1990-05-15",
-        "country": "United States",
-        "address": "123 Main St, New York, NY 10001",
-        "id_type": "passport",
-        "id_number": "P123456789"
-    })
-    
-    if not success or status != 200:
-        log_error(f"KYC submit failed: {status} - {data}")
-        return False
-    
-    kyc = data.get("kyc", {})
-    test_kyc_id = kyc.get("id")
-    
-    # Verify user kyc_status changed to pending
-    success, data, status = make_request("GET", "/auth/me", token=user1_token)
-    user = data.get("user", {})
-    
-    if user.get("kyc_status") != "pending":
-        log_error(f"Expected kyc_status=pending, got {user.get('kyc_status')}")
-        return False
-    
-    log_success(f"KYC submitted: {kyc.get('id')}, user kyc_status=pending")
-    return True
-
-# ============================================================
-# 8. ADMIN
-# ============================================================
-
-def test_admin_login():
-    """Test admin login"""
-    global admin_token
-    log_test("Admin: Login as admin@aurela.io")
-    
-    success, data, status = make_request("POST", "/auth/login", data={
-        "identifier": ADMIN_EMAIL,
-        "password": ADMIN_PASSWORD
-    })
-    
-    if not success or status != 200:
-        log_error(f"Admin login failed: {status} - {data}")
-        return False
-    
-    user = data.get("user", {})
-    
-    if user.get("role") not in ["admin", "super_admin"]:
-        log_error(f"Expected admin role, got {user.get('role')}")
-        return False
-    
-    admin_token = data["token"]
-    
-    log_success(f"Admin logged in: {user['email']}, role={user['role']}")
-    return True
-
-def test_admin_overview():
-    """Test GET /admin/overview"""
-    log_test("Admin: GET /admin/overview")
-    
-    success, data, status = make_request("GET", "/admin/overview", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin overview failed: {status} - {data}")
-        return False
-    
-    required = ["users", "transactions", "cards", "kyc_pending"]
-    for field in required:
-        if field not in data:
-            log_error(f"Overview missing field: {field}")
-            return False
-    
-    log_success(f"Admin overview: {data['users']} users, {data['transactions']} txs, {data['cards']} cards, {data['kyc_pending']} pending KYC")
-    return True
-
-def test_admin_users_list():
-    """Test GET /admin/users"""
-    log_test("Admin: GET /admin/users")
-    
-    success, data, status = make_request("GET", "/admin/users", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin users list failed: {status} - {data}")
-        return False
-    
-    users = data.get("users", [])
-    
-    if len(users) < 2:
-        log_error(f"Expected at least 2 users, got {len(users)}")
-        return False
-    
-    log_success(f"Admin users list: {len(users)} users")
-    return True
-
-def test_admin_users_search():
-    """Test GET /admin/users?q=<username>"""
-    log_test("Admin: Search users by username")
-    
-    success, data, status = make_request("GET", "/admin/users", token=admin_token, params={
-        "q": USER1_DATA["username"]
-    })
-    
-    if not success or status != 200:
-        log_error(f"Admin users search failed: {status} - {data}")
-        return False
-    
-    users = data.get("users", [])
-    
-    if len(users) == 0:
-        log_error("No users found in search")
-        return False
-    
-    # Verify search result contains the username
-    found = any(u.get("username") == USER1_DATA["username"] for u in users)
-    if not found:
-        log_error(f"Search did not return expected user: {USER1_DATA['username']}")
-        return False
-    
-    log_success(f"Admin users search: found {len(users)} users")
-    return True
-
-def test_admin_adjust_credit():
-    """Test POST /admin/users/{userId}/adjust (credit)"""
-    log_test("Admin: Credit 500 USD to user")
-    
-    # Get initial balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    # Adjust
-    success, data, status = make_request("POST", f"/admin/users/{user1_id}/adjust", token=admin_token, data={
-        "currency": "USD",
-        "amount": 500,
-        "kind": "credit"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Admin adjust failed: {status} - {data}")
-        return False
-    
-    # Verify balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    if usd_after != usd_before + 500:
-        log_error(f"Balance incorrect: {usd_before} -> {usd_after} (expected {usd_before + 500})")
-        return False
-    
-    log_success(f"Admin credit successful: {usd_before} -> {usd_after}")
-    return True
-
-def test_admin_adjust_debit():
-    """Test POST /admin/users/{userId}/adjust (debit)"""
-    log_test("Admin: Debit 100 USD from user")
-    
-    # Get initial balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_before = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    # Adjust
-    success, data, status = make_request("POST", f"/admin/users/{user1_id}/adjust", token=admin_token, data={
-        "currency": "USD",
-        "amount": 100,
-        "kind": "debit"
-    })
-    
-    if not success or status != 200:
-        log_error(f"Admin adjust failed: {status} - {data}")
-        return False
-    
-    # Verify balance
-    success, data, status = make_request("GET", "/wallets", token=user1_token)
-    usd_after = next((w["balance"] for w in data["wallets"] if w["currency"] == "USD"), 0)
-    
-    if usd_after != usd_before - 100:
-        log_error(f"Balance incorrect: {usd_before} -> {usd_after} (expected {usd_before - 100})")
-        return False
-    
-    log_success(f"Admin debit successful: {usd_before} -> {usd_after}")
-    return True
-
-def test_admin_freeze_user():
-    """Test POST /admin/users/{userId}/freeze"""
-    log_test("Admin: Freeze user account")
-    
-    success, data, status = make_request("POST", f"/admin/users/{user2_id}/freeze", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin freeze failed: {status} - {data}")
-        return False
-    
-    log_success("User frozen successfully")
-    return True
-
-def test_admin_unfreeze_user():
-    """Test POST /admin/users/{userId}/unfreeze"""
-    log_test("Admin: Unfreeze user account")
-    
-    success, data, status = make_request("POST", f"/admin/users/{user2_id}/unfreeze", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin unfreeze failed: {status} - {data}")
-        return False
-    
-    log_success("User unfrozen successfully")
-    return True
-
-def test_admin_block_user():
-    """Test POST /admin/users/{userId}/block"""
-    log_test("Admin: Block user account")
-    
-    success, data, status = make_request("POST", f"/admin/users/{user2_id}/block", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin block failed: {status} - {data}")
-        return False
-    
-    # Try to login as blocked user
-    success, data, status = make_request("POST", "/auth/login", data={
-        "identifier": USER2_DATA["email"],
-        "password": USER2_DATA["password"]
-    })
-    
-    if status != 403:
-        log_error(f"Expected 403 for blocked user login, got {status}")
-        return False
-    
-    log_success("User blocked successfully, login rejected with 403")
-    return True
-
-def test_admin_unblock_user():
-    """Test POST /admin/users/{userId}/unblock"""
-    log_test("Admin: Unblock user account")
-    
-    success, data, status = make_request("POST", f"/admin/users/{user2_id}/unblock", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin unblock failed: {status} - {data}")
-        return False
-    
-    log_success("User unblocked successfully")
-    return True
-
-def test_admin_kyc_list():
-    """Test GET /admin/kyc"""
-    log_test("Admin: GET /admin/kyc")
-    
-    success, data, status = make_request("GET", "/admin/kyc", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin KYC list failed: {status} - {data}")
-        return False
-    
-    kyc_list = data.get("kyc", [])
-    
-    if len(kyc_list) == 0:
-        log_error("No KYC records found")
-        return False
-    
-    log_success(f"Admin KYC list: {len(kyc_list)} records")
-    return True
-
-def test_admin_kyc_approve():
-    """Test POST /admin/kyc/{id}/approve"""
-    log_test("Admin: Approve KYC application")
-    
-    success, data, status = make_request("POST", f"/admin/kyc/{test_kyc_id}/approve", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin KYC approve failed: {status} - {data}")
-        return False
-    
-    # Verify user kyc_status changed to approved
-    success, data, status = make_request("GET", "/auth/me", token=user1_token)
-    user = data.get("user", {})
-    
-    if user.get("kyc_status") != "approved":
-        log_error(f"Expected kyc_status=approved, got {user.get('kyc_status')}")
-        return False
-    
-    log_success("KYC approved, user kyc_status=approved")
-    return True
-
-def test_admin_settings_get():
-    """Test GET /admin/settings"""
-    log_test("Admin: GET /admin/settings")
-    
-    success, data, status = make_request("GET", "/admin/settings", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin settings get failed: {status} - {data}")
-        return False
-    
-    settings = data.get("settings", {})
-    
-    if not settings:
-        log_error("Settings empty")
-        return False
-    
-    log_success(f"Admin settings retrieved")
-    return True
-
-def test_admin_settings_update():
-    """Test PUT /admin/settings"""
-    log_test("Admin: Update settings")
-    
-    success, data, status = make_request("PUT", "/admin/settings", token=admin_token, data={
-        "card_activation_wallet": "0xTESTWALLET123456789",
-        "card_activation_fees": {
-            "basic": 15,
-            "premium": 60,
-            "elite": 250
-        }
-    })
-    
-    if not success or status != 200:
-        log_error(f"Admin settings update failed: {status} - {data}")
-        return False
-    
-    settings = data.get("settings", {})
-    
-    if settings.get("card_activation_wallet") != "0xTESTWALLET123456789":
-        log_error(f"Settings not updated correctly")
-        return False
-    
-    log_success("Admin settings updated successfully")
-    return True
-
-def test_admin_transactions():
-    """Test GET /admin/transactions"""
-    log_test("Admin: GET /admin/transactions")
-    
-    success, data, status = make_request("GET", "/admin/transactions", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin transactions failed: {status} - {data}")
-        return False
-    
-    transactions = data.get("transactions", [])
-    
-    if len(transactions) == 0:
-        log_error("No transactions found")
-        return False
-    
-    log_success(f"Admin transactions: {len(transactions)} records")
-    return True
-
-def test_admin_audit():
-    """Test GET /admin/audit"""
-    log_test("Admin: GET /admin/audit")
-    
-    success, data, status = make_request("GET", "/admin/audit", token=admin_token)
-    
-    if not success or status != 200:
-        log_error(f"Admin audit failed: {status} - {data}")
-        return False
-    
-    audit_logs = data.get("audit", [])
-    
-    if len(audit_logs) == 0:
-        log_error("No audit logs found")
-        return False
-    
-    # Verify audit log contains expected actions
-    actions = [log.get("action") for log in audit_logs]
-    expected_actions = ["user.register", "user.login", "transfer.internal"]
-    
-    for expected in expected_actions:
-        if not any(expected in action for action in actions):
-            log_error(f"Audit log missing expected action: {expected}")
-            return False
-    
-    log_success(f"Admin audit log: {len(audit_logs)} entries with expected actions")
-    return True
-
-# ============================================================
-# 9. ROLE CHECK
-# ============================================================
-
-def test_non_admin_access():
-    """Test non-admin user accessing admin endpoints"""
-    log_test("Role Check: Non-admin accessing /admin/* (should fail)")
-    
-    success, data, status = make_request("GET", "/admin/overview", token=user1_token)
-    
-    if status != 403:
-        log_error(f"Expected 403, got {status}")
-        return False
-    
-    log_success("Non-admin correctly rejected with 403")
-    return True
-
-# ============================================================
-# MAIN TEST RUNNER
-# ============================================================
-
-def run_all_tests():
-    """Run all tests in order"""
-    tests = [
-        # 1. Public endpoints
-        ("Public: Health", test_health),
-        ("Public: Config", test_config),
-        ("Public: Rates", test_rates),
+        init_data = init_res.json()
+        otp_code = init_data.get('dev_otp')
+        if not otp_code:
+            # If dev_otp not in response, fetch from MongoDB
+            otp_code = get_otp_from_db(test_email)
+            if not otp_code:
+                record_test('section_1_kyc_gating', 'User Registration Init', False, f"Could not get OTP code")
+                return None
+        signup_id = init_data.get('signup_id')
         
-        # 2. Auth
-        ("Auth: Register User1", test_register_user1),
-        ("Auth: Verify User1 Wallets", test_verify_wallets_user1),
-        ("Auth: Register User2", test_register_user2),
-        ("Auth: Login", test_login),
-        ("Auth: Me", test_auth_me),
-        ("Auth: Wrong Password", test_login_wrong_password),
-        ("Auth: Duplicate Email", test_register_duplicate),
+        # Step 2: Verify OTP
+        verify_res = requests.post(f"{API_URL}/auth/register/verify", json={
+            'signup_id': signup_id,
+            'email': test_email,
+            'code': otp_code
+        }, timeout=10)
         
-        # 3. Wallets & Rates
-        ("Wallets: Get with Totals", test_wallets_with_totals),
-        ("Wallets: Preferred Currency", test_preferred_currency),
+        if verify_res.status_code != 200:
+            record_test('section_1_kyc_gating', 'User Registration Verify', False, f"Verify failed: {verify_res.status_code} {verify_res.text}")
+            return None
         
-        # 4. Internal Transfer
-        ("Transfer: By Username", test_transfer_by_username),
-        ("Transfer: By Email", test_transfer_by_email),
-        ("Transfer: By ID", test_transfer_by_id),
-        ("Transfer: Insufficient Balance", test_transfer_insufficient_balance),
-        ("Transfer: Self Transfer", test_transfer_self),
-        ("Transfer: Unknown Recipient", test_transfer_unknown_recipient),
-        ("Transfer: Verify Records", test_verify_transaction_record),
+        verify_data = verify_res.json()
+        user_token = verify_data.get('token')
+        user_data = verify_data.get('user', {})
         
-        # 5. Deposit & Withdraw
-        ("Deposit: Bank", test_deposit),
-        ("Withdraw: Bank", test_withdraw),
-        ("Transactions: List", test_transactions_list),
+        # Verify kyc_status is 'unverified'
+        if user_data.get('kyc_status') != 'unverified':
+            record_test('section_1_kyc_gating', 'User Registration', False, f"Expected kyc_status='unverified', got '{user_data.get('kyc_status')}'")
+            return None
         
-        # 6. Cards
-        ("Cards: Request Basic", test_card_request_basic),
-        ("Cards: Activate with Wallet", test_card_activate_wallet),
-        ("Cards: Request Premium", test_card_request_premium),
-        ("Cards: Freeze/Unfreeze", test_card_freeze),
-        ("Cards: List", test_cards_list),
+        record_test('section_1_kyc_gating', 'User Registration', True, f"User created with kyc_status='unverified'")
         
-        # 7. KYC
-        ("KYC: Submit", test_kyc_submit),
+        # Test 1.1: POST /api/deposit should return 403 with KYC_REQUIRED
+        log_info("Testing POST /api/deposit with unverified user...")
+        deposit_res = requests.post(f"{API_URL}/deposit", 
+            headers={'Authorization': f'Bearer {user_token}'},
+            json={'method': 'bank', 'currency': 'USD', 'amount': 100},
+            timeout=10
+        )
         
-        # 8. Admin
-        ("Admin: Login", test_admin_login),
-        ("Admin: Overview", test_admin_overview),
-        ("Admin: Users List", test_admin_users_list),
-        ("Admin: Users Search", test_admin_users_search),
-        ("Admin: Adjust Credit", test_admin_adjust_credit),
-        ("Admin: Adjust Debit", test_admin_adjust_debit),
-        ("Admin: Freeze User", test_admin_freeze_user),
-        ("Admin: Unfreeze User", test_admin_unfreeze_user),
-        ("Admin: Block User", test_admin_block_user),
-        ("Admin: Unblock User", test_admin_unblock_user),
-        ("Admin: KYC List", test_admin_kyc_list),
-        ("Admin: KYC Approve", test_admin_kyc_approve),
-        ("Admin: Settings Get", test_admin_settings_get),
-        ("Admin: Settings Update", test_admin_settings_update),
-        ("Admin: Transactions", test_admin_transactions),
-        ("Admin: Audit Log", test_admin_audit),
-        
-        # 9. Role Check
-        ("Role Check: Non-admin Access", test_non_admin_access),
-    ]
-    
-    passed = 0
-    failed = 0
-    failed_tests = []
-    
-    print("\n" + "="*80)
-    print("AURELA BACKEND API TEST SUITE")
-    print("="*80)
-    print(f"Base URL: {BASE_URL}")
-    print(f"Total Tests: {len(tests)}")
-    print("="*80)
-    
-    for name, test_func in tests:
-        try:
-            result = test_func()
-            if result:
-                passed += 1
+        if deposit_res.status_code == 403:
+            deposit_data = deposit_res.json()
+            if deposit_data.get('code') == 'KYC_REQUIRED':
+                record_test('section_1_kyc_gating', 'Deposit KYC Gate', True, 'Returns 403 with code=KYC_REQUIRED')
             else:
-                failed += 1
-                failed_tests.append(name)
-        except Exception as e:
-            log_error(f"Test '{name}' raised exception: {e}")
-            failed += 1
-            failed_tests.append(name)
-    
-    # Summary
-    print("\n" + "="*80)
-    print("TEST SUMMARY")
-    print("="*80)
-    print(f"Total: {len(tests)}")
-    print(f"✅ Passed: {passed}")
-    print(f"❌ Failed: {failed}")
-    
-    if failed_tests:
-        print("\nFailed Tests:")
-        for test_name in failed_tests:
-            print(f"  - {test_name}")
-    
-    print("="*80)
-    
-    return failed == 0
+                record_test('section_1_kyc_gating', 'Deposit KYC Gate', False, f"Expected code=KYC_REQUIRED, got {deposit_data.get('code')}")
+        else:
+            record_test('section_1_kyc_gating', 'Deposit KYC Gate', False, f"Expected 403, got {deposit_res.status_code}")
+        
+        # Test 1.2: POST /api/withdraw should return 403 with KYC_REQUIRED
+        log_info("Testing POST /api/withdraw with unverified user...")
+        withdraw_res = requests.post(f"{API_URL}/withdraw",
+            headers={'Authorization': f'Bearer {user_token}'},
+            json={'method': 'bank', 'currency': 'USD', 'amount': 10, 'destination': 'test_account'},
+            timeout=10
+        )
+        
+        if withdraw_res.status_code == 403:
+            withdraw_data = withdraw_res.json()
+            if withdraw_data.get('code') == 'KYC_REQUIRED':
+                record_test('section_1_kyc_gating', 'Withdraw KYC Gate', True, 'Returns 403 with code=KYC_REQUIRED')
+            else:
+                record_test('section_1_kyc_gating', 'Withdraw KYC Gate', False, f"Expected code=KYC_REQUIRED, got {withdraw_data.get('code')}")
+        else:
+            record_test('section_1_kyc_gating', 'Withdraw KYC Gate', False, f"Expected 403, got {withdraw_res.status_code}")
+        
+        # Test 1.3: POST /api/cards/request should return 403 with KYC_REQUIRED
+        log_info("Testing POST /api/cards/request with unverified user...")
+        card_req_res = requests.post(f"{API_URL}/cards/request",
+            headers={'Authorization': f'Bearer {user_token}'},
+            json={'tier': 'basic'},
+            timeout=10
+        )
+        
+        if card_req_res.status_code == 403:
+            card_req_data = card_req_res.json()
+            if card_req_data.get('code') == 'KYC_REQUIRED':
+                record_test('section_1_kyc_gating', 'Card Request KYC Gate', True, 'Returns 403 with code=KYC_REQUIRED')
+            else:
+                record_test('section_1_kyc_gating', 'Card Request KYC Gate', False, f"Expected code=KYC_REQUIRED, got {card_req_data.get('code')}")
+        else:
+            record_test('section_1_kyc_gating', 'Card Request KYC Gate', False, f"Expected 403, got {card_req_res.status_code}")
+        
+        return {
+            'token': user_token,
+            'user_id': user_data.get('id'),
+            'email': test_email,
+            'username': test_username
+        }
+        
+    except Exception as e:
+        record_test('section_1_kyc_gating', 'KYC Gating Tests', False, f"Exception: {str(e)}")
+        return None
 
-if __name__ == "__main__":
-    success = run_all_tests()
-    sys.exit(0 if success else 1)
+# ============================================================
+# SECTION 2: DEPOSIT REQUEST FLOW (P0)
+# ============================================================
+def test_section_2_deposit_flow(user_info):
+    log_section("SECTION 2: DEPOSIT REQUEST FLOW (P0)")
+    
+    if not user_info:
+        log_fail("Skipping Section 2: No user info from Section 1")
+        return
+    
+    try:
+        # Step 1: Admin login
+        log_info("Admin login...")
+        admin_login_res = requests.post(f"{API_URL}/auth/login", json={
+            'identifier': ADMIN_EMAIL,
+            'password': ADMIN_PASSWORD
+        }, timeout=10)
+        
+        if admin_login_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Admin Login', False, f"Failed: {admin_login_res.status_code}")
+            return
+        
+        admin_data = admin_login_res.json()
+        admin_token = admin_data.get('token')
+        record_test('section_2_deposit_flow', 'Admin Login', True, 'Admin logged in successfully')
+        
+        # Step 2: User submits KYC
+        log_info("User submitting KYC...")
+        kyc_submit_res = requests.post(f"{API_URL}/kyc",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            json={
+                'full_name': 'KYC Test User',
+                'dob': '1990-01-01',
+                'country': 'US',
+                'address': '123 Test St',
+                'id_type': 'passport',
+                'id_number': 'P123456789'
+            },
+            timeout=10
+        )
+        
+        if kyc_submit_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'KYC Submission', False, f"Failed: {kyc_submit_res.status_code}")
+            return
+        
+        kyc_data = kyc_submit_res.json()
+        kyc_id = kyc_data.get('kyc', {}).get('id')
+        record_test('section_2_deposit_flow', 'KYC Submission', True, f'KYC submitted with id={kyc_id}')
+        
+        # Step 3: Admin approves KYC
+        log_info("Admin approving KYC...")
+        kyc_approve_res = requests.post(f"{API_URL}/admin/kyc/{kyc_id}/approve",
+            headers={'Authorization': f'Bearer {admin_token}'},
+            timeout=10
+        )
+        
+        if kyc_approve_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'KYC Approval', False, f"Failed: {kyc_approve_res.status_code}")
+            return
+        
+        record_test('section_2_deposit_flow', 'KYC Approval', True, 'KYC approved by admin')
+        
+        # Step 4: Get initial wallet balance
+        log_info("Getting initial wallet balance...")
+        wallets_res = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            timeout=10
+        )
+        
+        if wallets_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Get Wallets', False, f"Failed: {wallets_res.status_code}")
+            return
+        
+        wallets_data = wallets_res.json()
+        usd_wallet = next((w for w in wallets_data.get('wallets', []) if w['currency'] == 'USD'), None)
+        
+        if not usd_wallet:
+            record_test('section_2_deposit_flow', 'Get USD Wallet', False, 'USD wallet not found')
+            return
+        
+        initial_balance = usd_wallet.get('balance', 0)
+        log_info(f"Initial USD balance: {initial_balance}")
+        
+        # Step 5: User creates deposit request
+        log_info("User creating deposit request...")
+        deposit_res = requests.post(f"{API_URL}/deposit",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            json={'method': 'bank', 'currency': 'USD', 'amount': 250},
+            timeout=10
+        )
+        
+        if deposit_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Create Deposit Request', False, f"Failed: {deposit_res.status_code} {deposit_res.text}")
+            return
+        
+        deposit_data = deposit_res.json()
+        if not deposit_data.get('ok'):
+            record_test('section_2_deposit_flow', 'Create Deposit Request', False, f"Response ok=false: {deposit_data}")
+            return
+        
+        deposit_request = deposit_data.get('request', {})
+        if deposit_request.get('status') != 'pending':
+            record_test('section_2_deposit_flow', 'Create Deposit Request', False, f"Expected status='pending', got '{deposit_request.get('status')}'")
+            return
+        
+        deposit_id = deposit_request.get('id')
+        record_test('section_2_deposit_flow', 'Create Deposit Request', True, f'Deposit request created with status=pending, id={deposit_id}')
+        
+        # Step 6: Verify wallet balance has NOT changed
+        log_info("Verifying wallet balance unchanged...")
+        wallets_res2 = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            timeout=10
+        )
+        
+        if wallets_res2.status_code != 200:
+            record_test('section_2_deposit_flow', 'Verify Balance Unchanged', False, f"Failed to get wallets: {wallets_res2.status_code}")
+            return
+        
+        wallets_data2 = wallets_res2.json()
+        usd_wallet2 = next((w for w in wallets_data2.get('wallets', []) if w['currency'] == 'USD'), None)
+        current_balance = usd_wallet2.get('balance', 0)
+        
+        if current_balance == initial_balance:
+            record_test('section_2_deposit_flow', 'Verify Balance Unchanged', True, f'Balance remains {initial_balance} (not auto-credited)')
+        else:
+            record_test('section_2_deposit_flow', 'Verify Balance Unchanged', False, f'Balance changed from {initial_balance} to {current_balance}')
+        
+        # Step 7: Admin gets deposit list
+        log_info("Admin getting deposit list...")
+        admin_deposits_res = requests.get(f"{API_URL}/admin/deposits",
+            headers={'Authorization': f'Bearer {admin_token}'},
+            timeout=10
+        )
+        
+        if admin_deposits_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Admin Get Deposits', False, f"Failed: {admin_deposits_res.status_code}")
+            return
+        
+        admin_deposits_data = admin_deposits_res.json()
+        deposits_list = admin_deposits_data.get('deposits', [])
+        found_deposit = next((d for d in deposits_list if d.get('id') == deposit_id), None)
+        
+        if found_deposit and found_deposit.get('status') == 'pending':
+            record_test('section_2_deposit_flow', 'Admin Get Deposits', True, f'Deposit request found in admin list with status=pending')
+        else:
+            record_test('section_2_deposit_flow', 'Admin Get Deposits', False, f'Deposit request not found or wrong status')
+        
+        # Step 8: Admin approves deposit
+        log_info("Admin approving deposit...")
+        approve_deposit_res = requests.post(f"{API_URL}/admin/deposits/{deposit_id}/approve",
+            headers={'Authorization': f'Bearer {admin_token}'},
+            timeout=10
+        )
+        
+        if approve_deposit_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Admin Approve Deposit', False, f"Failed: {approve_deposit_res.status_code} {approve_deposit_res.text}")
+            return
+        
+        approve_data = approve_deposit_res.json()
+        if approve_data.get('ok'):
+            record_test('section_2_deposit_flow', 'Admin Approve Deposit', True, 'Deposit approved successfully')
+        else:
+            record_test('section_2_deposit_flow', 'Admin Approve Deposit', False, f'Response ok=false: {approve_data}')
+            return
+        
+        # Step 9: Verify wallet balance is now credited
+        log_info("Verifying wallet balance credited...")
+        wallets_res3 = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            timeout=10
+        )
+        
+        if wallets_res3.status_code != 200:
+            record_test('section_2_deposit_flow', 'Verify Balance Credited', False, f"Failed to get wallets: {wallets_res3.status_code}")
+            return
+        
+        wallets_data3 = wallets_res3.json()
+        usd_wallet3 = next((w for w in wallets_data3.get('wallets', []) if w['currency'] == 'USD'), None)
+        final_balance = usd_wallet3.get('balance', 0)
+        expected_balance = initial_balance + 250
+        
+        if final_balance == expected_balance:
+            record_test('section_2_deposit_flow', 'Verify Balance Credited', True, f'Balance updated to {final_balance} (initial {initial_balance} + 250)')
+        else:
+            record_test('section_2_deposit_flow', 'Verify Balance Credited', False, f'Expected {expected_balance}, got {final_balance}')
+        
+        # Step 10: Verify transaction record created
+        log_info("Verifying transaction record...")
+        txs_res = requests.get(f"{API_URL}/transactions",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            timeout=10
+        )
+        
+        if txs_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Verify Transaction Record', False, f"Failed to get transactions: {txs_res.status_code}")
+            return
+        
+        txs_data = txs_res.json()
+        transactions = txs_data.get('transactions', [])
+        deposit_tx = next((t for t in transactions if t.get('type') == 'deposit' and t.get('amount') == 250 and t.get('currency') == 'USD'), None)
+        
+        if deposit_tx and deposit_tx.get('status') == 'completed':
+            record_test('section_2_deposit_flow', 'Verify Transaction Record', True, f'Transaction record created with type=deposit, status=completed')
+        else:
+            record_test('section_2_deposit_flow', 'Verify Transaction Record', False, 'Transaction record not found or wrong status')
+        
+        # Step 11: Test reject path with a second deposit request
+        log_info("Testing reject path with second deposit request...")
+        deposit_res2 = requests.post(f"{API_URL}/deposit",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            json={'method': 'bank', 'currency': 'USD', 'amount': 100},
+            timeout=10
+        )
+        
+        if deposit_res2.status_code != 200:
+            record_test('section_2_deposit_flow', 'Create Second Deposit Request', False, f"Failed: {deposit_res2.status_code}")
+            return
+        
+        deposit_data2 = deposit_res2.json()
+        deposit_id2 = deposit_data2.get('request', {}).get('id')
+        
+        # Get balance before rejection
+        wallets_res4 = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            timeout=10
+        )
+        wallets_data4 = wallets_res4.json()
+        usd_wallet4 = next((w for w in wallets_data4.get('wallets', []) if w['currency'] == 'USD'), None)
+        balance_before_reject = usd_wallet4.get('balance', 0)
+        
+        # Admin rejects deposit
+        reject_deposit_res = requests.post(f"{API_URL}/admin/deposits/{deposit_id2}/reject",
+            headers={'Authorization': f'Bearer {admin_token}'},
+            timeout=10
+        )
+        
+        if reject_deposit_res.status_code != 200:
+            record_test('section_2_deposit_flow', 'Admin Reject Deposit', False, f"Failed: {reject_deposit_res.status_code}")
+            return
+        
+        # Verify balance unchanged after rejection
+        wallets_res5 = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_info["token"]}'},
+            timeout=10
+        )
+        wallets_data5 = wallets_res5.json()
+        usd_wallet5 = next((w for w in wallets_data5.get('wallets', []) if w['currency'] == 'USD'), None)
+        balance_after_reject = usd_wallet5.get('balance', 0)
+        
+        if balance_after_reject == balance_before_reject:
+            record_test('section_2_deposit_flow', 'Verify Reject Path', True, f'Balance unchanged after rejection ({balance_after_reject})')
+        else:
+            record_test('section_2_deposit_flow', 'Verify Reject Path', False, f'Balance changed after rejection: {balance_before_reject} -> {balance_after_reject}')
+        
+        # Return admin token and user info for next section
+        return {
+            'admin_token': admin_token,
+            'user_token': user_info['token'],
+            'user_id': user_info['user_id']
+        }
+        
+    except Exception as e:
+        record_test('section_2_deposit_flow', 'Deposit Flow Tests', False, f"Exception: {str(e)}")
+        import traceback
+        log_fail(traceback.format_exc())
+        return None
+
+# ============================================================
+# SECTION 3: CARD ACTIVATION VIA EXTERNAL USDT (P0)
+# ============================================================
+def test_section_3_card_activation(tokens):
+    log_section("SECTION 3: CARD ACTIVATION VIA EXTERNAL USDT (P0)")
+    
+    if not tokens:
+        log_fail("Skipping Section 3: No tokens from Section 2")
+        return
+    
+    try:
+        admin_token = tokens['admin_token']
+        user_token = tokens['user_token']
+        
+        # Step 1: Get initial USDT balance
+        log_info("Getting initial USDT balance...")
+        wallets_res = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_token}'},
+            timeout=10
+        )
+        
+        if wallets_res.status_code != 200:
+            record_test('section_3_card_activation', 'Get USDT Balance', False, f"Failed: {wallets_res.status_code}")
+            return
+        
+        wallets_data = wallets_res.json()
+        usdt_wallet = next((w for w in wallets_data.get('wallets', []) if w['currency'] == 'USDT'), None)
+        initial_usdt_balance = usdt_wallet.get('balance', 0)
+        log_info(f"Initial USDT balance: {initial_usdt_balance}")
+        
+        # Step 2: Request a card
+        log_info("Requesting basic card...")
+        card_req_res = requests.post(f"{API_URL}/cards/request",
+            headers={'Authorization': f'Bearer {user_token}'},
+            json={'tier': 'basic'},
+            timeout=10
+        )
+        
+        if card_req_res.status_code != 200:
+            record_test('section_3_card_activation', 'Request Card', False, f"Failed: {card_req_res.status_code} {card_req_res.text}")
+            return
+        
+        card_data = card_req_res.json()
+        card = card_data.get('card', {})
+        card_id = card.get('id')
+        
+        if card.get('status') != 'pending_activation':
+            record_test('section_3_card_activation', 'Request Card', False, f"Expected status='pending_activation', got '{card.get('status')}'")
+            return
+        
+        record_test('section_3_card_activation', 'Request Card', True, f'Card created with status=pending_activation, id={card_id}')
+        
+        # Step 3: Try to activate without tx_hash (should fail with 400)
+        log_info("Testing activation without tx_hash (should fail)...")
+        activate_no_hash_res = requests.post(f"{API_URL}/cards/{card_id}/activate",
+            headers={'Authorization': f'Bearer {user_token}'},
+            json={'pay_from_wallet': True},
+            timeout=10
+        )
+        
+        if activate_no_hash_res.status_code == 400:
+            error_msg = activate_no_hash_res.json().get('error', '')
+            if 'transaction hash' in error_msg.lower() or 'tx_hash' in error_msg.lower():
+                record_test('section_3_card_activation', 'Activate Without tx_hash', True, f'Returns 400 with error about tx_hash requirement')
+            else:
+                record_test('section_3_card_activation', 'Activate Without tx_hash', False, f'Returns 400 but wrong error message: {error_msg}')
+        else:
+            record_test('section_3_card_activation', 'Activate Without tx_hash', False, f'Expected 400, got {activate_no_hash_res.status_code}')
+        
+        # Step 4: Activate with tx_hash
+        log_info("Activating card with tx_hash...")
+        tx_hash = '0x' + 'a' * 64  # Mock transaction hash
+        activate_res = requests.post(f"{API_URL}/cards/{card_id}/activate",
+            headers={'Authorization': f'Bearer {user_token}'},
+            json={'tx_hash': tx_hash, 'network': 'TRC20'},
+            timeout=10
+        )
+        
+        if activate_res.status_code != 200:
+            record_test('section_3_card_activation', 'Activate With tx_hash', False, f"Failed: {activate_res.status_code} {activate_res.text}")
+            return
+        
+        activate_data = activate_res.json()
+        activated_card = activate_data.get('card', {})
+        
+        if activated_card.get('status') != 'pending_verification':
+            record_test('section_3_card_activation', 'Activate With tx_hash', False, f"Expected status='pending_verification', got '{activated_card.get('status')}'")
+            return
+        
+        record_test('section_3_card_activation', 'Activate With tx_hash', True, f'Card status updated to pending_verification')
+        
+        # Step 5: Verify USDT balance unchanged
+        log_info("Verifying USDT balance unchanged...")
+        wallets_res2 = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user_token}'},
+            timeout=10
+        )
+        
+        if wallets_res2.status_code != 200:
+            record_test('section_3_card_activation', 'Verify USDT Balance Unchanged', False, f"Failed: {wallets_res2.status_code}")
+            return
+        
+        wallets_data2 = wallets_res2.json()
+        usdt_wallet2 = next((w for w in wallets_data2.get('wallets', []) if w['currency'] == 'USDT'), None)
+        current_usdt_balance = usdt_wallet2.get('balance', 0)
+        
+        if current_usdt_balance == initial_usdt_balance:
+            record_test('section_3_card_activation', 'Verify USDT Balance Unchanged', True, f'USDT balance remains {initial_usdt_balance} (not auto-debited)')
+        else:
+            record_test('section_3_card_activation', 'Verify USDT Balance Unchanged', False, f'USDT balance changed from {initial_usdt_balance} to {current_usdt_balance}')
+        
+        # Step 6: Admin gets pending cards
+        log_info("Admin getting pending cards...")
+        admin_cards_res = requests.get(f"{API_URL}/admin/cards",
+            headers={'Authorization': f'Bearer {admin_token}'},
+            timeout=10
+        )
+        
+        if admin_cards_res.status_code != 200:
+            record_test('section_3_card_activation', 'Admin Get Pending Cards', False, f"Failed: {admin_cards_res.status_code}")
+            return
+        
+        admin_cards_data = admin_cards_res.json()
+        cards_list = admin_cards_data.get('cards', [])
+        found_card = next((c for c in cards_list if c.get('id') == card_id), None)
+        
+        if found_card:
+            record_test('section_3_card_activation', 'Admin Get Pending Cards', True, f'Card found in admin pending list')
+        else:
+            record_test('section_3_card_activation', 'Admin Get Pending Cards', False, f'Card not found in admin list')
+        
+        # Step 7: Admin approves card
+        log_info("Admin approving card...")
+        approve_card_res = requests.post(f"{API_URL}/admin/cards/{card_id}/approve",
+            headers={'Authorization': f'Bearer {admin_token}'},
+            timeout=10
+        )
+        
+        if approve_card_res.status_code != 200:
+            record_test('section_3_card_activation', 'Admin Approve Card', False, f"Failed: {approve_card_res.status_code} {approve_card_res.text}")
+            return
+        
+        approve_data = approve_card_res.json()
+        if approve_data.get('ok'):
+            record_test('section_3_card_activation', 'Admin Approve Card', True, 'Card approved successfully')
+        else:
+            record_test('section_3_card_activation', 'Admin Approve Card', False, f'Response ok=false: {approve_data}')
+            return
+        
+        # Step 8: Verify card status is now 'active'
+        log_info("Verifying card status is active...")
+        cards_res = requests.get(f"{API_URL}/cards",
+            headers={'Authorization': f'Bearer {user_token}'},
+            timeout=10
+        )
+        
+        if cards_res.status_code != 200:
+            record_test('section_3_card_activation', 'Verify Card Active', False, f"Failed to get cards: {cards_res.status_code}")
+            return
+        
+        cards_data = cards_res.json()
+        user_cards = cards_data.get('cards', [])
+        active_card = next((c for c in user_cards if c.get('id') == card_id), None)
+        
+        if active_card and active_card.get('status') == 'active':
+            record_test('section_3_card_activation', 'Verify Card Active', True, f'Card status is now active')
+        else:
+            record_test('section_3_card_activation', 'Verify Card Active', False, f'Card status is {active_card.get("status") if active_card else "not found"}')
+        
+    except Exception as e:
+        record_test('section_3_card_activation', 'Card Activation Tests', False, f"Exception: {str(e)}")
+        import traceback
+        log_fail(traceback.format_exc())
+
+# ============================================================
+# SECTION 4: REGRESSION SANITY
+# ============================================================
+def test_section_4_regression():
+    log_section("SECTION 4: REGRESSION SANITY")
+    
+    try:
+        # Test 4.1: GET /api/health
+        log_info("Testing GET /api/health...")
+        health_res = requests.get(f"{API_URL}/health", timeout=10)
+        
+        if health_res.status_code == 200:
+            health_data = health_res.json()
+            if health_data.get('ok'):
+                record_test('section_4_regression', 'Health Endpoint', True, 'Returns 200 with ok=true')
+            else:
+                record_test('section_4_regression', 'Health Endpoint', False, f'Returns 200 but ok={health_data.get("ok")}')
+        else:
+            record_test('section_4_regression', 'Health Endpoint', False, f'Expected 200, got {health_res.status_code}')
+        
+        # Test 4.2: GET /api/config
+        log_info("Testing GET /api/config...")
+        config_res = requests.get(f"{API_URL}/config", timeout=10)
+        
+        if config_res.status_code == 200:
+            config_data = config_res.json()
+            has_fiat = 'fiat' in config_data and len(config_data['fiat']) > 0
+            has_crypto = 'crypto' in config_data and len(config_data['crypto']) > 0
+            has_activation_wallet = 'activation_wallet' in config_data
+            has_platform_wallets = 'platform_wallets' in config_data
+            
+            if has_fiat and has_crypto and has_activation_wallet and has_platform_wallets:
+                record_test('section_4_regression', 'Config Endpoint', True, 'Returns 200 with fiat, crypto, activation_wallet, platform_wallets')
+            else:
+                record_test('section_4_regression', 'Config Endpoint', False, f'Missing keys: fiat={has_fiat}, crypto={has_crypto}, activation_wallet={has_activation_wallet}, platform_wallets={has_platform_wallets}')
+        else:
+            record_test('section_4_regression', 'Config Endpoint', False, f'Expected 200, got {config_res.status_code}')
+        
+        # Test 4.3: GET /api/rates
+        log_info("Testing GET /api/rates...")
+        rates_res = requests.get(f"{API_URL}/rates", timeout=10)
+        
+        if rates_res.status_code == 200:
+            rates_data = rates_res.json()
+            has_fx = 'fx' in rates_data and len(rates_data['fx']) > 0
+            has_crypto_usd = 'crypto_usd' in rates_data and len(rates_data['crypto_usd']) > 0
+            
+            if has_fx and has_crypto_usd:
+                record_test('section_4_regression', 'Rates Endpoint', True, f'Returns 200 with fx ({len(rates_data["fx"])} currencies) and crypto_usd ({len(rates_data["crypto_usd"])} assets)')
+            else:
+                record_test('section_4_regression', 'Rates Endpoint', False, f'Missing keys: fx={has_fx}, crypto_usd={has_crypto_usd}')
+        else:
+            record_test('section_4_regression', 'Rates Endpoint', False, f'Expected 200, got {rates_res.status_code}')
+        
+        # Test 4.4: Transfer between two users
+        log_info("Testing transfer between two users...")
+        
+        # Create two test users
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        user1_email = f"transfer1_{timestamp}@test.com"
+        user1_username = f"transfer1_{timestamp}"
+        user2_email = f"transfer2_{timestamp}@test.com"
+        user2_username = f"transfer2_{timestamp}"
+        
+        # Register user 1
+        init1_res = requests.post(f"{API_URL}/auth/register/init", json={
+            'email': user1_email,
+            'username': user1_username,
+            'password': 'TestPass123!',
+            'full_name': 'Transfer User 1'
+        }, timeout=10)
+        
+        if init1_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"User 1 registration failed: {init1_res.status_code}")
+            return
+        
+        init1_data = init1_res.json()
+        otp1 = init1_data.get('dev_otp')
+        if not otp1:
+            otp1 = get_otp_from_db(user1_email)
+            if not otp1:
+                record_test('section_4_regression', 'Transfer Test', False, f"Could not get OTP for user 1")
+                return
+        
+        verify1_res = requests.post(f"{API_URL}/auth/register/verify", json={
+            'signup_id': init1_data.get('signup_id'),
+            'email': user1_email,
+            'code': otp1
+        }, timeout=10)
+        
+        if verify1_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"User 1 verification failed: {verify1_res.status_code}")
+            return
+        
+        user1_token = verify1_res.json().get('token')
+        
+        # Register user 2
+        init2_res = requests.post(f"{API_URL}/auth/register/init", json={
+            'email': user2_email,
+            'username': user2_username,
+            'password': 'TestPass123!',
+            'full_name': 'Transfer User 2'
+        }, timeout=10)
+        
+        if init2_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"User 2 registration failed: {init2_res.status_code}")
+            return
+        
+        init2_data = init2_res.json()
+        otp2 = init2_data.get('dev_otp')
+        if not otp2:
+            otp2 = get_otp_from_db(user2_email)
+            if not otp2:
+                record_test('section_4_regression', 'Transfer Test', False, f"Could not get OTP for user 2")
+                return
+        
+        verify2_res = requests.post(f"{API_URL}/auth/register/verify", json={
+            'signup_id': init2_data.get('signup_id'),
+            'email': user2_email,
+            'code': otp2
+        }, timeout=10)
+        
+        if verify2_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"User 2 verification failed: {verify2_res.status_code}")
+            return
+        
+        user2_token = verify2_res.json().get('token')
+        
+        # Get user 1 USD balance
+        wallets1_res = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user1_token}'},
+            timeout=10
+        )
+        
+        if wallets1_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"Failed to get user 1 wallets: {wallets1_res.status_code}")
+            return
+        
+        wallets1_data = wallets1_res.json()
+        usd_wallet1 = next((w for w in wallets1_data.get('wallets', []) if w['currency'] == 'USD'), None)
+        initial_balance1 = usd_wallet1.get('balance', 0)
+        
+        # Get user 2 USD balance
+        wallets2_res = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user2_token}'},
+            timeout=10
+        )
+        
+        if wallets2_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"Failed to get user 2 wallets: {wallets2_res.status_code}")
+            return
+        
+        wallets2_data = wallets2_res.json()
+        usd_wallet2 = next((w for w in wallets2_data.get('wallets', []) if w['currency'] == 'USD'), None)
+        initial_balance2 = usd_wallet2.get('balance', 0)
+        
+        # If user 1 has 0 balance, use admin to credit funds
+        if initial_balance1 == 0:
+            log_info("User 1 has 0 balance, using admin to credit funds...")
+            admin_login_res = requests.post(f"{API_URL}/auth/login", json={
+                'identifier': ADMIN_EMAIL,
+                'password': ADMIN_PASSWORD
+            }, timeout=10)
+            
+            if admin_login_res.status_code == 200:
+                admin_token = admin_login_res.json().get('token')
+                user1_id = verify1_res.json().get('user', {}).get('id')
+                
+                adjust_res = requests.post(f"{API_URL}/admin/users/{user1_id}/adjust",
+                    headers={'Authorization': f'Bearer {admin_token}'},
+                    json={'currency': 'USD', 'amount': 1000, 'kind': 'credit'},
+                    timeout=10
+                )
+                
+                if adjust_res.status_code == 200:
+                    # Refresh user 1 balance
+                    wallets1_res = requests.get(f"{API_URL}/wallets",
+                        headers={'Authorization': f'Bearer {user1_token}'},
+                        timeout=10
+                    )
+                    wallets1_data = wallets1_res.json()
+                    usd_wallet1 = next((w for w in wallets1_data.get('wallets', []) if w['currency'] == 'USD'), None)
+                    initial_balance1 = usd_wallet1.get('balance', 0)
+        
+        # Transfer 50 USD from user 1 to user 2
+        transfer_amount = 50
+        transfer_res = requests.post(f"{API_URL}/transfer",
+            headers={'Authorization': f'Bearer {user1_token}'},
+            json={
+                'recipient': user2_username,
+                'amount': transfer_amount,
+                'currency': 'USD',
+                'note': 'Test transfer'
+            },
+            timeout=10
+        )
+        
+        if transfer_res.status_code != 200:
+            record_test('section_4_regression', 'Transfer Test', False, f"Transfer failed: {transfer_res.status_code} {transfer_res.text}")
+            return
+        
+        transfer_data = transfer_res.json()
+        if not transfer_data.get('ok'):
+            record_test('section_4_regression', 'Transfer Test', False, f"Transfer response ok=false: {transfer_data}")
+            return
+        
+        # Verify balances
+        wallets1_res = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user1_token}'},
+            timeout=10
+        )
+        wallets1_data = wallets1_res.json()
+        usd_wallet1 = next((w for w in wallets1_data.get('wallets', []) if w['currency'] == 'USD'), None)
+        final_balance1 = usd_wallet1.get('balance', 0)
+        
+        wallets2_res = requests.get(f"{API_URL}/wallets",
+            headers={'Authorization': f'Bearer {user2_token}'},
+            timeout=10
+        )
+        wallets2_data = wallets2_res.json()
+        usd_wallet2 = next((w for w in wallets2_data.get('wallets', []) if w['currency'] == 'USD'), None)
+        final_balance2 = usd_wallet2.get('balance', 0)
+        
+        expected_balance1 = initial_balance1 - transfer_amount
+        expected_balance2 = initial_balance2 + transfer_amount
+        
+        if final_balance1 == expected_balance1 and final_balance2 == expected_balance2:
+            record_test('section_4_regression', 'Transfer Test', True, f'Transfer successful: User1 {initial_balance1}->{final_balance1}, User2 {initial_balance2}->{final_balance2}')
+        else:
+            record_test('section_4_regression', 'Transfer Test', False, f'Balance mismatch: User1 expected {expected_balance1} got {final_balance1}, User2 expected {expected_balance2} got {final_balance2}')
+        
+    except Exception as e:
+        record_test('section_4_regression', 'Regression Tests', False, f"Exception: {str(e)}")
+        import traceback
+        log_fail(traceback.format_exc())
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
+    log_section("AURELA BACKEND REGRESSION + NEW FEATURE TEST")
+    log_info(f"Base URL: {BASE_URL}")
+    log_info(f"API URL: {API_URL}")
+    log_info(f"Admin: {ADMIN_EMAIL}")
+    
+    # Section 1: KYC Gating
+    user_info = test_section_1_kyc_gating()
+    
+    # Section 2: Deposit Request Flow
+    tokens = test_section_2_deposit_flow(user_info)
+    
+    # Section 3: Card Activation via External USDT
+    test_section_3_card_activation(tokens)
+    
+    # Section 4: Regression Sanity
+    test_section_4_regression()
+    
+    # Print summary
+    all_passed = print_summary()
+    
+    # Exit with appropriate code
+    sys.exit(0 if all_passed else 1)
+
+if __name__ == '__main__':
+    main()

@@ -519,5 +519,82 @@ function PlatformWalletsAdmin() {
 }
 
 
-export { OverviewAdmin as AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin }
+export { OverviewAdmin as AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin }
+
+function DepositsAdmin() {
+  const { api } = useApp()
+  const [list, setList] = useState([])
+  const [filter, setFilter] = useState('pending')
+  const load = async () => { try { const { deposits } = await api.get('/admin/deposits'); setList(deposits) } catch(e) {} }
+  useEffect(() => { load() }, [])
+  const action = async (d, act) => {
+    try { await api.post(`/admin/deposits/${d.id}/${act}`, {}); toast.success(`Deposit ${act}d`); load() }
+    catch(e) { toast.error(e.message) }
+  }
+  const filtered = list.filter(d => filter === 'all' ? true : d.status === filter)
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        {['pending','approved','rejected','all'].map(f => (
+          <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs capitalize ${filter===f?'gold-btn':'border border-gold-500/25 text-muted-foreground'}`}>{f}</button>
+        ))}
+      </div>
+      {filtered.length === 0 && <div className="text-muted-foreground text-sm">No deposit requests.</div>}
+      <div className="space-y-3">
+        {filtered.map(d => (
+          <div key={d.id} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs flex-1 min-w-0">
+              <div><div className="text-muted-foreground uppercase text-[10px]">User</div><div className="truncate">{d.to_username || d.user_id}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div>{d.method}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono">{fmt(d.amount, d.currency)}</div></div>
+              <div className="col-span-2"><div className="text-muted-foreground uppercase text-[10px]">Tx / Note</div><div className="font-mono text-[10px] break-all">{d.tx_hash || d.note || '—'}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={d.status==='approved'?'border-emerald-500/40 text-emerald-400':d.status==='rejected'?'border-red-500/40 text-red-400':'border-gold-500/40 text-gold'}>{d.status}</Badge></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div>{new Date(d.created_at).toLocaleString()}</div></div>
+            </div>
+            {d.status === 'pending' && (
+              <div className="flex gap-2 shrink-0">
+                <Button size="sm" onClick={()=>action(d,'approve')} className="gold-btn">Approve & credit</Button>
+                <Button size="sm" variant="outline" onClick={()=>action(d,'reject')} className="border-red-500/40 text-red-400">Reject</Button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function CardApprovalsAdmin() {
+  const { api } = useApp()
+  const [list, setList] = useState([])
+  const load = async () => { try { const { cards } = await api.get('/admin/cards'); setList(cards) } catch(e) {} }
+  useEffect(() => { load() }, [])
+  const action = async (c, act) => {
+    try { await api.post(`/admin/cards/${c.id}/${act}`, {}); toast.success(`Card ${act}d`); load() }
+    catch(e) { toast.error(e.message) }
+  }
+  return (
+    <div className="space-y-3">
+      {list.length === 0 && <div className="text-muted-foreground text-sm">No pending card activations.</div>}
+      {list.map(c => (
+        <div key={c.id} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs flex-1 min-w-0">
+            <div><div className="text-muted-foreground uppercase text-[10px]">User</div><div className="truncate">{c.user_id}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Tier</div><div className="capitalize">{c.tier}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Fee</div><div className="font-mono">{c.activation_fee_usdt} USDT</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Network</div><div>{c.activation_network_used || c.activation_network}</div></div>
+            <div className="col-span-2 md:col-span-1"><div className="text-muted-foreground uppercase text-[10px]">Tx hash</div><div className="font-mono text-[10px] break-all">{c.activation_tx_hash || '—'}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className="border-gold-500/40 text-gold">{c.status}</Badge></div>
+          </div>
+          {(c.status === 'pending_verification' || c.status === 'pending_activation') && (
+            <div className="flex gap-2 shrink-0">
+              <Button size="sm" onClick={()=>action(c,'approve')} className="gold-btn">Approve</Button>
+              <Button size="sm" variant="outline" onClick={()=>action(c,'reject')} className="border-red-500/40 text-red-400">Reject</Button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
 

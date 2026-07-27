@@ -210,6 +210,51 @@ backend:
           agent: "testing"
           comment: "✅ All admin endpoints working perfectly. GET /admin/overview returns counts. GET /admin/users returns user list. Search by query parameter works. POST /admin/users/{id}/adjust with credit/debit works correctly. Freeze/unfreeze/block/unblock all work. Blocked user login returns 403. GET /admin/kyc returns KYC list. POST /admin/kyc/{id}/approve updates user.kyc_status. GET /admin/settings returns settings. PUT /admin/settings updates settings. GET /admin/transactions returns all transactions. GET /admin/audit returns audit log with expected actions (user.register, user.login, transfer.internal, etc). Non-admin access to /admin/* correctly returns 403."
 
+  - task: "KYC gating on deposit/withdraw/card request/card activate"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Message 295 changes: All deposit/withdraw/card endpoints now return 403 with code=KYC_REQUIRED when user.kyc_status !== 'approved'."
+        - working: true
+          agent: "testing"
+          comment: "✅ KYC gating working perfectly (4/4 tests passed). Fresh user with kyc_status='unverified' correctly blocked from: (1) POST /deposit → 403 with code=KYC_REQUIRED ✅ (2) POST /withdraw → 403 with code=KYC_REQUIRED ✅ (3) POST /cards/request → 403 with code=KYC_REQUIRED ✅ (4) POST /cards/{id}/activate → 403 with code=KYC_REQUIRED ✅. All endpoints return proper error messages and status codes."
+
+  - task: "Deposit request pending flow + admin approve/reject"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Message 295 changes: POST /deposit creates deposit_request with status='pending' (no auto-credit). Admin endpoints: GET /admin/deposits, POST /admin/deposits/:id/approve|reject."
+        - working: true
+          agent: "testing"
+          comment: "✅ Deposit request flow working perfectly (10/10 tests passed). (1) User POST /deposit creates request with status='pending' ✅ (2) Wallet balance NOT auto-credited (remains unchanged) ✅ (3) Admin GET /deposits returns pending requests ✅ (4) Admin POST /deposits/:id/approve credits wallet + creates transaction + writes block ✅ (5) Transaction record created with type='deposit', status='completed' ✅ (6) Reject path: balance unchanged after rejection ✅. Complete flow from request → admin approval → wallet credit verified working correctly."
+
+  - task: "Card activation via external USDT tx_hash + admin approve/reject"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Message 295 changes: Card activation removed pay_from_wallet path. Only tx_hash accepted, card goes to status='pending_verification'. Admin endpoints: GET /admin/cards (pending only), POST /admin/cards/:id/approve|reject."
+        - working: true
+          agent: "testing"
+          comment: "✅ Card activation via external USDT working perfectly (7/7 tests passed). (1) POST /cards/request creates card with status='pending_activation' ✅ (2) POST /cards/:id/activate without tx_hash returns 400 with error about tx_hash requirement ✅ (3) POST /cards/:id/activate with tx_hash sets status='pending_verification' ✅ (4) USDT wallet balance NOT auto-debited (remains unchanged) ✅ (5) Admin GET /cards returns pending cards ✅ (6) Admin POST /cards/:id/approve sets status='active' + writes block ✅ (7) User GET /cards shows card with status='active' ✅. Complete flow from request → tx_hash submission → admin approval → activation verified working correctly."
+
 frontend:
   - task: "Luxury Landing page (black/gold, hero, features, cards, pricing, FAQ, CTA)"
     implemented: true
@@ -250,7 +295,7 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 1
+  test_sequence: 3
   run_ui: false
 
 test_plan:
@@ -270,5 +315,11 @@ agent_communication:
       message: "✅ HYDRATION MISMATCH BUG FIX VERIFIED - PASS! Comprehensive testing completed: (1) Landing page load - NO hydration errors ✅ (2) Navigation through all tabs (Home, Features, Cards, Services, About Us) - NO hydration errors ✅ (3) Footer Terms link - NO hydration errors ✅ (4) Admin login (admin@aurela.io / Admin@123) - NO hydration errors ✅ (5) Admin panel navigation (Overview, Users, KYC, Audit) - NO hydration errors ✅. Total console messages: 1-2 (extremely clean). Total hydration errors detected: 0. The suppressHydrationWarning fix on both <html> and <body> tags in /app/app/layout.js is working perfectly. All pages render correctly with expected content. Bug is completely resolved."
     - agent: "user"
       message: "Quick regression check requested after docker-compose.yml change (added certbot-run service). Test 6 specific endpoints: (1) GET /api/health (2) GET /api/config (3) GET /api/rates (4) POST /api/auth/login with admin@aurelawallet.com / Aurela@123# (5) GET /api/auth/me (6) GET /api/admin/platform-wallets with TRC20 USDT address TLgjfeg8Mqw5ueo1CGC8eTb4EHysPMMA6S"
+    - agent: "main"
+      message: "Applied Message 295 business-logic changes: (1) POST /api/deposit now creates a deposit_request with status='pending' — funds are NOT credited automatically. (2) POST /api/withdraw, /api/deposit, /api/cards/request, /api/cards/:id/activate now all return 403 with code=KYC_REQUIRED when user.kyc_status !== 'approved'. (3) Card activation removed the pay_from_wallet path entirely — only tx_hash is accepted, card goes to status='pending_verification'. (4) Added new admin endpoints: GET /api/admin/deposits, POST /api/admin/deposits/:id/approve|reject, GET /api/admin/cards (pending only), POST /api/admin/cards/:id/approve|reject. Please run a focused backend regression: A) admin login (admin@aurelawallet.com / Aurela@123#) → GET /admin/deposits, GET /admin/cards should return 200. B) Register a fresh user, then attempt POST /api/deposit, /api/withdraw, /api/cards/request → each should return 403 with KYC_REQUIRED. C) Approve KYC via admin, then POST /api/deposit → should return {ok:true, request:{status:'pending'}} and NOT increase the wallet balance. Verify wallet balance stays flat. D) Admin POST /admin/deposits/:id/approve → verifies wallet balance is now credited and transaction+block created. E) Fresh user (with KYC approved), POST /cards/request then /cards/:id/activate with tx_hash='0x' + longhash → card.status='pending_verification', USDT wallet balance UNCHANGED. Admin approve → card.status='active'. F) Rejection paths should also work. Backend file: /app/app/api/[[...path]]/route.js. Existing admin creds already in test_credentials."
     - agent: "testing"
       message: "✅ REGRESSION TEST COMPLETE - ALL 6/6 CHECKS PASSED! (1) GET /api/health → 200 {ok:true} ✅ (2) GET /api/config → 200 with fiat, crypto, activation_wallet keys ✅ (3) GET /api/rates → 200 with fx (50 currencies) and crypto_usd (30 assets) maps populated ✅ (4) POST /api/auth/login with admin@aurelawallet.com / Aurela@123# → 200 with token and user.role=super_admin ✅ (5) GET /api/auth/me → 200 ✅ (6) GET /api/admin/platform-wallets → 200 with 8 platform wallets including TRC20 USDT address TLgjfeg8Mqw5ueo1CGC8eTb4EHysPMMA6S ✅. No regressions detected. Backend API at /api is fully functional after docker-compose.yml deployment change."
+    - agent: "user"
+      message: "Run focused regression + new-feature test on Message 295 changes: (1) KYC gating on deposit/withdraw/cards - verify 403 with KYC_REQUIRED for unverified users. (2) Deposit request flow - verify pending status, no auto-credit, admin approve/reject. (3) Card activation via external USDT - verify tx_hash requirement, pending_verification status, no auto-debit, admin approve/reject. (4) Regression sanity - health, config, rates, transfer."
+    - agent: "testing"
+      message: "✅ FOCUSED REGRESSION + NEW FEATURE TEST COMPLETE - ALL 25/25 TESTS PASSED! Comprehensive testing of Message 295 business logic changes completed successfully. **SECTION 1: KYC GATING (4/4 PASSED)** - Fresh user with kyc_status='unverified' correctly blocked from deposit/withdraw/card request/card activate, all return 403 with code=KYC_REQUIRED ✅. **SECTION 2: DEPOSIT REQUEST FLOW (10/10 PASSED)** - Complete flow verified: user creates deposit request (status='pending') → wallet balance NOT auto-credited → admin GET /deposits lists pending requests → admin approves → wallet credited + transaction created + block written → reject path also works (balance unchanged) ✅. **SECTION 3: CARD ACTIVATION VIA EXTERNAL USDT (7/7 PASSED)** - Complete flow verified: user requests card (status='pending_activation') → activation without tx_hash returns 400 error → activation with tx_hash sets status='pending_verification' → USDT wallet NOT auto-debited → admin GET /cards lists pending → admin approves → card status='active' ✅. **SECTION 4: REGRESSION SANITY (4/4 PASSED)** - Health endpoint (200 ok=true) ✅, Config endpoint (200 with all keys) ✅, Rates endpoint (200 with fx + crypto_usd) ✅, Transfer between users (balances update correctly) ✅. All new business logic working correctly. No regressions detected. Backend is production-ready."
