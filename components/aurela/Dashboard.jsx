@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useCallback } from 'react'
 import { useApp, FIAT_META, CRYPTO_META, fmt, KYC_DOCS_BY_COUNTRY, KYC_COUNTRIES, FIAT_METHODS } from './store'
 import { AurelaLogo, AurelaWordmark } from './Logo'
 import { CardVisual } from './Landing'
@@ -17,7 +17,7 @@ import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
-  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon
+  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink
 } from 'lucide-react'
 import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -54,8 +54,12 @@ export function Dashboard() {
   const [txs, setTxs] = useState([])
   const [cards, setCards] = useState([])
   const [notif, setNotif] = useState({ total: 0, counts: {}, items: [] })
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const NAV = isAdmin ? [...USER_NAV, ...ADMIN_NAV] : USER_NAV
+
+  // Close mobile nav after selecting a tab
+  const goTab = useCallback((id) => { setTab(id); setMobileNavOpen(false) }, [])
 
   const loadWallets = async () => {
     try { const { wallets, totals } = await api.get('/wallets'); setWallets(wallets); setTotals(totals) } catch(e) {}
@@ -130,14 +134,51 @@ export function Dashboard() {
       </aside>
 
       <main className="lg:ml-64 min-h-screen">
+        {/* Mobile slide-in nav drawer */}
+        {mobileNavOpen && (
+          <div className="fixed inset-0 z-50 lg:hidden" onClick={() => setMobileNavOpen(false)}>
+            <div className="absolute inset-0 bg-onyx-950/85 backdrop-blur-sm"/>
+            <aside className="absolute left-0 top-0 h-full w-72 max-w-[85vw] bg-onyx-900 border-r border-gold-500/20 p-5 flex flex-col overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <AurelaWordmark />
+                <button onClick={() => setMobileNavOpen(false)} className="h-9 w-9 rounded-full bg-secondary flex items-center justify-center text-muted-foreground hover:text-gold"><X className="h-4 w-4"/></button>
+              </div>
+              <div className="mt-6 space-y-1 flex-1">
+                {USER_NAV.map(n => (
+                  <button key={n.id} onClick={() => goTab(n.id)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${tab === n.id ? 'gold-btn' : 'text-muted-foreground hover:text-gold hover:bg-gold-500/5'}`}>
+                    <n.icon className="h-4 w-4"/> {n.label}
+                  </button>
+                ))}
+                {isAdmin && (
+                  <>
+                    <div className="pt-4 pb-1 px-3 text-[10px] uppercase tracking-widest text-gold">Administration</div>
+                    {ADMIN_NAV.map(n => (
+                      <button key={n.id} onClick={() => goTab(n.id)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition ${tab === n.id ? 'gold-btn' : 'text-muted-foreground hover:text-gold hover:bg-gold-500/5'}`}>
+                        <n.icon className="h-4 w-4"/> {n.label}
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+              <Button variant="outline" onClick={logout} className="mt-4 border-red-500/40 text-red-400 hover:bg-red-500/10 justify-start">
+                <LogOut className="h-4 w-4 mr-2"/> Sign out
+              </Button>
+            </aside>
+          </div>
+        )}
         {/* Topbar */}
         <div className="sticky top-0 z-30 border-b border-gold-500/10 bg-onyx-900/70 backdrop-blur-xl">
-          <div className="flex items-center justify-between px-6 py-4">
-            <div>
-              <div className="text-xs uppercase tracking-widest text-muted-foreground">{tab === 'overview' ? 'Welcome back' : NAV.find(n => n.id === tab)?.label}</div>
-              <div className="font-display text-2xl">{user?.full_name || user?.username}</div>
+          <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <button onClick={() => setMobileNavOpen(true)} className="lg:hidden h-10 w-10 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 flex items-center justify-center shrink-0" aria-label="Open menu">
+                <Menu className="h-4 w-4 text-gold"/>
+              </button>
+              <div className="min-w-0">
+                <div className="text-[10px] sm:text-xs uppercase tracking-widest text-muted-foreground truncate">{tab === 'overview' ? 'Welcome back' : NAV.find(n => n.id === tab)?.label}</div>
+                <div className="font-display text-base sm:text-2xl truncate">{user?.full_name || user?.username}</div>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
               <CurrencySwitcher onSaved={async () => { await refreshUser(); await loadWallets() }} />
               {isAdmin && (
                 <DropdownMenu>
@@ -232,14 +273,16 @@ export function Dashboard() {
               </DropdownMenu>
             </div>
           </div>
-          {/* Mobile nav */}
-          <div className="lg:hidden overflow-x-auto flex gap-2 px-6 pb-3">
-            {NAV.map(n => (
-              <button key={n.id} onClick={() => setTab(n.id)} className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${tab === n.id ? 'gold-btn' : 'text-muted-foreground border border-gold-500/20'}`}>
-                {n.label}
-              </button>
-            ))}
-          </div>
+          {/* Mobile quick-tabs (user nav only, admin uses drawer) */}
+          {!isAdmin && (
+            <div className="lg:hidden overflow-x-auto flex gap-2 px-4 sm:px-6 pb-3">
+              {NAV.map(n => (
+                <button key={n.id} onClick={() => setTab(n.id)} className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${tab === n.id ? 'gold-btn' : 'text-muted-foreground border border-gold-500/20'}`}>
+                  {n.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="p-6">
@@ -1493,6 +1536,10 @@ function ChainTab() {
   const [blocks, setBlocks] = useState([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState(null) // { blocks, users, wallets } | null
+  const [detail, setDetail] = useState(null) // { block, prev, next, transaction }
+  const [addrDetail, setAddrDetail] = useState(null) // { wallet, owner, blocks, stats }
 
   const load = async () => {
     setLoading(true)
@@ -1508,70 +1555,228 @@ function ChainTab() {
   }
   useEffect(() => { load() }, [scope])
 
+  const doSearch = async () => {
+    const q = query.trim()
+    if (!q) { setResults(null); return }
+    try {
+      const res = await api.get(`/chain/search?q=${encodeURIComponent(q)}`)
+      setResults(res)
+    } catch(e) { toast.error(e.message) }
+  }
+  const openBlock = async (hash) => {
+    try { const res = await api.get(`/chain/tx/${hash}`); setDetail(res); setAddrDetail(null) } catch(e) { toast.error(e.message) }
+  }
+  const openAddress = async (addr) => {
+    try { const res = await api.get(`/chain/address/${encodeURIComponent(addr)}`); setAddrDetail(res); setDetail(null) } catch(e) { toast.error(e.message) }
+  }
+  const displayBlocks = results?.blocks && results.blocks.length ? results.blocks : blocks
+
   return (
     <div className="space-y-6">
-      <div className="card-luxury rounded-2xl p-6 relative overflow-hidden">
+      <div className="card-luxury rounded-2xl p-5 sm:p-6 relative overflow-hidden">
         <div className="absolute inset-0 opacity-30" style={{ background: 'radial-gradient(400px 200px at 100% 0%, rgba(212,175,55,0.25), transparent 70%)' }}/>
-        <div className="relative flex items-center justify-between flex-wrap gap-4">
-          <div>
+        <div className="relative flex items-start justify-between flex-wrap gap-4">
+          <div className="min-w-0">
             <div className="text-xs uppercase tracking-widest text-gold">Aurela Chain</div>
-            <div className="font-display text-3xl mt-1">Our own hash-linked ledger.</div>
-            <p className="text-sm text-muted-foreground mt-2 max-w-2xl">Every internal money movement inside Aurela is written to an append-only ledger. Each block is cryptographically linked to the previous one via SHA-256 — making every transaction verifiable, tamper-evident and permanently recorded.</p>
+            <div className="font-display text-2xl sm:text-3xl mt-1">Explorer</div>
+            <p className="text-sm text-muted-foreground mt-2 max-w-2xl">Hash-linked, tamper-evident ledger. Search any transaction hash, block number, username, email, or wallet address.</p>
           </div>
-          <div className="flex items-center gap-4">
-            <div>
-              <div className="text-xs uppercase tracking-widest text-muted-foreground">Blocks</div>
-              <div className="font-display text-3xl gold-text">{total.toLocaleString()}</div>
-            </div>
+          <div className="text-right">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Total blocks</div>
+            <div className="font-display text-3xl gold-text">{total.toLocaleString()}</div>
           </div>
         </div>
-        <div className="relative flex gap-2 mt-6">
-          <Button onClick={() => setScope('mine')} className={scope==='mine' ? 'gold-btn rounded-full' : 'rounded-full'} variant={scope==='mine'?'default':'outline'}>My blocks</Button>
-          <Button onClick={() => setScope('all')} className={scope==='all' ? 'gold-btn rounded-full' : 'rounded-full border-gold-500/40'} variant={scope==='all'?'default':'outline'}>Network explorer</Button>
+        <div className="relative mt-6 flex gap-2 flex-wrap">
+          <div className="flex-1 min-w-[240px] relative">
+            <Search className="h-4 w-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2"/>
+            <Input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key==='Enter' && doSearch()} placeholder="Search hash, block #, @username, email, wallet address..." className="pl-9 bg-secondary border-gold-500/20 h-11"/>
+            {results && (
+              <button onClick={() => { setQuery(''); setResults(null) }} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-gold"><X className="h-4 w-4"/></button>
+            )}
+          </div>
+          <Button onClick={doSearch} className="gold-btn rounded-full h-11 px-6"><Search className="h-4 w-4 mr-2"/> Search</Button>
+        </div>
+        {!results && (
+          <div className="relative flex gap-2 mt-4">
+            <Button onClick={() => setScope('mine')} className={scope==='mine' ? 'gold-btn rounded-full' : 'rounded-full'} variant={scope==='mine'?'default':'outline'} size="sm">My blocks</Button>
+            <Button onClick={() => setScope('all')} className={scope==='all' ? 'gold-btn rounded-full' : 'rounded-full border-gold-500/40'} variant={scope==='all'?'default':'outline'} size="sm">Network explorer</Button>
+          </div>
+        )}
+      </div>
+
+      {/* Search results: users + wallets */}
+      {results && ((results.users?.length || 0) + (results.wallets?.length || 0)) > 0 && (
+        <div className="grid md:grid-cols-2 gap-4">
+          {results.users?.length > 0 && (
+            <div className="card-luxury rounded-2xl p-5">
+              <div className="text-xs uppercase tracking-widest text-gold mb-3">Matching accounts</div>
+              <div className="space-y-2">
+                {results.users.map(u => (
+                  <div key={u.id} className="flex items-center gap-3 p-2 rounded-lg bg-secondary/40">
+                    {u.avatar ? <img src={u.avatar} alt="" className="h-8 w-8 rounded-full object-cover"/> : <div className="h-8 w-8 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 text-sm font-bold">{(u.full_name||u.username||'A').charAt(0).toUpperCase()}</div>}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm truncate">{u.full_name || '—'}</div>
+                      <div className="text-[10px] text-muted-foreground truncate">@{u.username} · {u.email}</div>
+                    </div>
+                    <Badge variant="outline" className="border-gold-500/30 text-[10px]">{u.kyc_status || 'unverified'}</Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {results.wallets?.length > 0 && (
+            <div className="card-luxury rounded-2xl p-5">
+              <div className="text-xs uppercase tracking-widest text-gold mb-3">Matching wallets</div>
+              <div className="space-y-2">
+                {results.wallets.map(w => (
+                  <button key={w.id} onClick={() => openAddress(w.address || w.id)} className="w-full text-left flex items-center gap-3 p-2 rounded-lg bg-secondary/40 hover:bg-gold-500/10">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-mono text-gold truncate">{w.currency} · {w.owner?.username ? '@'+w.owner.username : '(external)'}</div>
+                      <div className="text-[10px] text-muted-foreground truncate">{w.address || w.id}</div>
+                    </div>
+                    <div className="text-xs font-mono text-right shrink-0">{fmt(w.balance, w.currency)}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="card-luxury rounded-2xl overflow-hidden">
+        <div className="table-scroll">
+          <table className="w-full text-sm">
+            <thead className="bg-gold-500/5 text-xs uppercase tracking-widest text-muted-foreground">
+              <tr>
+                <th className="px-4 py-3 text-left">Block</th>
+                <th className="px-4 py-3 text-left">Type</th>
+                <th className="px-4 py-3 text-left">From → To</th>
+                <th className="px-4 py-3 text-right">Amount</th>
+                <th className="px-4 py-3 text-left">Network</th>
+                <th className="px-4 py-3 text-left">Hash</th>
+                <th className="px-4 py-3 text-left">Time</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gold-500/10">
+              {loading && <tr><td colSpan="7" className="px-4 py-8 text-center text-muted-foreground">Loading blocks…</td></tr>}
+              {!loading && displayBlocks.length === 0 && (
+                <tr><td colSpan="7" className="px-4 py-8 text-center text-muted-foreground">{results ? 'No blocks matched your search.' : 'No blocks yet.'}</td></tr>
+              )}
+              {displayBlocks.map(b => (
+                <tr key={b.id} className="hover:bg-gold-500/5 cursor-pointer" onClick={() => openBlock(b.hash)}>
+                  <td className="px-4 py-3 font-mono text-gold-bright">#{b.block_number}</td>
+                  <td className="px-4 py-3 text-xs capitalize whitespace-nowrap">{(b.type || '').replace(/_/g,' ')}</td>
+                  <td className="px-4 py-3 text-xs">
+                    <div className="truncate max-w-[140px]">{b.from_username || '—'}</div>
+                    <div className="text-muted-foreground truncate max-w-[140px]">→ {b.to_username || b.destination || '—'}</div>
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono">{fmt(b.amount, b.currency)}</td>
+                  <td className="px-4 py-3">
+                    <Badge variant="outline" className={b.network === 'AURELA' ? 'border-gold-500 text-gold' : 'border-muted text-muted-foreground'}>{b.network}</Badge>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="font-mono text-[11px] text-gold hover:underline">{b.hash.slice(0, 10)}…{b.hash.slice(-6)}</span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(b.timestamp).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
-      <div className="card-luxury rounded-2xl overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gold-500/5 text-xs uppercase tracking-widest text-muted-foreground">
-            <tr>
-              <th className="px-4 py-3 text-left">Block</th>
-              <th className="px-4 py-3 text-left">Type</th>
-              <th className="px-4 py-3 text-left">From → To</th>
-              <th className="px-4 py-3 text-right">Amount</th>
-              <th className="px-4 py-3 text-left">Network</th>
-              <th className="px-4 py-3 text-left">Hash</th>
-              <th className="px-4 py-3 text-left">Time</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gold-500/10">
-            {loading && <tr><td colSpan="7" className="px-4 py-8 text-center text-muted-foreground">Loading blocks…</td></tr>}
-            {!loading && blocks.length === 0 && (
-              <tr><td colSpan="7" className="px-4 py-8 text-center text-muted-foreground">No blocks yet. Send an internal transfer or activate a card to create your first block.</td></tr>
-            )}
-            {blocks.map(b => (
-              <tr key={b.id} className="hover:bg-gold-500/5">
-                <td className="px-4 py-3 font-mono text-gold-bright">#{b.block_number}</td>
-                <td className="px-4 py-3 text-xs capitalize">{(b.type || '').replace('_',' ')}</td>
-                <td className="px-4 py-3 text-xs">
-                  <div>{b.from_username || '—'}</div>
-                  <div className="text-muted-foreground">→ {b.to_username || b.destination || '—'}</div>
-                </td>
-                <td className="px-4 py-3 text-right font-mono">{fmt(b.amount, b.currency)}</td>
-                <td className="px-4 py-3">
-                  <Badge variant="outline" className={b.network === 'AURELA' ? 'border-gold-500 text-gold' : 'border-muted text-muted-foreground'}>{b.network}</Badge>
-                </td>
-                <td className="px-4 py-3">
-                  <button onClick={() => { navigator.clipboard.writeText(b.hash); toast.success('Hash copied') }} className="font-mono text-[11px] text-gold hover:underline">
-                    {b.hash.slice(0, 10)}…{b.hash.slice(-6)}
+      {/* Block detail modal */}
+      <Dialog open={!!detail} onOpenChange={v => !v && setDetail(null)}>
+        <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-3xl max-h-[92vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><Blocks className="h-5 w-5 text-gold"/>Block #{detail?.block?.block_number}</DialogTitle></DialogHeader>
+          {detail && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-secondary/50 border border-gold-500/10">
+                <div className="text-[10px] uppercase text-muted-foreground">Block hash</div>
+                <div className="font-mono text-gold text-xs break-all mt-1">{detail.block.hash}</div>
+                <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(detail.block.hash); toast.success('Hash copied') }} className="mt-2 border-gold-500/40"><Copy className="h-3 w-3 mr-2"/>Copy hash</Button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                {[
+                  ['Type', (detail.block.type || '').replace(/_/g,' ')],
+                  ['Network', detail.block.network],
+                  ['Currency', detail.block.currency],
+                  ['Amount', fmt(detail.block.amount, detail.block.currency)],
+                  ['From', detail.block.from_username || '—'],
+                  ['To', detail.block.to_username || detail.block.destination || '—'],
+                  ['Method', detail.block.method || '—'],
+                  ['Block #', detail.block.block_number],
+                  ['Timestamp', new Date(detail.block.timestamp).toLocaleString()],
+                  ['Previous hash', detail.block.prev_hash?.slice(0, 24) + '…'],
+                  ...(detail.block.destination ? [['External destination', detail.block.destination]] : []),
+                  ...(detail.block.card_id ? [['Card ID', detail.block.card_id]] : []),
+                ].map(([k, v]) => (
+                  <div key={k}>
+                    <div className="text-[10px] uppercase text-muted-foreground">{k}</div>
+                    <div className="text-sm break-all font-mono">{v}</div>
+                  </div>
+                ))}
+              </div>
+              {detail.transaction && (
+                <div className="p-4 rounded-xl bg-secondary/40 border border-gold-500/10">
+                  <div className="text-xs uppercase tracking-widest text-gold mb-2">Linked transaction</div>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div><div className="text-muted-foreground text-[10px] uppercase">ID</div><div className="font-mono break-all">{detail.transaction.id}</div></div>
+                    <div><div className="text-muted-foreground text-[10px] uppercase">Status</div><div>{detail.transaction.status}</div></div>
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-between pt-2">
+                <Button variant="outline" onClick={() => detail.prev && openBlock(detail.prev.hash)} disabled={!detail.prev} className="border-gold-500/40">← Prev</Button>
+                <Button variant="outline" onClick={() => detail.next && openBlock(detail.next.hash)} disabled={!detail.next} className="border-gold-500/40">Next →</Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Address detail modal */}
+      <Dialog open={!!addrDetail} onOpenChange={v => !v && setAddrDetail(null)}>
+        <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-3xl max-h-[92vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="font-display flex items-center gap-2"><Wallet className="h-5 w-5 text-gold"/>Wallet · {addrDetail?.wallet?.currency}</DialogTitle></DialogHeader>
+          {addrDetail && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-secondary/50 border border-gold-500/10">
+                <div className="text-[10px] uppercase text-muted-foreground">Address</div>
+                <div className="font-mono text-gold text-xs break-all mt-1">{addrDetail.wallet.address || addrDetail.wallet.id}</div>
+                {addrDetail.owner && (
+                  <div className="mt-3 flex items-center gap-2">
+                    {addrDetail.owner.avatar ? <img src={addrDetail.owner.avatar} alt="" className="h-8 w-8 rounded-full object-cover"/> : <div className="h-8 w-8 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 text-sm font-bold">{(addrDetail.owner.full_name || addrDetail.owner.username || 'A').charAt(0).toUpperCase()}</div>}
+                    <div className="flex-1">
+                      <div className="text-sm">{addrDetail.owner.full_name || addrDetail.owner.username}</div>
+                      <div className="text-[10px] text-muted-foreground">@{addrDetail.owner.username}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="p-3 rounded-lg bg-secondary/40 text-center"><div className="text-[10px] uppercase text-muted-foreground">Balance</div><div className="font-mono text-gold">{fmt(addrDetail.wallet.balance, addrDetail.wallet.currency)}</div></div>
+                <div className="p-3 rounded-lg bg-secondary/40 text-center"><div className="text-[10px] uppercase text-muted-foreground">Total received</div><div className="font-mono text-emerald-400">{fmt(addrDetail.stats.incoming, addrDetail.wallet.currency)}</div></div>
+                <div className="p-3 rounded-lg bg-secondary/40 text-center"><div className="text-[10px] uppercase text-muted-foreground">Total sent</div><div className="font-mono text-red-400">{fmt(addrDetail.stats.outgoing, addrDetail.wallet.currency)}</div></div>
+              </div>
+              <div className="text-xs uppercase tracking-widest text-gold">Recent transactions ({addrDetail.blocks.length})</div>
+              <div className="space-y-1 max-h-64 overflow-y-auto">
+                {addrDetail.blocks.map(b => (
+                  <button key={b.id} onClick={() => openBlock(b.hash)} className="w-full text-left flex items-center gap-2 p-2 rounded-lg hover:bg-gold-500/10">
+                    <div className="text-[10px] font-mono text-gold-bright shrink-0">#{b.block_number}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs capitalize truncate">{(b.type||'').replace(/_/g,' ')} · {b.from_username} → {b.to_username || b.destination}</div>
+                      <div className="text-[10px] text-muted-foreground truncate">{b.hash.slice(0,20)}…</div>
+                    </div>
+                    <div className={`text-xs font-mono shrink-0 ${b.to_user_id === addrDetail.wallet.user_id ? 'text-emerald-400' : 'text-red-400'}`}>{b.to_user_id === addrDetail.wallet.user_id ? '+' : '-'}{fmt(b.amount, b.currency)}</div>
                   </button>
-                </td>
-                <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{new Date(b.timestamp).toLocaleString()}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                ))}
+                {addrDetail.blocks.length === 0 && <div className="text-center text-muted-foreground text-xs py-4">No transactions yet.</div>}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

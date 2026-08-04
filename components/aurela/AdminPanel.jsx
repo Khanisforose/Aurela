@@ -115,15 +115,23 @@ function UsersAdmin() {
   const [users, setUsers] = useState([])
   const [adjTarget, setAdjTarget] = useState(null)
   const [adjForm, setAdjForm] = useState({ currency: 'USD', amount: '', kind: 'credit' })
+  const [detail, setDetail] = useState(null) // { user, wallets, cards, transactions, kyc, sessions }
+  const [loadingDetail, setLoadingDetail] = useState(false)
 
   const load = async () => {
     try { const { users } = await api.get('/admin/users' + (q ? `?q=${encodeURIComponent(q)}` : '')); setUsers(users) } catch(e) {}
   }
   useEffect(() => { load() }, [])
 
+  const openDetail = async (u) => {
+    setLoadingDetail(true)
+    try { const res = await api.get(`/admin/users/${u.id}`); setDetail(res) }
+    catch(e) { toast.error(e.message) }
+    finally { setLoadingDetail(false) }
+  }
   const action = async (u, act) => {
-    if (act === 'delete' && !confirm(`Delete ${u.username}? This is permanent.`)) return
-    try { await api.post(`/admin/users/${u.id}/${act}`, {}); toast.success(`User ${act}`); load() } catch(e) { toast.error(e.message) }
+    if (act === 'delete' && (typeof window !== 'undefined' && !window.confirm(`Delete ${u.username}? This is permanent.`))) return
+    try { await api.post(`/admin/users/${u.id}/${act}`, {}); toast.success(`User ${act}`); load(); if (detail?.user?.id === u.id) setDetail(null) } catch(e) { toast.error(e.message) }
   }
   const adjust = async () => {
     try {
@@ -156,15 +164,20 @@ function UsersAdmin() {
           </thead>
           <tbody className="divide-y divide-gold-500/10">
             {users.map(u => (
-              <tr key={u.id} className="hover:bg-gold-500/5">
+              <tr key={u.id} className="hover:bg-gold-500/5 cursor-pointer" onClick={() => openDetail(u)}>
                 <td className="px-4 py-3">
-                  <div className="font-medium">{u.full_name || u.username}</div>
-                  <div className="text-xs text-muted-foreground">@{u.username} · {u.email}</div>
+                  <div className="flex items-center gap-3">
+                    {u.avatar ? <img src={u.avatar} alt="" className="h-9 w-9 rounded-full object-cover shrink-0"/> : <div className="h-9 w-9 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 text-sm font-bold shrink-0">{(u.full_name || u.username || 'A').charAt(0).toUpperCase()}</div>}
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{u.full_name || u.username}</div>
+                      <div className="text-xs text-muted-foreground truncate">@{u.username} · {u.email}</div>
+                    </div>
+                  </div>
                 </td>
                 <td className="px-4 py-3 text-xs"><Badge variant="outline" className={`${u.role==='admin'||u.role==='super_admin'?'border-gold-500 text-gold':'border-muted text-muted-foreground'}`}>{u.role}</Badge></td>
                 <td className="px-4 py-3 text-xs"><Badge variant="outline" className={u.status==='active'?'border-emerald-500/40 text-emerald-400':u.status==='blocked'?'border-red-500/40 text-red-400':'border-yellow-500/40 text-yellow-400'}>{u.status}</Badge></td>
                 <td className="px-4 py-3 text-xs"><Badge variant="outline" className={u.kyc_status==='approved'?'border-emerald-500/40 text-emerald-400':'border-muted text-muted-foreground'}>{u.kyc_status}</Badge></td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
                   <div className="flex justify-end gap-1 flex-wrap">
                     <Button size="sm" variant="outline" className="border-gold-500/40 h-8 text-xs" onClick={()=>{setAdjTarget(u); setAdjForm({ currency:'USD', amount:'', kind:'credit' })}}><Wallet className="h-3 w-3 mr-1"/> Fund</Button>
                     <Button size="sm" variant="outline" className="h-8 text-xs" onClick={()=>action(u, u.status==='frozen'?'unfreeze':'freeze')}><Snowflake className="h-3 w-3 mr-1"/> {u.status==='frozen'?'Unfreeze':'Freeze'}</Button>
@@ -209,6 +222,116 @@ function UsersAdmin() {
           <DialogFooter>
             <Button onClick={adjust} disabled={!adjForm.amount} className="gold-btn w-full">Apply adjustment</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* User detail modal */}
+      <Dialog open={!!detail} onOpenChange={v => !v && setDetail(null)}>
+        <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-4xl max-h-[92vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="font-display">User details</DialogTitle></DialogHeader>
+          {detail && (
+            <div className="space-y-5">
+              {/* Header */}
+              <div className="flex items-start gap-4 p-4 rounded-xl bg-secondary/40 border border-gold-500/10">
+                {detail.user.avatar ? <img src={detail.user.avatar} alt="" className="h-20 w-20 rounded-full object-cover border-2 border-gold-500/40"/> : <div className="h-20 w-20 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 text-3xl font-bold">{(detail.user.full_name || detail.user.username || 'A').charAt(0).toUpperCase()}</div>}
+                <div className="flex-1 min-w-0">
+                  <div className="font-display text-2xl truncate">{detail.user.full_name || detail.user.username}</div>
+                  <div className="text-sm text-muted-foreground truncate">@{detail.user.username} · {detail.user.email}</div>
+                  <div className="mt-2 flex gap-2 flex-wrap">
+                    <Badge variant="outline" className="border-gold-500/40 text-gold text-[10px]">{detail.user.role}</Badge>
+                    <Badge variant="outline" className={detail.user.status==='active'?'border-emerald-500/40 text-emerald-400 text-[10px]':'border-red-500/40 text-red-400 text-[10px]'}>{detail.user.status}</Badge>
+                    <Badge variant="outline" className={detail.user.kyc_status==='approved'?'border-emerald-500/40 text-emerald-400 text-[10px]':'border-muted text-muted-foreground text-[10px]'}>KYC: {detail.user.kyc_status || 'unverified'}</Badge>
+                    {detail.user.two_fa_enabled && <Badge variant="outline" className="border-emerald-500/40 text-emerald-400 text-[10px]">2FA on</Badge>}
+                  </div>
+                </div>
+              </div>
+
+              {/* Profile */}
+              <div>
+                <div className="text-xs uppercase tracking-widest text-gold mb-2">Profile</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                  {[
+                    ['Phone', detail.user.phone],
+                    ['Country', detail.user.country || detail.kyc?.country],
+                    ['City', detail.user.city || detail.kyc?.city],
+                    ['Address', detail.user.address || detail.kyc?.address],
+                    ['Postal code', detail.user.postal_code || detail.kyc?.postal_code],
+                    ['Preferred currency', detail.user.preferred_currency],
+                    ['Signed up', detail.user.created_at ? new Date(detail.user.created_at).toLocaleString() : null],
+                  ].map(([k, v]) => (
+                    <div key={k}><div className="text-[10px] uppercase text-muted-foreground">{k}</div><div className="text-sm break-all">{v || <span className="text-muted-foreground">—</span>}</div></div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Wallets */}
+              <div>
+                <div className="text-xs uppercase tracking-widest text-gold mb-2">Wallets ({detail.wallets.length})</div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-56 overflow-y-auto">
+                  {detail.wallets.filter(w => w.balance > 0).slice(0, 30).map(w => (
+                    <div key={w.id} className="p-2 rounded-lg bg-secondary/40 border border-gold-500/10">
+                      <div className="text-[10px] uppercase text-muted-foreground">{w.currency}</div>
+                      <div className="font-mono text-sm text-gold">{fmt(w.balance, w.currency)}</div>
+                      {w.address && <div className="font-mono text-[9px] text-muted-foreground break-all mt-1">{w.address.slice(0,14)}…</div>}
+                    </div>
+                  ))}
+                  {detail.wallets.filter(w => w.balance > 0).length === 0 && <div className="text-xs text-muted-foreground col-span-full">All wallets have zero balance.</div>}
+                </div>
+              </div>
+
+              {/* Cards */}
+              <div>
+                <div className="text-xs uppercase tracking-widest text-gold mb-2">Cards ({detail.cards.length})</div>
+                <div className="space-y-1">
+                  {detail.cards.length === 0 && <div className="text-xs text-muted-foreground">No cards issued.</div>}
+                  {detail.cards.map(c => (
+                    <div key={c.id} className="flex items-center gap-3 p-2 rounded-lg bg-secondary/40 text-xs">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-mono truncate">{c.number}</div>
+                        <div className="text-[10px] text-muted-foreground">{c.tier_name} · {c.holder}</div>
+                      </div>
+                      <Badge variant="outline" className={c.status==='active'?'border-emerald-500/40 text-emerald-400 text-[10px]':'border-gold-500/30 text-gold text-[10px]'}>{c.status}</Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* KYC snapshot */}
+              {detail.kyc && (
+                <div>
+                  <div className="text-xs uppercase tracking-widest text-gold mb-2">Latest KYC submission</div>
+                  <div className="p-3 rounded-lg bg-secondary/40 grid grid-cols-2 gap-2 text-xs">
+                    <div><div className="text-[10px] uppercase text-muted-foreground">Document</div><div>{detail.kyc.id_type} · {detail.kyc.id_number}</div></div>
+                    <div><div className="text-[10px] uppercase text-muted-foreground">Country / Mobile</div><div>{detail.kyc.country} · {detail.kyc.mobile}</div></div>
+                    <div><div className="text-[10px] uppercase text-muted-foreground">Status</div><div>{detail.kyc.status}</div></div>
+                    <div><div className="text-[10px] uppercase text-muted-foreground">Submitted</div><div>{detail.kyc.submitted_at ? new Date(detail.kyc.submitted_at).toLocaleString() : ''}</div></div>
+                  </div>
+                </div>
+              )}
+
+              {/* Recent transactions */}
+              <div>
+                <div className="text-xs uppercase tracking-widest text-gold mb-2">Recent activity ({detail.transactions.length})</div>
+                <div className="space-y-1 max-h-56 overflow-y-auto">
+                  {detail.transactions.length === 0 && <div className="text-xs text-muted-foreground">No transactions yet.</div>}
+                  {detail.transactions.slice(0, 20).map(t => (
+                    <div key={t.id} className="flex items-center gap-2 p-2 rounded-lg bg-secondary/40 text-xs">
+                      <div className="capitalize shrink-0 w-20">{t.type.replace(/_/g,' ')}</div>
+                      <div className="flex-1 min-w-0 truncate text-muted-foreground">{t.from_username || '—'} → {t.to_username || t.destination || '—'}</div>
+                      <div className="font-mono text-gold shrink-0">{fmt(t.amount, t.currency)}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex gap-2 flex-wrap pt-2 border-t border-gold-500/10">
+                <Button size="sm" variant="outline" onClick={() => { setDetail(null); setAdjTarget(detail.user); setAdjForm({ currency:'USD', amount:'', kind:'credit' }) }} className="border-gold-500/40"><Wallet className="h-3 w-3 mr-1"/> Adjust balance</Button>
+                <Button size="sm" variant="outline" onClick={() => action(detail.user, detail.user.status==='frozen'?'unfreeze':'freeze')}>{detail.user.status==='frozen'?'Unfreeze':'Freeze'}</Button>
+                <Button size="sm" variant="outline" onClick={() => action(detail.user, detail.user.status==='blocked'?'unblock':'block')}>{detail.user.status==='blocked'?'Unblock':'Block'}</Button>
+                <Button size="sm" variant="outline" onClick={() => action(detail.user, 'delete')} className="border-red-500/40 text-red-400 hover:bg-red-500/10">Delete user</Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

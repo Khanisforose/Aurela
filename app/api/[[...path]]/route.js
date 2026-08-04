@@ -593,10 +593,86 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ blocks: clean(blocks), total }))
     }
     if (route === '/chain/mine' && method === 'GET') {
+      const u = await getUserByToken(db, request)
+      if (!u) return handleCORS(NextResponse.json({ error: 'Unauthorized' }, { status: 401 }))
       const blocks = await db.collection('aurela_chain').find({
-        $or: [{ from_user_id: user.id }, { to_user_id: user.id }]
+        $or: [{ from_user_id: u.id }, { to_user_id: u.id }]
       }).sort({ block_number: -1 }).limit(100).toArray()
       return handleCORS(NextResponse.json({ blocks: clean(blocks) }))
+    }
+    // Explorer search — matches hash, block number, username, email, wallet address
+    if (route === '/chain/search' && method === 'GET') {
+      const url = new URL(request.url)
+      const q = (url.searchParams.get('q') || '').trim()
+      if (!q) return handleCORS(NextResponse.json({ blocks: [], users: [], wallets: [] }))
+      const blockNum = parseInt(q, 10)
+      const blockOr = [
+        { hash: { $regex: q, $options: 'i' } },
+        { prev_hash: { $regex: q, $options: 'i' } },
+        { from_username: { $regex: q, $options: 'i' } },
+        { to_username: { $regex: q, $options: 'i' } },
+        { destination: { $regex: q, $options: 'i' } },
+        { currency: q.toUpperCase() },
+      ]
+      if (!Number.isNaN(blockNum)) blockOr.push({ block_number: blockNum })
+      const blocks = await db.collection('aurela_chain').find({ $or: blockOr }).sort({ block_number: -1 }).limit(50).toArray()
+      const users = await db.collection('users').find({
+        $or: [
+          { username: { $regex: q, $options: 'i' } },
+          { email: { $regex: q, $options: 'i' } },
+          { full_name: { $regex: q, $options: 'i' } },
+        ]
+      }).project({ id: 1, username: 1, email: 1, full_name: 1, kyc_status: 1, avatar: 1, role: 1 }).limit(20).toArray()
+      const wallets = await db.collection('wallets').find({
+        $or: [
+          { address: { $regex: q, $options: 'i' } },
+          { id: { $regex: q, $options: 'i' } },
+        ]
+      }).limit(20).toArray()
+      const walletUserIds = [...new Set(wallets.map(w => w.user_id))]
+      const walletUsers = walletUserIds.length ? await db.collection('users').find({ id: { $in: walletUserIds } }).project({ id: 1, username: 1, avatar: 1 }).toArray() : []
+      const userById = Object.fromEntries(walletUsers.map(u => [u.id, u]))
+      const walletsOut = wallets.map(w => ({ ...clean(w), owner: userById[w.user_id] ? clean(userById[w.user_id]) : null }))
+      return handleCORS(NextResponse.json({ blocks: clean(blocks), users: clean(users), wallets: walletsOut }))
+    }
+    // Full block detail
+    if (route.startsWith('/chain/tx/') && method === 'GET') {
+      const hash = route.split('/')[3]
+      const block = await db.collection('aurela_chain').findOne({ hash })
+      if (!block) return handleCORS(NextResponse.json({ error: 'Block not found' }, { status: 404 }))
+      const [prev, next] = await Promise.all([
+        block.block_number > 0 ? db.collection('aurela_chain').findOne({ block_number: block.block_number - 1 }) : null,
+        db.collection('aurela_chain').findOne({ block_number: block.block_number + 1 }),
+      ])
+      let tx = null
+      if (block.tx_id) tx = await db.collection('transactions').findOne({ id: block.tx_id })
+      return handleCORS(NextResponse.json({
+        block: clean(block),
+        prev: prev ? { block_number: prev.block_number, hash: prev.hash } : null,
+        next: next ? { block_number: next.block_number, hash: next.hash } : null,
+        transaction: tx ? clean(tx) : null,
+      }))
+    }
+    // Full detail of one address / wallet
+    if (route.startsWith('/chain/address/') && method === 'GET') {
+      const addr = decodeURIComponent(route.split('/')[3])
+      const wallet = await db.collection('wallets').findOne({ $or: [{ address: addr }, { id: addr }] })
+      if (!wallet) return handleCORS(NextResponse.json({ error: 'Address not found' }, { status: 404 }))
+      const owner = await db.collection('users').findOne({ id: wallet.user_id })
+      const blocks = await db.collection('aurela_chain').find({
+        $or: [{ from_user_id: wallet.user_id, currency: wallet.currency }, { to_user_id: wallet.user_id, currency: wallet.currency }]
+      }).sort({ block_number: -1 }).limit(200).toArray()
+      const stats = { incoming: 0, outgoing: 0, count: blocks.length }
+      for (const b of blocks) {
+        if (b.to_user_id === wallet.user_id) stats.incoming += b.amount || 0
+        if (b.from_user_id === wallet.user_id) stats.outgoing += b.amount || 0
+      }
+      return handleCORS(NextResponse.json({
+        wallet: clean(wallet),
+        owner: owner ? { id: owner.id, username: owner.username, avatar: owner.avatar || null, kyc_status: owner.kyc_status, full_name: owner.full_name } : null,
+        blocks: clean(blocks),
+        stats,
+      }))
     }
 
     // ---------- Authenticated ----------
@@ -906,6 +982,26 @@ async function handleRoute(request, { params }) {
       const isSuper = user.role === 'super_admin'
 
       // Super-admin only: promote / demote roles
+      if (route.startsWith('/admin/users/') && route.split('/').length === 4 && method === 'GET') {
+        const userId = route.split('/')[3]
+        const target = await db.collection('users').findOne({ id: userId })
+        if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
+        const [wallets, cards, transactions, kycRec, sessions] = await Promise.all([
+          db.collection('wallets').find({ user_id: userId }).toArray(),
+          db.collection('cards').find({ user_id: userId }).sort({ created_at: -1 }).toArray(),
+          db.collection('transactions').find({ $or: [{ user_id: userId }, { from_user_id: userId }, { to_user_id: userId }] }).sort({ created_at: -1 }).limit(50).toArray(),
+          db.collection('kyc').find({ user_id: userId }).sort({ submitted_at: -1 }).limit(1).toArray(),
+          db.collection('sessions').find({ user_id: userId }).sort({ created_at: -1 }).limit(5).toArray(),
+        ])
+        return handleCORS(NextResponse.json({
+          user: clean(target),
+          wallets: clean(wallets),
+          cards: clean(cards),
+          transactions: clean(transactions),
+          kyc: kycRec[0] ? clean(kycRec[0]) : null,
+          sessions: clean(sessions.map(s => ({ id: s.id, ip: s.ip, user_agent: s.user_agent, created_at: s.created_at }))),
+        }))
+      }
       if (route.startsWith('/admin/users/') && route.endsWith('/role') && method === 'POST') {
         if (!isSuper) return handleCORS(NextResponse.json({ error: 'Super admin only' }, { status: 403 }))
         const targetId = route.split('/')[3]

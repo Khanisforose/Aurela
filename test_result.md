@@ -439,6 +439,67 @@ backend:
           agent: "testing"
           comment: "✅ Currency whitelist working perfectly (5/5 tests passed). **TEST A: Config endpoint shape (PASS)** - GET /api/config returns all 4 required keys: enabled_fiat (50), enabled_crypto (30), all_fiat (50 currencies including USD, EUR, GBP, INR, AED, JPY, CAD, AUD, SGD, CHF, etc.), all_crypto (30 assets including BTC, ETH, USDT, USDC, BNB, SOL, XRP, ADA, DOGE, MATIC, etc.) ✅. **TEST B: Admin settings PUT (PASS)** - PUT /api/admin/settings with enabled_fiat=['USD','EUR'] and enabled_crypto=['BTC','ETH','USDT'] → 200, GET /api/config immediately reflects the changes ✅. **TEST C: Deposit enforcement (PASS)** - Fresh KYC-approved user: (1) POST /deposit with currency='GBP' (disabled) → 400 with error 'GBP deposits are currently disabled by the platform.' ✅ (2) POST /deposit with currency='USD' (enabled) → 200 ✅ (3) POST /deposit with currency='SOL' (disabled) → 400 with error 'SOL deposits are currently disabled by the platform.' ✅ (4) POST /deposit with currency='BTC' (enabled) → 200 ✅. **TEST D: Withdrawal enforcement (PASS)** - User with active card + USD balance: (1) POST /withdraw with currency='GBP' (disabled) → 400 with error 'GBP withdrawals are currently disabled by the platform.' ✅ (2) POST /withdraw with currency='USD' (enabled) → 200 ✅. **TEST E: Restore defaults (PASS)** - PUT /api/admin/settings to restore all 50 fiat + 30 crypto → 200, GET /api/config confirms all currencies enabled ✅. Complete currency whitelist feature working perfectly with proper enforcement, clear error messages, and admin control."
 
+
+  - task: "Chain explorer search endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Chain explorer search working perfectly (3/3 tests passed). **TEST 1: Search with q=admin** - GET /api/chain/search?q=admin → 200 with correct response shape {blocks, users, wallets}. Response contains blocks=1, users=1, wallets=0 ✅. **TEST 2: Search with q=admin@aurelawallet.com** - Admin user found in search results ✅. **TEST 3: Empty query** - GET /api/chain/search?q= → 200 with empty arrays for all three keys ✅. All three arrays (blocks, users, wallets) are present in response as required."
+
+  - task: "Block detail endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Block detail endpoint working perfectly (3/3 tests passed). **TEST 1: Get recent block** - GET /api/chain?limit=1 → 200 with blocks array, successfully retrieved block hash ✅. **TEST 2: Block detail** - GET /api/chain/tx/{hash} → 200 with correct response shape {block, prev, next, transaction}. Block detail includes block_number=17, prev=True, next=False ✅. **TEST 3: Nonexistent block** - GET /api/chain/tx/nonexistent-hash-12345 → 404 as expected ✅."
+
+  - task: "Address/Wallet detail endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Address/Wallet detail endpoint working perfectly (3/3 tests passed). **TEST 1: Get wallet id** - GET /api/wallets (admin) → 200, successfully retrieved wallet id and currency ✅. **TEST 2: Address detail** - GET /api/chain/address/{wallet_id} → 200 with correct response shape {wallet, owner, blocks, stats}. Stats object includes all required keys: incoming, outgoing, count ✅. **TEST 3: Nonexistent address** - GET /api/chain/address/does-not-exist-12345 → 404 as expected ✅."
+
+  - task: "Admin user detail endpoint"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Admin user detail endpoint working perfectly (3/3 tests passed). **TEST 1: Admin users list** - GET /api/admin/users → 200 with users array ✅. **TEST 2: Admin user detail** - GET /api/admin/users/{id} → 200 with all required keys: user, wallets (80 wallets), cards, transactions, kyc, sessions. CRITICAL: Sessions array does NOT include 'token' field (security requirement met) - only includes id, ip, user_agent, created_at ✅. **TEST 3: Non-admin access** - Non-admin user attempting GET /api/admin/users/{id} → 403 Forbidden as expected ✅."
+
+  - task: "Chain mine endpoint auth requirement"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Chain mine endpoint auth requirement working perfectly (2/2 tests passed). **TEST 1: No auth** - GET /api/chain/mine (no auth header) → 401 Unauthorized as expected ✅. **TEST 2: With valid token** - GET /api/chain/mine (with valid user token) → 200 with {blocks} array containing 0 blocks ✅. Auth requirement properly enforced."
+
 frontend:
   - task: "Luxury Landing page (black/gold, hero, features, cards, pricing, FAQ, CTA)"
     implemented: true
@@ -513,6 +574,11 @@ agent_communication:
     - agent: "testing"
       message: "✅ MAJOR FEATURE DROP REGRESSION TEST COMPLETE - 39/40 TESTS PASSED (97.5%)! Comprehensive testing of all new features completed. **SECTION A: GOOGLE SIGN-IN (3/3 PASSED)** - Empty body returns 400 'Missing Google credential' ✅, fake access_token returns 401 ✅, invalid credential returns 401 ✅. **SECTION B: WITHDRAWAL ADMIN APPROVAL PIPELINE (10/10 PASSED)** - Complete flow verified: user submits withdrawal → balance debited + locked → admin GET /withdrawals lists pending → admin approves → locked released + transaction created ✅, reject path returns funds to balance ✅. **SECTION C: CARD LIMITS + DELETE (7/7 PASSED)** - Max 3 cards enforced ✅, duplicate tier blocked ✅, user can delete card and re-request same tier ✅. **SECTION D: 24H CARD ACTIVATION DELAY (2/2 PASSED)** - Admin approve without activate_now → status='activating' with usable_at +24h ✅, admin approve with activate_now=true → status='active' immediately ✅. **SECTION E: EXTENDED KYC + ADMIN DETAIL (3/3 PASSED)** - KYC accepts extended fields + base64 images ✅, admin GET /kyc/:id returns {kyc, user} with all fields ✅. **SECTION F: PROFILE AVATAR + EDIT (3/3 PASSED)** - Avatar upload works ✅, large avatar (>3MB) rejected ✅. **SECTION G: ADMIN NOTIFICATIONS (1/1 PASSED)** - Returns {counts, total, items} with correct shape ✅. **SECTION H: ADMIN DELETE (2/2 PASSED)** - Admin can delete cards and transactions ✅. **SECTION I: ADMIN OVERVIEW (1/1 PASSED)** - Returns deposits_pending & withdrawals_pending ✅. **SECTION J: 2FA SETUP (0/1 FAILED)** - POST /profile/2fa/setup returns 500 error due to otplib import issue ❌. **REGRESSION (7/7 PASSED)** - Health, config, rates, admin login, transfer, deposit flow, card activation all working ✅. **CRITICAL ISSUE:** 2FA setup endpoint has otplib dynamic import error (500 Internal Server Error). All other endpoints working perfectly. No regressions detected."
     - agent: "user"
+    - agent: "user"
+      message: "Focused test of the new **Aurela Chain explorer** and **admin user detail** endpoints, plus regression on the currency toggles from the previous session. Admin creds: `admin@aurelawallet.com` / `Aurela@123#`. Test A — Chain Explorer Search (public, no auth required): GET /api/chain/search?q=admin → 200 with { blocks: [...], users: [...], wallets: [...] }. Test B — Block Detail: GET /api/chain?limit=1 → get one recent block's hash, then GET /api/chain/tx/{hash} → 200 with { block, prev, next, transaction }. Test C — Address / Wallet Detail: GET /api/chain/address/{wallet_id} → 200 with { wallet, owner, blocks, stats:{incoming, outgoing, count} }. Test D — Admin User Detail (auth required, admin only): GET /api/admin/users/{id} → 200 with { user, wallets, cards, transactions, kyc, sessions } (sessions should NOT include token field). Test E — /chain/mine now requires auth (was buggy before, referenced undefined user): GET /api/chain/mine (no auth) → 401, GET /api/chain/mine (with valid user token) → 200 with { blocks: [...] }. Test F — Regression (must still pass): GET /api/health, GET /api/config, POST /api/auth/login, POST /api/deposit, POST /api/withdraw."
+    - agent: "testing"
+      message: "✅ CHAIN EXPLORER & ADMIN USER DETAIL TEST COMPLETE - ALL 6/6 SECTIONS PASSED! Comprehensive testing of new chain explorer endpoints completed successfully. **SECTION A: CHAIN EXPLORER SEARCH (3/3 PASSED)** - GET /api/chain/search?q=admin → 200 with correct shape {blocks, users, wallets} ✅. Search with q=admin@aurelawallet.com finds admin user ✅. Empty query returns empty arrays ✅. **SECTION B: BLOCK DETAIL (3/3 PASSED)** - GET /api/chain?limit=1 retrieves recent block hash ✅. GET /api/chain/tx/{hash} → 200 with {block, prev, next, transaction} ✅. Nonexistent hash → 404 ✅. **SECTION C: ADDRESS/WALLET DETAIL (3/3 PASSED)** - GET /api/chain/address/{wallet_id} → 200 with {wallet, owner, blocks, stats} where stats includes incoming, outgoing, count ✅. Nonexistent address → 404 ✅. **SECTION D: ADMIN USER DETAIL (3/3 PASSED)** - GET /api/admin/users → 200 with users list ✅. GET /api/admin/users/{id} → 200 with all required keys (user, wallets, cards, transactions, kyc, sessions). CRITICAL SECURITY: Sessions array does NOT include 'token' field (only id, ip, user_agent, created_at) ✅. Non-admin access → 403 ✅. **SECTION E: CHAIN MINE AUTH (2/2 PASSED)** - GET /api/chain/mine (no auth) → 401 ✅. GET /api/chain/mine (with token) → 200 with {blocks} ✅. **SECTION F: REGRESSION (5/5 PASSED)** - Health, config, admin login, deposit (creates pending request), withdraw (creates pending request with active card) all working ✅. All new chain explorer endpoints working perfectly. No regressions detected. Backend is production-ready."
+
       message: "Quick focused re-test of ONLY the 2FA setup endpoint that failed previously. Task: Log in as admin (admin@aurelawallet.com / Aurela@123#), then call POST /api/profile/2fa/setup with empty body. Expected: 200 OK with JSON { secret: <string>, uri: <string starting with otpauth://totp/...>, qr_svg: <string starting with '<svg'> }. MUST NOT return 500 Internal Server Error. I fixed the otplib v13+ API mismatch: replaced authenticator.generateSecret() with otp.generateSecret(), and authenticator.check() with otp.verifySync({secret, token, window:1}). Also applied same fix to /profile/2fa/enable, /profile/2fa/disable, and the 2FA verification during /auth/login. Just verify the 2FA setup endpoint returns 200 with the correct shape."
     - agent: "testing"
       message: "✅ 2FA SETUP ENDPOINT RE-TEST COMPLETE - PASSED! Focused re-test of POST /api/profile/2fa/setup completed successfully. (1) Admin login (admin@aurelawallet.com / Aurela@123#) → 200 with token and role=super_admin ✅ (2) POST /api/profile/2fa/setup with empty body → 200 OK ✅ (3) Response structure validated: secret is 32-char string ✅, uri starts with 'otpauth://totp/' ✅, qr_svg starts with '<svg' ✅. Fix confirmed working: otplib v13 functional API (otp.generateSecret() and otp.verifySync()) is now correctly used. No 500 errors. The 2FA setup endpoint is fully functional."
