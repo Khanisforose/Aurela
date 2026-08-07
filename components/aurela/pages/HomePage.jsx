@@ -152,10 +152,10 @@ export function HomePage({ goAuth, goPage }) {
               <Button onClick={() => goPage('cards')} className="gold-btn rounded-full">Discover cards <ArrowRight className="ml-2 h-4 w-4"/></Button>
             </div>
           </div>
-          <div className="relative h-[420px]">
-            <CardVisual tier="elite" style={{ top: 0, left: '10%', rotate: '-6deg', zIndex: 3 }} />
-            <CardVisual tier="premium" style={{ top: 100, left: '30%', rotate: '2deg', zIndex: 2 }} />
-            <CardVisual tier="basic" style={{ top: 200, left: '50%', rotate: '10deg', zIndex: 1 }} />
+          <div className="relative h-[380px] sm:h-[420px] max-w-full overflow-hidden">
+            <CardVisual tier="elite" style={{ top: 0, left: '2%', rotate: '-6deg', zIndex: 3 }} />
+            <CardVisual tier="premium" style={{ top: 100, left: '18%', rotate: '2deg', zIndex: 2 }} />
+            <CardVisual tier="basic" style={{ top: 200, left: '34%', rotate: '10deg', zIndex: 1 }} />
           </div>
         </div>
       </section>

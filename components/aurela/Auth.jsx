@@ -6,6 +6,7 @@ import { AurelaLogo } from './Logo'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ArrowLeft, Eye, EyeOff, ShieldCheck, MailCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -15,12 +16,15 @@ export function Auth() {
   const { setRoute, authMode, setAuthMode, login, api, refreshUser } = useApp()
   const [showPwd, setShowPwd] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [step, setStep] = useState('form') // form | otp | totp
+  const [step, setStep] = useState('form') // form | otp | totp | forgot | forgot_verify
   const [otp, setOtp] = useState('')
   const [totp, setTotp] = useState('')
+  const [forgotEmail, setForgotEmail] = useState('')
+  const [forgotCode, setForgotCode] = useState('')
+  const [newPwd, setNewPwd] = useState('')
   const [signupId, setSignupId] = useState(null)
   const [devOtp, setDevOtp] = useState(null)
-  const [form, setForm] = useState({ identifier: '', email: '', username: '', full_name: '', phone: '', password: '' })
+  const [form, setForm] = useState({ identifier: '', email: '', first_name: '', last_name: '', country: 'US', phone: '', password: '' })
 
   const submit = async (e) => {
     e.preventDefault(); setLoading(true)
@@ -34,9 +38,11 @@ export function Auth() {
           throw err
         }
       } else {
-        // Two-step signup: init -> verify OTP
+        // Two-step signup: init -> verify OTP. Send full profile
+        const full_name = `${form.first_name.trim()} ${form.last_name.trim()}`.trim()
         const res = await api.post('/auth/register/init', {
-          email: form.email, username: form.username, full_name: form.full_name, phone: form.phone, password: form.password
+          email: form.email, first_name: form.first_name, last_name: form.last_name, full_name,
+          country: form.country, phone: form.phone, password: form.password
         })
         setSignupId(res.signup_id)
         setDevOtp(res.dev_otp || null)
@@ -126,21 +132,43 @@ export function Auth() {
                     <>
                       <div className="grid grid-cols-2 gap-3">
                         <div>
-                          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Full name</Label>
-                          <Input required value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+                          <Label className="text-xs uppercase tracking-widest text-muted-foreground">First name *</Label>
+                          <Input required value={form.first_name} onChange={e => setForm({ ...form, first_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
                         </div>
                         <div>
-                          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Username</Label>
-                          <Input required value={form.username} onChange={e => setForm({ ...form, username: e.target.value.toLowerCase() })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+                          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Last name *</Label>
+                          <Input required value={form.last_name} onChange={e => setForm({ ...form, last_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
                         </div>
                       </div>
                       <div>
-                        <Label className="text-xs uppercase tracking-widest text-muted-foreground">Email</Label>
+                        <Label className="text-xs uppercase tracking-widest text-muted-foreground">Email *</Label>
                         <Input type="email" required value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} placeholder="you@domain.com" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
                       </div>
-                      <div>
-                        <Label className="text-xs uppercase tracking-widest text-muted-foreground">Phone</Label>
-                        <Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="+1 555 0000" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Country *</Label>
+                          <Select value={form.country} onValueChange={v => setForm({ ...form, country: v })}>
+                            <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
+                            <SelectContent className="max-h-64">
+                              {[
+                                ['US','🇺🇸 +1'],['CA','🇨🇦 +1'],['GB','🇬🇧 +44'],['IN','🇮🇳 +91'],['AE','🇦🇪 +971'],
+                                ['DE','🇩🇪 +49'],['FR','🇫🇷 +33'],['IT','🇮🇹 +39'],['ES','🇪🇸 +34'],['NL','🇳🇱 +31'],
+                                ['AU','🇦🇺 +61'],['NZ','🇳🇿 +64'],['SG','🇸🇬 +65'],['MY','🇲🇾 +60'],['ID','🇮🇩 +62'],
+                                ['TH','🇹🇭 +66'],['PH','🇵🇭 +63'],['JP','🇯🇵 +81'],['KR','🇰🇷 +82'],['CN','🇨🇳 +86'],
+                                ['HK','🇭🇰 +852'],['TW','🇹🇼 +886'],['PK','🇵🇰 +92'],['BD','🇧🇩 +880'],['LK','🇱🇰 +94'],
+                                ['SA','🇸🇦 +966'],['QA','🇶🇦 +974'],['KW','🇰🇼 +965'],['BH','🇧🇭 +973'],['OM','🇴🇲 +968'],
+                                ['EG','🇪🇬 +20'],['NG','🇳🇬 +234'],['KE','🇰🇪 +254'],['ZA','🇿🇦 +27'],['BR','🇧🇷 +55'],
+                                ['MX','🇲🇽 +52'],['AR','🇦🇷 +54'],['CL','🇨🇱 +56'],['CO','🇨🇴 +57'],['CH','🇨🇭 +41'],
+                                ['SE','🇸🇪 +46'],['NO','🇳🇴 +47'],['DK','🇩🇰 +45'],['FI','🇫🇮 +358'],['PL','🇵🇱 +48'],
+                                ['RU','🇷🇺 +7'],['TR','🇹🇷 +90'],['IL','🇮🇱 +972']
+                              ].map(([code, label]) => <SelectItem key={code} value={code}>{label}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="col-span-2">
+                          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Mobile number *</Label>
+                          <Input required inputMode="tel" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} placeholder="Mobile number" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+                        </div>
                       </div>
                     </>
                   )}
@@ -154,6 +182,11 @@ export function Auth() {
                       </button>
                     </div>
                     {authMode === 'register' && <div className="text-[10px] text-muted-foreground mt-1">Minimum 8 characters.</div>}
+                    {authMode === 'login' && (
+                      <div className="text-right mt-1">
+                        <button type="button" onClick={() => setStep('forgot')} className="text-[11px] text-gold hover:underline">Forgot password?</button>
+                      </div>
+                    )}
                   </div>
 
                   <Button disabled={loading} type="submit" className="gold-btn w-full h-12 rounded-xl">
@@ -208,12 +241,55 @@ export function Auth() {
                   <button onClick={() => setStep('form')} className="text-muted-foreground hover:text-gold">Change email</button>
                 </div>
 
-                {devOtp && (
+                {devOtp && process.env.NEXT_PUBLIC_SHOW_DEV_OTP === '1' && (
                   <div className="mt-4 p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-center">
                     <div className="text-[10px] uppercase tracking-widest text-yellow-400">Dev-only preview</div>
                     <div className="font-mono text-sm text-yellow-300">{devOtp}</div>
                   </div>
                 )}
+              </motion.div>
+            )}
+
+            {step === 'forgot' && (
+              <motion.div key="forgot" initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }}>
+                <div className="flex items-center justify-center gap-2 text-gold mb-3">
+                  <MailCheck className="h-5 w-5"/>
+                  <div className="font-display text-lg">Reset password</div>
+                </div>
+                <div className="text-sm text-muted-foreground text-center mb-6">Enter your email — we'll send you a 6-digit code to reset your password.</div>
+                <form onSubmit={async e => { e.preventDefault(); setLoading(true); try { await api.post('/auth/forgot/init', { email: forgotEmail }); toast.success('Reset code sent'); setStep('forgot_verify') } catch(err) { toast.error(err.message) } finally { setLoading(false) } }} className="space-y-4">
+                  <div>
+                    <Label className="text-xs uppercase tracking-widest text-muted-foreground">Email</Label>
+                    <Input type="email" required value={forgotEmail} onChange={e => setForgotEmail(e.target.value)} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+                  </div>
+                  <Button disabled={loading} type="submit" className="gold-btn w-full h-12 rounded-xl">{loading ? 'Sending…' : 'Send reset code'}</Button>
+                </form>
+                <div className="mt-4 text-center text-xs">
+                  <button onClick={() => setStep('form')} className="text-muted-foreground hover:text-gold">← Back to sign in</button>
+                </div>
+              </motion.div>
+            )}
+            {step === 'forgot_verify' && (
+              <motion.div key="forgot-verify" initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }}>
+                <div className="flex items-center justify-center gap-2 text-gold mb-3">
+                  <MailCheck className="h-5 w-5"/>
+                  <div className="font-display text-lg">Set new password</div>
+                </div>
+                <div className="text-sm text-muted-foreground text-center mb-6">Enter the code from <span className="text-gold-bright">{forgotEmail}</span> and your new password.</div>
+                <form onSubmit={async e => { e.preventDefault(); setLoading(true); try { await api.post('/auth/forgot/verify', { email: forgotEmail, code: forgotCode, new_password: newPwd }); toast.success('Password reset — please sign in'); setStep('form'); setForgotCode(''); setNewPwd(''); setForm({ ...form, identifier: forgotEmail }) } catch(err) { toast.error(err.message) } finally { setLoading(false) } }} className="space-y-4">
+                  <div>
+                    <Label className="text-xs uppercase tracking-widest text-muted-foreground">Reset code</Label>
+                    <Input required value={forgotCode} onChange={e => setForgotCode(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="••••••" className="mt-2 bg-secondary border-gold-500/20 h-14 text-center text-2xl font-mono tracking-[0.6em] text-gold-bright"/>
+                  </div>
+                  <div>
+                    <Label className="text-xs uppercase tracking-widest text-muted-foreground">New password</Label>
+                    <Input required type="password" minLength={8} value={newPwd} onChange={e => setNewPwd(e.target.value)} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+                  </div>
+                  <Button disabled={loading || forgotCode.length !== 6 || newPwd.length < 8} type="submit" className="gold-btn w-full h-12 rounded-xl">{loading ? 'Resetting…' : 'Reset password'}</Button>
+                </form>
+                <div className="mt-4 text-center text-xs">
+                  <button onClick={() => setStep('forgot')} className="text-muted-foreground hover:text-gold">← Change email</button>
+                </div>
               </motion.div>
             )}
 

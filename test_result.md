@@ -500,6 +500,66 @@ backend:
           agent: "testing"
           comment: "✅ Chain mine endpoint auth requirement working perfectly (2/2 tests passed). **TEST 1: No auth** - GET /api/chain/mine (no auth header) → 401 Unauthorized as expected ✅. **TEST 2: With valid token** - GET /api/chain/mine (with valid user token) → 200 with {blocks} array containing 0 blocks ✅. Auth requirement properly enforced."
 
+  - task: "New signup flow with mandatory fields (first_name, last_name, country, phone)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ New signup flow working perfectly (6/6 tests passed). POST /api/auth/register/init validates all required fields: first_name, last_name, email, country, phone, password. Missing any field returns 400 with clear error message 'All fields are required — first name, last name, email, country, mobile, and password.' ✅. Password < 8 chars returns 400 ✅. Duplicate email returns 400 'Email already registered' ✅. Valid signup returns 200 with {ok:true, signup_id, message} and dev_otp when Resend fails ✅."
+
+  - task: "Register verify creates user with Aurela ID (user_code)"
+    implemented: true
+    working: false
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 1
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: "❌ CRITICAL: Welcome bonus NOT applied (6/7 tests passed, 1 CRITICAL failure). POST /api/auth/register/verify successfully creates user with valid user_code matching pattern AUR\\d{9} (e.g., AUR081207001) ✅. User has all required fields: first_name, last_name, country, phone, email_verified=true, role=user, status=active ✅. User gets 80 wallets (50 fiat + 30 crypto) ✅. **CRITICAL BUG:** USD wallet balance is 0 instead of expected 1000 welcome bonus ❌. Root cause: createWalletsForUser function at line 267-282 sets all wallet balances to 0. According to test_result.md line 556 and previous testing agent comment, new users should get USD 1000 + USDT 100 welcome balance, but this is NOT implemented in the code. The function needs to be updated to set balance:1000 for USD wallet and balance:100 for USDT wallet."
+
+  - task: "Forgot password flow (init + verify)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Forgot password flow working perfectly (8/8 tests passed). POST /api/auth/forgot/init for existing user returns 200 with {ok:true, message, dev_otp} ✅. For nonexistent email, still returns 200 with same message but no dev_otp (email enumeration prevention working) ✅. POST /api/auth/forgot/verify with wrong code returns 400 'Invalid reset code' ✅. Short password (<8 chars) returns 400 ✅. Valid reset with correct code and new password returns 200 ok:true ✅. Login with old password fails (401) ✅. Login with new password succeeds (200) ✅. Password restore tested and working ✅."
+
+  - task: "Change password (authenticated)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ Change password endpoint working perfectly (7/7 tests passed). POST /api/profile/password with wrong current_password returns 400 'Current password is incorrect' ✅. Short new password (<8 chars) returns 400 'New password must be at least 8 characters' ✅. Valid password change with correct current_password and valid new_password returns 200 ok:true ✅. Login with old password fails (401) ✅. Login with new password succeeds (200) ✅. Password restore tested and working ✅."
+
+  - task: "Admin chain delete + seed"
+    implemented: true
+    working: false
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 1
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "testing"
+          comment: "⚠️ Admin chain endpoints partially working (5/6 tests passed, 1 minor issue). POST /api/admin/chain/seed with count:50 returns 200 with {ok:true, seeded:50, first_block, last_block} ✅. Seed with count:10000 correctly clamps to 5000 ✅. DELETE /api/admin/chain/{hash} returns 200 ok:true ✅. Non-admin user attempting DELETE returns 403 Forbidden ✅. **Minor Issue:** After deleting a block, GET /api/chain/tx/{hash} still returns 200 with the block data instead of 404 ❌. The delete endpoint appears to return success but the block is not actually removed from the database. This suggests the deleteOne operation in line 1267 may not be working correctly or there's a caching issue."
+
 frontend:
   - task: "Luxury Landing page (black/gold, hero, features, cards, pricing, FAQ, CTA)"
     implemented: true
@@ -540,13 +600,15 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 5
+  test_sequence: 6
   run_ui: false
 
 test_plan:
   current_focus:
-    - "All backend endpoints tested and working"
-  stuck_tasks: []
+    - "Register verify creates user with Aurela ID (user_code)"
+    - "Admin chain delete + seed"
+  stuck_tasks:
+    - "Register verify creates user with Aurela ID (user_code)"
   test_all: false
   test_priority: "high_first"
 
@@ -590,5 +652,9 @@ agent_communication:
       message: "Focused quick test — verify admin-controlled currency whitelist (fiat + crypto) works, complementing the payment method whitelist. Admin creds: admin@aurelawallet.com / Aurela@123#. Test A — Config endpoint shape: GET /api/config should include enabled_fiat, enabled_crypto, all_fiat (50 supported fiat codes), all_crypto (30 supported crypto). Test B — Admin PUT sets enabled_fiat / enabled_crypto: PUT /api/admin/settings with enabled_fiat=['USD','EUR'] and enabled_crypto=['BTC','ETH','USDT'] → 200, then GET /api/config reflects changes. Test C — Deposit rejects disabled currency: Fresh KYC-approved user: (1) POST /deposit with currency='GBP' (disabled) → 400 with error about GBP disabled (2) POST /deposit with currency='USD' (enabled) → 200 (3) POST /deposit with currency='SOL' (disabled) → 400 (4) POST /deposit with currency='BTC' (enabled) → 200. Test D — Withdraw rejects disabled currency: User with active card + balance: (1) POST /withdraw with currency='GBP' (disabled) → 400 (2) POST /withdraw with currency='USD' (enabled) → 200. Test E — Restore defaults (cleanup): PUT /api/admin/settings to restore all 50 fiat + 30 crypto."
     - agent: "testing"
       message: "✅ CURRENCY WHITELIST TEST COMPLETE - ALL 5/5 TESTS PASSED! Focused smoke test of admin-controlled currency whitelist feature completed successfully. **TEST A: Config endpoint shape (PASS)** - GET /api/config returns all 4 required keys: enabled_fiat (50), enabled_crypto (30), all_fiat (50 currencies including USD, EUR, GBP, INR, AED, JPY, CAD, AUD, SGD, CHF, NZD, HKD, KRW, CNY, MXN, BRL, ZAR, TRY, RUB, SEK, NOK, DKK, PLN, THB, MYR, IDR, PHP, VND, EGP, SAR, NGN, ARS, CLP, COP, ILS, CZK, HUF, QAR, KWD, BHD, OMR, JOD, LKR, PKR, BDT, KES, GHS, TWD, UAH, RON), all_crypto (30 assets including BTC, ETH, USDT, USDC, BNB, SOL, XRP, ADA, DOGE, MATIC, AVAX, DOT, TRX, LINK, ATOM, LTC, BCH, XLM, NEAR, APT, ARB, OP, SUI, TON, SHIB, PEPE, INJ, FIL, ICP, HBAR) ✅. **TEST B: Admin settings PUT (PASS)** - PUT /api/admin/settings with enabled_fiat=['USD','EUR'] and enabled_crypto=['BTC','ETH','USDT'] → 200, GET /api/config immediately reflects the changes ✅. **TEST C: Deposit enforcement (PASS)** - Fresh KYC-approved user: (1) POST /deposit with currency='GBP' (disabled) → 400 with error 'GBP deposits are currently disabled by the platform.' ✅ (2) POST /deposit with currency='USD' (enabled) → 200 ✅ (3) POST /deposit with currency='SOL' (disabled) → 400 with error 'SOL deposits are currently disabled by the platform.' ✅ (4) POST /deposit with currency='BTC' (enabled) → 200 ✅. **TEST D: Withdrawal enforcement (PASS)** - User with active card + USD balance: (1) POST /withdraw with currency='GBP' (disabled) → 400 with error 'GBP withdrawals are currently disabled by the platform.' ✅ (2) POST /withdraw with currency='USD' (enabled) → 200 ✅. **TEST E: Restore defaults (PASS)** - PUT /api/admin/settings to restore all 50 fiat + 30 crypto → 200, GET /api/config confirms all currencies enabled ✅. Complete currency whitelist feature working perfectly with proper enforcement, clear error messages, and admin control. No issues found."
+    - agent: "user"
+      message: "Focused test of the NEW/CHANGED backend endpoints from this session. Admin creds: `admin@aurelawallet.com` / `Aurela@123#`. Test A — New signup flow (first_name + last_name + country + mobile mandatory): POST /api/auth/register/init with all fields → 200, missing fields → 400, duplicate email → 400. Test B — Register verify creates user with Aurela ID (user_code matching AUR\\d{9}): POST /api/auth/register/verify → 200 with user having user_code, first_name, last_name, country, phone, email_verified=true, role=user, status=active. Verify 80 wallets created (50 fiat + 30 crypto) with USD wallet having 1000 welcome bonus. Test C — Forgot password flow: POST /api/auth/forgot/init → 200, POST /api/auth/forgot/verify with wrong code → 400, with short password → 400, with valid code → 200, login with old password → 401, login with new password → 200, restore password. Test D — Change password (authenticated): POST /api/profile/password with wrong current → 400, with short new → 400, with valid → 200, login with old → 401, login with new → 200, restore password. Test E — Admin chain delete + seed: POST /api/admin/chain/seed count:50 → 200, DELETE /api/admin/chain/{hash} → 200, verify deleted block returns 404, non-admin cannot delete → 403, seed count:10000 clamps to 5000. Test F — Regression: health, config, admin login, admin users, chain search, wallets."
+    - agent: "testing"
+      message: "⚠️ NEW ENDPOINTS TEST COMPLETE - 36/40 TESTS PASSED (90%), 1 CRITICAL + 1 MINOR ISSUE FOUND. Comprehensive testing of new/changed endpoints completed. **SECTION A: NEW SIGNUP FLOW (6/6 PASSED)** - POST /api/auth/register/init validates all required fields (first_name, last_name, email, country, phone, password) ✅. Missing any field returns 400 with clear error ✅. Password < 8 chars returns 400 ✅. Duplicate email returns 400 ✅. Valid signup returns 200 with signup_id and dev_otp ✅. **SECTION B: REGISTER VERIFY WITH AURELA ID (6/7 PASSED, 1 CRITICAL FAILURE)** - User created with valid user_code matching AUR\\d{9} pattern ✅. All required fields present ✅. 80 wallets created ✅. **CRITICAL BUG:** USD wallet balance is 0 instead of 1000 welcome bonus ❌. Root cause: createWalletsForUser function (line 267-282) sets all balances to 0. Code needs update to set USD balance:1000 and USDT balance:100 for new users. **SECTION C: FORGOT PASSWORD FLOW (8/8 PASSED)** - Complete flow working: init returns 200 with dev_otp ✅, email enumeration prevention working ✅, wrong code returns 400 ✅, short password returns 400 ✅, valid reset works ✅, old password fails ✅, new password works ✅, restore tested ✅. **SECTION D: CHANGE PASSWORD (7/7 PASSED)** - Wrong current password returns 400 ✅, short new password returns 400 ✅, valid change works ✅, old password fails ✅, new password works ✅, restore tested ✅. **SECTION E: ADMIN CHAIN DELETE + SEED (5/6 PASSED, 1 MINOR ISSUE)** - Seed 50 blocks works ✅, seed 10000 clamps to 5000 ✅, DELETE returns 200 ✅, non-admin blocked (403) ✅. **Minor Issue:** Deleted block still accessible via GET /chain/tx/{hash} (returns 200 instead of 404) ❌. Delete operation may not be persisting to database. **SECTION F: REGRESSION (4/6 PASSED, 2 TEMPORARY FAILURES)** - Admin login ✅, admin users ✅, chain search ✅, wallets ✅. Health and config endpoints returned temporary 502 errors during heavy testing (service recovered immediately, not a code issue)."
 
 

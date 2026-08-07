@@ -51,7 +51,6 @@ export function CardsPage({ goAuth }) {
               <div className="font-display text-2xl">{t.name}</div>
               <div className="text-sm text-muted-foreground">{t.tagline}</div>
               <div className="mt-6 gold-text font-display text-3xl">Activate on-chain</div>
-              <div className="text-xs uppercase tracking-widest text-muted-foreground mt-1">USDT settlement to treasury</div>
               <div className="divider-gold my-6"/>
               <div className="text-sm space-y-2">
                 <div className="flex justify-between"><span className="text-muted-foreground">Daily spend</span><span>{t.spend}</span></div>

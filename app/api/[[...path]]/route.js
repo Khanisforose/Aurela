@@ -390,24 +390,25 @@ async function handleRoute(request, { params }) {
     // ---------- Auth ----------
     if (route === '/auth/register/init' && method === 'POST') {
       const body = await request.json()
-      const { email, username, password, full_name, phone } = body || {}
-      if (!email || !username || !password) return handleCORS(NextResponse.json({ error: 'Missing fields' }, { status: 400 }))
+      const { email, password, first_name, last_name, full_name, phone, country } = body || {}
+      if (!email || !password || !first_name || !last_name || !phone || !country) return handleCORS(NextResponse.json({ error: 'All fields are required — first name, last name, email, country, mobile, and password.' }, { status: 400 }))
       if (password.length < 8) return handleCORS(NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 }))
-      const exists = await db.collection('users').findOne({ $or: [{ email: email.toLowerCase() }, { username: username.toLowerCase() }] })
-      if (exists) return handleCORS(NextResponse.json({ error: 'Email or username already registered' }, { status: 400 }))
+      const exists = await db.collection('users').findOne({ email: email.toLowerCase() })
+      if (exists) return handleCORS(NextResponse.json({ error: 'Email already registered' }, { status: 400 }))
+      // Auto-generate username from first name + short random suffix (guaranteed unique)
+      const base = String(first_name).toLowerCase().replace(/[^a-z0-9]/g,'').slice(0, 10) || 'user'
+      let username = base + randDigits(4)
+      for (let i = 0; i < 6 && await db.collection('users').findOne({ username }); i++) username = base + randDigits(5)
       const code = String(Math.floor(100000 + Math.random() * 900000))
       const otpDoc = {
         id: uuidv4(),
         email: email.toLowerCase(),
-        username: username.toLowerCase(),
-        full_name: full_name || username,
-        phone: phone || '',
-        password_hash_pending: null,
-        salt_pending: null,
-        code,
-        expires_at: new Date(Date.now() + 10 * 60 * 1000),
-        purpose: 'signup',
-        created_at: now(),
+        username,
+        full_name: full_name || `${first_name} ${last_name}`.trim(),
+        first_name, last_name, country, phone: phone || '',
+        password_hash_pending: null, salt_pending: null,
+        code, expires_at: new Date(Date.now() + 10 * 60 * 1000),
+        purpose: 'signup', created_at: now(),
       }
       const salt = newSalt()
       otpDoc.salt_pending = salt
@@ -416,7 +417,10 @@ async function handleRoute(request, { params }) {
       await db.collection('pending_signups').insertOne(otpDoc)
       const emailRes = await sendEmailOTP(email, code, 'signup')
       const response = { ok: true, message: 'Verification code sent to your email.', signup_id: otpDoc.id }
-      if (!emailRes.delivered) response.dev_otp = code // TODO remove after wiring email service
+      if (!emailRes.delivered) {
+        response.dev_otp = code
+        response.email_error = emailRes.error || null
+      }
       return handleCORS(NextResponse.json(response))
     }
 
@@ -431,22 +435,24 @@ async function handleRoute(request, { params }) {
         return handleCORS(NextResponse.json({ error: 'Verification code expired. Request a new one.' }, { status: 400 }))
       }
       if (String(code) !== String(pending.code)) return handleCORS(NextResponse.json({ error: 'Invalid verification code' }, { status: 400 }))
+      // Aurela ID — like Binance ID / user code. Format: AUR-XXXXXXXX (8-digit unique)
+      let user_code = 'AUR' + randDigits(9)
+      for (let i = 0; i < 6 && await db.collection('users').findOne({ user_code }); i++) user_code = 'AUR' + randDigits(9)
       const user = {
         id: uuidv4(),
+        user_code,
         email: pending.email,
         username: pending.username,
+        first_name: pending.first_name || '',
+        last_name: pending.last_name || '',
         full_name: pending.full_name,
         phone: pending.phone,
-        role: 'user',
-        status: 'active',
-        preferred_currency: 'USD',
-        kyc_status: 'unverified',
-        two_fa_enabled: false,
-        email_verified: true,
-        phone_verified: false,
+        country: pending.country || '',
+        role: 'user', status: 'active', preferred_currency: 'USD',
+        kyc_status: 'unverified', two_fa_enabled: false,
+        email_verified: true, phone_verified: false,
         auth_providers: ['password'],
-        salt: pending.salt_pending,
-        password_hash: pending.password_hash_pending,
+        salt: pending.salt_pending, password_hash: pending.password_hash_pending,
         created_at: now(),
       }
       await db.collection('users').insertOne(user)
@@ -467,8 +473,45 @@ async function handleRoute(request, { params }) {
       await db.collection('pending_signups').updateOne({ id: pending.id }, { $set: { code, expires_at: new Date(Date.now() + 10 * 60 * 1000) } })
       const emailRes = await sendEmailOTP(pending.email, code, 'signup')
       const response = { ok: true }
-      if (!emailRes.delivered) response.dev_otp = code
+      if (!emailRes.delivered) { response.dev_otp = code; response.email_error = emailRes.error || null }
       return handleCORS(NextResponse.json(response))
+    }
+
+    // Forgot password — 2 step OTP reset
+    if (route === '/auth/forgot/init' && method === 'POST') {
+      const body = await request.json()
+      const email = String(body?.email || '').toLowerCase()
+      if (!email) return handleCORS(NextResponse.json({ error: 'Email required' }, { status: 400 }))
+      const target = await db.collection('users').findOne({ email })
+      // Always respond 200 to avoid email enumeration
+      if (target) {
+        const code = String(Math.floor(100000 + Math.random() * 900000))
+        await db.collection('password_resets').deleteMany({ email })
+        await db.collection('password_resets').insertOne({ id: uuidv4(), email, code, user_id: target.id, expires_at: new Date(Date.now() + 15 * 60 * 1000), created_at: now() })
+        const emailRes = await sendEmailOTP(email, code, 'password_reset')
+        const response = { ok: true, message: 'If an account exists, a reset code has been sent.' }
+        if (!emailRes.delivered) { response.dev_otp = code; response.email_error = emailRes.error || null }
+        return handleCORS(NextResponse.json(response))
+      }
+      return handleCORS(NextResponse.json({ ok: true, message: 'If an account exists, a reset code has been sent.' }))
+    }
+    if (route === '/auth/forgot/verify' && method === 'POST') {
+      const body = await request.json()
+      const email = String(body?.email || '').toLowerCase()
+      const { code, new_password } = body || {}
+      if (!email || !code || !new_password) return handleCORS(NextResponse.json({ error: 'Missing fields' }, { status: 400 }))
+      if (String(new_password).length < 8) return handleCORS(NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 }))
+      const rec = await db.collection('password_resets').findOne({ email })
+      if (!rec) return handleCORS(NextResponse.json({ error: 'Invalid or expired reset request' }, { status: 400 }))
+      if (new Date(rec.expires_at) < new Date()) { await db.collection('password_resets').deleteOne({ id: rec.id }); return handleCORS(NextResponse.json({ error: 'Reset code expired' }, { status: 400 })) }
+      if (String(code) !== String(rec.code)) return handleCORS(NextResponse.json({ error: 'Invalid reset code' }, { status: 400 }))
+      const salt = newSalt()
+      const password_hash = hashPassword(new_password, salt)
+      await db.collection('users').updateOne({ id: rec.user_id }, { $set: { salt, password_hash } })
+      await db.collection('password_resets').deleteOne({ id: rec.id })
+      await db.collection('sessions').deleteMany({ user_id: rec.user_id }) // force re-login everywhere
+      await audit(db, rec.user_id, 'auth.password_reset', {})
+      return handleCORS(NextResponse.json({ ok: true }))
     }
 
     // Google Sign-In (accepts either an id_token 'credential' OR an OAuth2 'access_token')
@@ -730,6 +773,22 @@ async function handleRoute(request, { params }) {
       const payload = `aurela://transfer?${params.toString()}`
       const qr_svg = await QRCode.toString(payload, { type: 'svg', margin: 1, color: { dark: '#d4af37', light: '#00000000' }, width: 260 })
       return handleCORS(NextResponse.json({ payload, qr_svg, username: user.username }))
+    }
+
+    // Change password (authenticated)
+    if (route === '/profile/password' && method === 'POST') {
+      const body = await request.json()
+      const { current_password, new_password } = body || {}
+      if (!current_password || !new_password) return handleCORS(NextResponse.json({ error: 'Missing fields' }, { status: 400 }))
+      if (String(new_password).length < 8) return handleCORS(NextResponse.json({ error: 'New password must be at least 8 characters' }, { status: 400 }))
+      const u2 = await db.collection('users').findOne({ id: user.id })
+      const ok = u2?.password_hash && u2.password_hash === hashPassword(current_password, u2.salt)
+      if (!ok) return handleCORS(NextResponse.json({ error: 'Current password is incorrect' }, { status: 400 }))
+      const salt = newSalt()
+      const password_hash = hashPassword(new_password, salt)
+      await db.collection('users').updateOne({ id: user.id }, { $set: { salt, password_hash } })
+      await audit(db, user.id, 'profile.password_change', {})
+      return handleCORS(NextResponse.json({ ok: true }))
     }
 
     // Profile
@@ -1199,6 +1258,42 @@ async function handleRoute(request, { params }) {
           total: depositPending + withdrawPending + kycPending + cardPending,
           items: items.slice(0, 20)
         }))
+      }
+      // Admin: delete a block from the chain
+      if (route.startsWith('/admin/chain/') && method === 'DELETE') {
+        const hashOrId = route.split('/')[3]
+        const target = await db.collection('aurela_chain').findOne({ $or: [{ hash: hashOrId }, { id: hashOrId }, { block_number: parseInt(hashOrId) || -1 }] })
+        if (!target) return handleCORS(NextResponse.json({ error: 'Block not found' }, { status: 404 }))
+        await db.collection('aurela_chain').deleteOne({ id: target.id })
+        await audit(db, user.id, 'admin.chain.delete', { block_number: target.block_number, hash: target.hash })
+        return handleCORS(NextResponse.json({ ok: true }))
+      }
+      // Admin: seed dummy blocks that look real (for demo/staging)
+      if (route === '/admin/chain/seed' && method === 'POST') {
+        const body = await request.json().catch(()=>({}))
+        const count = Math.min(Math.max(parseInt(body?.count) || 100, 1), 5000)
+        const currencies = ['USDT','BTC','ETH','USDC','BNB','SOL','USD','EUR','GBP','INR']
+        const networks = { USDT:['ERC20','TRC20','BEP20'], BTC:['Bitcoin'], ETH:['ERC20'], USDC:['ERC20','Polygon'], BNB:['BEP20'], SOL:['Solana'], USD:['fiat_rail'], EUR:['fiat_rail'], GBP:['fiat_rail'], INR:['fiat_rail'] }
+        const types = ['transfer','deposit','withdraw','card_activation']
+        const usernames = ['satoshi','vitalik','ceo','trader01','tradepro','alicia','marco','yumi','zara','omar','luna','kai','ivy','ren','nora']
+        const created = []
+        for (let i = 0; i < count; i++) {
+          const cur = currencies[Math.floor(Math.random()*currencies.length)]
+          const net = networks[cur][Math.floor(Math.random()*networks[cur].length)]
+          const type = types[Math.floor(Math.random()*types.length)]
+          const from = usernames[Math.floor(Math.random()*usernames.length)]
+          const to = usernames[Math.floor(Math.random()*usernames.length)]
+          const amount = ['BTC','ETH'].includes(cur) ? Math.random()*3 : ['USDT','USDC'].includes(cur) ? Math.random()*20000 : Math.random()*50000
+          const b = await writeBlock(db, {
+            type, currency: cur, amount: Math.round(amount*1e6)/1e6, network: net,
+            from_username: type === 'deposit' ? 'external' : from,
+            to_username: type === 'withdraw' ? 'external' : to,
+            method: type === 'card_activation' ? 'usdt' : (['deposit','withdraw'].includes(type) && ['USD','EUR','GBP','INR'].includes(cur)) ? 'bank' : 'chain'
+          })
+          created.push(b.block_number)
+        }
+        await audit(db, user.id, 'admin.chain.seed', { count })
+        return handleCORS(NextResponse.json({ ok: true, seeded: created.length, first_block: created[0], last_block: created[created.length-1] }))
       }
       // Admin: delete a card entirely (also user-facing effect: card removed)
       if (route.startsWith('/admin/cards/') && route.split('/').length === 4 && method === 'DELETE') {

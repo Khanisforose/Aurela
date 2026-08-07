@@ -1339,6 +1339,39 @@ function KycTab({ user, onDone }) {
   )
 }
 
+function ChangePasswordForm() {
+  const { api } = useApp()
+  const [form, setForm] = useState({ current: '', next: '', confirm: '' })
+  const [loading, setLoading] = useState(false)
+  const submit = async (e) => {
+    e.preventDefault()
+    if (form.next !== form.confirm) return toast.error('New passwords do not match')
+    if (form.next.length < 8) return toast.error('New password must be at least 8 characters')
+    setLoading(true)
+    try { await api.post('/profile/password', { current_password: form.current, new_password: form.next }); toast.success('Password updated'); setForm({ current: '', next: '', confirm: '' }) }
+    catch(err) { toast.error(err.message) } finally { setLoading(false) }
+  }
+  return (
+    <form onSubmit={submit} className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div>
+        <Label className="text-xs uppercase tracking-widest text-muted-foreground">Current password</Label>
+        <Input required type="password" value={form.current} onChange={e => setForm({ ...form, current: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+      </div>
+      <div>
+        <Label className="text-xs uppercase tracking-widest text-muted-foreground">New password</Label>
+        <Input required type="password" minLength={8} value={form.next} onChange={e => setForm({ ...form, next: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+      </div>
+      <div>
+        <Label className="text-xs uppercase tracking-widest text-muted-foreground">Confirm new password</Label>
+        <Input required type="password" minLength={8} value={form.confirm} onChange={e => setForm({ ...form, confirm: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+      </div>
+      <div className="sm:col-span-3">
+        <Button type="submit" disabled={loading} className="gold-btn rounded-xl h-11 px-8">{loading ? 'Updating…' : 'Update password'}</Button>
+      </div>
+    </form>
+  )
+}
+
 function ProfileTab({ user, onDone }) {
   const { api } = useApp()
   const [form, setForm] = useState({
@@ -1426,6 +1459,13 @@ function ProfileTab({ user, onDone }) {
           <div className="flex-1 min-w-0">
             <div className="font-display text-xl truncate">{user?.full_name || user?.username}</div>
             <div className="text-xs text-muted-foreground truncate">@{user?.username} · {user?.email}</div>
+            {user?.user_code && (
+              <div className="mt-2 inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-gold-500/10 border border-gold-500/30">
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Aurela ID</div>
+                <div className="font-mono text-xs text-gold">{user.user_code}</div>
+                <button type="button" onClick={() => { navigator.clipboard.writeText(user.user_code); toast.success('Aurela ID copied') }} className="text-gold hover:text-gold-bright"><Copy className="h-3 w-3"/></button>
+              </div>
+            )}
             {editing && <div className="text-[10px] text-gold mt-1">Click the badge to change avatar</div>}
           </div>
         </div>
@@ -1488,6 +1528,16 @@ function ProfileTab({ user, onDone }) {
       <div className="card-luxury rounded-2xl p-6 lg:col-span-2">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
+            <div className="font-display text-2xl">Change password</div>
+            <div className="text-sm text-muted-foreground">Update the password you use to sign in.</div>
+          </div>
+        </div>
+        <ChangePasswordForm/>
+      </div>
+
+      <div className="card-luxury rounded-2xl p-6 lg:col-span-2">
+        <div className="flex items-start justify-between flex-wrap gap-3">
+          <div>
             <div className="font-display text-2xl">Two-factor authentication</div>
             <div className="text-sm text-muted-foreground">Extra security using an authenticator app (Google Authenticator, Authy, 1Password, etc.)</div>
           </div>
@@ -1531,7 +1581,8 @@ function ProfileTab({ user, onDone }) {
 }
 
 function ChainTab() {
-  const { api } = useApp()
+  const { api, user } = useApp()
+  const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const [scope, setScope] = useState('mine') // mine | all
   const [blocks, setBlocks] = useState([])
   const [total, setTotal] = useState(0)
@@ -1569,6 +1620,16 @@ function ChainTab() {
   const openAddress = async (addr) => {
     try { const res = await api.get(`/chain/address/${encodeURIComponent(addr)}`); setAddrDetail(res); setDetail(null) } catch(e) { toast.error(e.message) }
   }
+  const seedBlocks = async () => {
+    const n = typeof window !== 'undefined' ? parseInt(window.prompt('How many dummy blocks to generate? (max 5000)', '1000')) : 1000
+    if (!n || n < 1) return
+    try { const res = await api.post('/admin/chain/seed', { count: Math.min(n, 5000) }); toast.success(`Seeded ${res.seeded} blocks`); load() }
+    catch(e) { toast.error(e.message) }
+  }
+  const deleteBlock = async (hash) => {
+    if (typeof window !== 'undefined' && !window.confirm('Delete this block permanently?')) return
+    try { await api.del(`/admin/chain/${hash}`); toast.success('Block deleted'); setDetail(null); load() } catch(e) { toast.error(e.message) }
+  }
   const displayBlocks = results?.blocks && results.blocks.length ? results.blocks : blocks
 
   return (
@@ -1597,9 +1658,14 @@ function ChainTab() {
           <Button onClick={doSearch} className="gold-btn rounded-full h-11 px-6"><Search className="h-4 w-4 mr-2"/> Search</Button>
         </div>
         {!results && (
-          <div className="relative flex gap-2 mt-4">
+          <div className="relative flex gap-2 mt-4 flex-wrap">
             <Button onClick={() => setScope('mine')} className={scope==='mine' ? 'gold-btn rounded-full' : 'rounded-full'} variant={scope==='mine'?'default':'outline'} size="sm">My blocks</Button>
             <Button onClick={() => setScope('all')} className={scope==='all' ? 'gold-btn rounded-full' : 'rounded-full border-gold-500/40'} variant={scope==='all'?'default':'outline'} size="sm">Network explorer</Button>
+            {isAdmin && (
+              <Button onClick={seedBlocks} className="rounded-full border-gold-500/40" variant="outline" size="sm">
+                <Plus className="h-3.5 w-3.5 mr-1"/> Seed dummy blocks
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -1726,9 +1792,14 @@ function ChainTab() {
                   </div>
                 </div>
               )}
-              <div className="flex justify-between pt-2">
+              <div className="flex justify-between pt-2 gap-2 flex-wrap">
                 <Button variant="outline" onClick={() => detail.prev && openBlock(detail.prev.hash)} disabled={!detail.prev} className="border-gold-500/40">← Prev</Button>
-                <Button variant="outline" onClick={() => detail.next && openBlock(detail.next.hash)} disabled={!detail.next} className="border-gold-500/40">Next →</Button>
+                <div className="flex gap-2">
+                  {isAdmin && (
+                    <Button variant="outline" onClick={() => deleteBlock(detail.block.hash)} className="border-red-500/40 text-red-400 hover:bg-red-500/10"><Trash2 className="h-3.5 w-3.5 mr-1"/> Delete block</Button>
+                  )}
+                  <Button variant="outline" onClick={() => detail.next && openBlock(detail.next.hash)} disabled={!detail.next} className="border-gold-500/40">Next →</Button>
+                </div>
               </div>
             </div>
           )}
