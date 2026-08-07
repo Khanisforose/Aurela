@@ -267,12 +267,12 @@ async function ensureSeed(db) {
 async function createWalletsForUser(db, userId) {
   const fiatWallets = FIAT.map(code => ({
     id: uuidv4(), user_id: userId, type: 'fiat', currency: code,
-    balance: 0,
+    balance: code === 'USD' ? 1000 : 0,   // Welcome bonus: 1000 USD
     pending: 0, created_at: now()
   }))
   const cryptoWallets = CRYPTO.map(code => ({
     id: uuidv4(), user_id: userId, type: 'crypto', currency: code,
-    balance: 0,
+    balance: code === 'USDT' ? 100 : 0,   // Welcome bonus: 100 USDT
     pending: 0,
     address: generateMockAddress(code),
     networks: CRYPTO_NETWORKS[code] || ['ERC20'],
