@@ -10,17 +10,17 @@ import { CardVisual } from './HomePage'
 const tiersMeta = [
   {
     id: 'basic', name: 'Aurela Basic', tagline: 'Every day. Elegantly done.',
-    spend: '$1,000 / day', withdraw: '$500 / day', monthly: '$10,000 / month',
+    monthly: '$500,000 / month',
     perks: ['Virtual card', 'Multi-currency wallets', 'Instant internal transfers', 'Standard support', 'Freeze / unfreeze in one tap']
   },
   {
     id: 'premium', name: 'Aurela Premium', tagline: 'Elevated in every dimension.',
-    spend: '$10,000 / day', withdraw: '$5,000 / day', monthly: '$100,000 / month',
+    monthly: '$1,000,000 / month',
     perks: ['Everything in Basic', 'Higher limits', 'Priority KYC', 'Priority support', 'Enhanced fraud protection'], featured: true
   },
   {
     id: 'elite', name: 'Aurela Elite', tagline: 'The pinnacle. Reserved for the few.',
-    spend: '$50,000 / day', withdraw: '$25,000 / day', monthly: '$500,000 / month',
+    monthly: '$5,000,000 / month',
     perks: ['Everything in Premium', 'Concierge onboarding', 'Dedicated relationship manager', 'Exclusive FX rates', 'Bespoke card design*']
   },
 ]
@@ -53,8 +53,6 @@ export function CardsPage({ goAuth }) {
               <div className="mt-6 gold-text font-display text-3xl">Activate on-chain</div>
               <div className="divider-gold my-6"/>
               <div className="text-sm space-y-2">
-                <div className="flex justify-between"><span className="text-muted-foreground">Daily spend</span><span>{t.spend}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Daily withdraw</span><span>{t.withdraw}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Monthly spend</span><span>{t.monthly}</span></div>
               </div>
               <ul className="mt-6 space-y-2 text-sm">

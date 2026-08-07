@@ -55,10 +55,10 @@ export function AppProvider({ children }) {
       }
       setLoading(false)
     })()
-    // Live market data polling every 30s
+    // Live market data polling every 3s (drives Aurela Coin ticker)
     const rv = setInterval(async () => {
       try { const r = await api.get('/rates'); setRates(r) } catch(e) {}
-    }, 30000)
+    }, 3000)
     // Dashboard live tick — refresh every 5s when a user is signed in
     const tv = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return   // pause when tab hidden
@@ -150,6 +150,7 @@ export const FIAT_META = {
   RON: { symbol: 'lei', flag: '🇷🇴', name: 'Romanian Leu' },
 }
 export const CRYPTO_META = {
+  AUR: { name: 'Aurela Coin', color: '#d4af37' },
   BTC: { name: 'Bitcoin', color: '#f7931a' },
   ETH: { name: 'Ethereum', color: '#627eea' },
   USDT: { name: 'Tether', color: '#26a17b' },

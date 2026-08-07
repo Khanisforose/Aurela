@@ -30,8 +30,9 @@ export async function OPTIONS() { return handleCORS(new NextResponse(null, { sta
 // ---------- Constants ----------
 const SECRET = process.env.AURELA_JWT_SECRET || 'aurela_default_secret'
 const FIAT = ['USD','EUR','GBP','INR','AED','JPY','CAD','AUD','SGD','CHF','NZD','HKD','KRW','CNY','MXN','BRL','ZAR','TRY','RUB','SEK','NOK','DKK','PLN','THB','MYR','IDR','PHP','VND','EGP','SAR','NGN','ARS','CLP','COP','ILS','CZK','HUF','QAR','KWD','BHD','OMR','JOD','LKR','PKR','BDT','KES','GHS','TWD','UAH','RON']
-const CRYPTO = ['BTC','ETH','USDT','USDC','BNB','SOL','XRP','ADA','DOGE','MATIC','AVAX','DOT','TRX','LINK','ATOM','LTC','BCH','XLM','NEAR','APT','ARB','OP','SUI','TON','SHIB','PEPE','INJ','FIL','ICP','HBAR']
+const CRYPTO = ['AUR','BTC','ETH','USDT','USDC','BNB','SOL','XRP','ADA','DOGE','MATIC','AVAX','DOT','TRX','LINK','ATOM','LTC','BCH','XLM','NEAR','APT','ARB','OP','SUI','TON','SHIB','PEPE','INJ','FIL','ICP','HBAR']
 const CRYPTO_NETWORKS = {
+  AUR: ['Aurela'],
   BTC: ['Bitcoin'], ETH: ['ERC20'], USDT: ['ERC20','TRC20','BEP20'], USDC: ['ERC20','BEP20','Polygon'],
   BNB: ['BEP20'], SOL: ['Solana'], XRP: ['XRP'], ADA: ['Cardano'], DOGE: ['Dogecoin'], MATIC: ['Polygon','ERC20'],
   AVAX: ['Avalanche'], DOT: ['Polkadot'], TRX: ['TRC20'], LINK: ['ERC20','BEP20'], ATOM: ['Cosmos'],
@@ -54,9 +55,9 @@ const ALL_FIAT_METHODS = ['bank_swift','bank_indian','upi','paypal','stripe','ca
 const ALL_CRYPTO_METHOD = 'crypto'
 
 const CARD_TIERS = {
-  basic:   { name: 'Aurela Basic',   activation_fee_usdt: 10,  daily_spend: 1000,  daily_withdraw: 500,   monthly_spend: 10000,  color: 'basic' },
-  premium: { name: 'Aurela Premium', activation_fee_usdt: 50,  daily_spend: 10000, daily_withdraw: 5000,  monthly_spend: 100000, color: 'premium' },
-  elite:   { name: 'Aurela Elite',   activation_fee_usdt: 200, daily_spend: 50000, daily_withdraw: 25000, monthly_spend: 500000, color: 'elite' },
+  basic:   { name: 'Aurela Basic',   activation_fee_usdt: 10,  daily_spend: 20000,  daily_withdraw: 10000,  monthly_spend: 500000,   color: 'basic' },
+  premium: { name: 'Aurela Premium', activation_fee_usdt: 50,  daily_spend: 50000,  daily_withdraw: 25000,  monthly_spend: 1000000,  color: 'premium' },
+  elite:   { name: 'Aurela Elite',   activation_fee_usdt: 200, daily_spend: 200000, daily_withdraw: 100000, monthly_spend: 5000000,  color: 'elite' },
 }
 // Fallback rates if API unreachable (USD-based)
 const FALLBACK_FX = { USD:1, EUR:0.92, GBP:0.79, INR:83.2, AED:3.67, JPY:157.1, CAD:1.36, AUD:1.51, SGD:1.35, CHF:0.90, NZD:1.64, HKD:7.82, KRW:1360, CNY:7.24, MXN:17.1, BRL:5.10, ZAR:18.5, TRY:32.4, RUB:88.5, SEK:10.4, NOK:10.6, DKK:6.87, PLN:3.98, THB:35.8, MYR:4.68, IDR:15900, PHP:56.8, VND:24800, EGP:47.5, SAR:3.75, NGN:1550, ARS:900, CLP:920, COP:3900, ILS:3.72, CZK:23.2, HUF:355, QAR:3.64, KWD:0.31, BHD:0.38, OMR:0.39, JOD:0.71, LKR:302, PKR:278, BDT:117, KES:129, GHS:14.5, TWD:32.3, UAH:39.5, RON:4.58 }
@@ -103,12 +104,22 @@ async function audit(db, actorId, action, meta = {}) {
 
 // ---------- Aurela Chain (internal hash-linked ledger) ----------
 async function writeBlock(db, blockData) {
+  // Anonymize: always replace usernames with Aurela IDs (user_code) when we have a user_id
+  const anonymised = { ...blockData }
+  if (blockData.from_user_id) {
+    const u = await db.collection('users').findOne({ id: blockData.from_user_id }, { projection: { user_code: 1 } })
+    if (u?.user_code) anonymised.from_username = u.user_code
+  }
+  if (blockData.to_user_id) {
+    const u = await db.collection('users').findOne({ id: blockData.to_user_id }, { projection: { user_code: 1 } })
+    if (u?.user_code) anonymised.to_username = u.user_code
+  }
   const last = await db.collection('aurela_chain').find({}).sort({ block_number: -1 }).limit(1).toArray()
   const prev = last[0]
   const block_number = prev ? prev.block_number + 1 : 1
   const prev_hash = prev ? prev.hash : '0'.repeat(64)
   const timestamp = now()
-  const payload = { block_number, prev_hash, timestamp: timestamp.toISOString(), ...blockData }
+  const payload = { block_number, prev_hash, timestamp: timestamp.toISOString(), ...anonymised }
   const hash = sha256(JSON.stringify(payload))
   const block = { id: uuidv4(), ...payload, hash }
   await db.collection('aurela_chain').insertOne(block)
@@ -210,6 +221,37 @@ async function ensureSeed(db) {
     )
   }
 
+  // v7: auto-seed anonymized dummy blocks (replaces older seeded blocks with human names)
+  if (!migration || migration.version !== 'v7_anon_blocks') {
+    // Wipe any legacy dummy blocks with human names (from earlier v5 seeder) so the chain looks anonymized
+    await db.collection('aurela_chain').deleteMany({ from_username: { $in: ['satoshi','vitalik','ceo','trader01','tradepro','alicia','marco','yumi','zara','omar','luna','kai','ivy','ren','nora'] } })
+    await db.collection('aurela_chain').deleteMany({ to_username: { $in: ['satoshi','vitalik','ceo','trader01','tradepro','alicia','marco','yumi','zara','omar','luna','kai','ivy','ren','nora'] } })
+    const blockCount = await db.collection('aurela_chain').countDocuments({})
+    if (blockCount < 500) {
+      const currencies = ['AUR','USDT','BTC','ETH','USDC','BNB','SOL','USD','EUR','GBP','INR']
+      const networks = { AUR:['Aurela'], USDT:['ERC20','TRC20','BEP20'], BTC:['Bitcoin'], ETH:['ERC20'], USDC:['ERC20','Polygon'], BNB:['BEP20'], SOL:['Solana'], USD:['fiat_rail'], EUR:['fiat_rail'], GBP:['fiat_rail'], INR:['fiat_rail'] }
+      const types = ['transfer','deposit','withdraw','card_activation']
+      const genCode = () => 'AUR' + randDigits(9)
+      for (let i = 0; i < 500; i++) {
+        const cur = currencies[Math.floor(Math.random()*currencies.length)]
+        const net = networks[cur][Math.floor(Math.random()*networks[cur].length)]
+        const type = types[Math.floor(Math.random()*types.length)]
+        const amount = cur === 'AUR' ? Math.random()*500 : ['BTC','ETH'].includes(cur) ? Math.random()*3 : ['USDT','USDC'].includes(cur) ? Math.random()*20000 : Math.random()*50000
+        await writeBlock(db, {
+          type, currency: cur, amount: Math.round(amount*1e6)/1e6, network: net,
+          from_username: type === 'deposit' ? 'external' : genCode(),
+          to_username: type === 'withdraw' ? 'external' : genCode(),
+          method: type === 'card_activation' ? 'aur' : (['deposit','withdraw'].includes(type) && ['USD','EUR','GBP','INR'].includes(cur)) ? 'bank' : 'chain'
+        })
+      }
+    }
+    await db.collection('system').updateOne(
+      { id: 'migration' },
+      { $set: { id: 'migration', version: 'v7_anon_blocks', ran_at: now() } },
+      { upsert: true }
+    )
+  }
+
   const existing = await db.collection('users').findOne({ role: 'super_admin' })
   if (!existing) {
     const salt = newSalt()
@@ -267,12 +309,12 @@ async function ensureSeed(db) {
 async function createWalletsForUser(db, userId) {
   const fiatWallets = FIAT.map(code => ({
     id: uuidv4(), user_id: userId, type: 'fiat', currency: code,
-    balance: code === 'USD' ? 1000 : 0,   // Welcome bonus: 1000 USD
+    balance: 0,
     pending: 0, created_at: now()
   }))
   const cryptoWallets = CRYPTO.map(code => ({
     id: uuidv4(), user_id: userId, type: 'crypto', currency: code,
-    balance: code === 'USDT' ? 100 : 0,   // Welcome bonus: 100 USDT
+    balance: code === 'AUR' ? 5 : 0,   // Welcome bonus: 5 Aurela Coin
     pending: 0,
     address: generateMockAddress(code),
     networks: CRYPTO_NETWORKS[code] || ['ERC20'],
@@ -291,49 +333,69 @@ function generateMockAddress(code) {
 }
 
 // ---------- Rates (cached) ----------
+// Aurela Coin price simulator: random-walk in INR between 200 and 350, mean-revert to 220.
+// Converted to USD using the live USD/INR rate.
+async function computeAurPrice(db, currentFx) {
+  const inrPerUsd = (currentFx && currentFx.INR) || 83.2
+  const doc = await db.collection('rates').findOne({ id: 'aur_ticker' })
+  const nowMs = Date.now()
+  const lastTs = doc?.updated_at ? new Date(doc.updated_at).getTime() : (nowMs - 1000)
+  const stepsElapsed = Math.min(Math.max(Math.floor((nowMs - lastTs) / 1000), 1), 60)  // clamp: at least 1, at most 60 ticks
+  let priceInr = doc?.price_inr ?? 220
+  const mean = 220, minPrice = 200, maxPrice = 350
+  const history = doc?.history || []
+  for (let i = 0; i < stepsElapsed; i++) {
+    const noise = (Math.random() - 0.5) * 1.6                   // ±0.8 INR per tick
+    const meanRevert = (mean - priceInr) * 0.02                  // 2% pull toward 220
+    priceInr = Math.max(minPrice, Math.min(maxPrice, priceInr + noise + meanRevert))
+  }
+  priceInr = Math.round(priceInr * 100) / 100
+  const priceUsd = Math.round((priceInr / inrPerUsd) * 10000) / 10000
+  // Store history — keep last 120 points (2 minutes worth at 1s ticks)
+  const newHistory = [...history, { t: nowMs, inr: priceInr, usd: priceUsd }].slice(-120)
+  await db.collection('rates').updateOne(
+    { id: 'aur_ticker' },
+    { $set: { id: 'aur_ticker', price_inr: priceInr, price_usd: priceUsd, updated_at: new Date(nowMs), history: newHistory } },
+    { upsert: true }
+  )
+  return { price_inr: priceInr, price_usd: priceUsd, history: newHistory }
+}
+
 async function getRates(db) {
   const cached = await db.collection('rates').findOne({ id: 'live' })
   const stale = !cached || (Date.now() - new Date(cached.updated_at).getTime() > 30 * 1000)
-  if (!stale) return cached
-
-  let fx = { ...FALLBACK_FX }
-  let crypto_usd = { ...FALLBACK_CRYPTO_USD }
-  try {
-    // Coinbase exchange rates — single call for both fiat and crypto (public, no key)
-    const cbRes = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD', { cache: 'no-store' })
-    if (cbRes.ok) {
-      const j = await cbRes.json()
-      const r = j?.data?.rates || {}
-      // Fiat: rate value = USD -> that currency directly
-      for (const c of FIAT) {
-        if (r[c]) {
-          const v = Number(r[c])
-          if (v && isFinite(v)) fx[c] = v
+  let doc = cached
+  if (stale) {
+    let fx = { ...FALLBACK_FX }
+    let crypto_usd = { ...FALLBACK_CRYPTO_USD }
+    try {
+      const cbRes = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD', { cache: 'no-store' })
+      if (cbRes.ok) {
+        const j = await cbRes.json()
+        const r = j?.data?.rates || {}
+        for (const c of FIAT) {
+          if (r[c]) { const v = Number(r[c]); if (v && isFinite(v)) fx[c] = v }
         }
-      }
-      // Crypto: rate value = 1 USD = X crypto, so price_usd = 1 / rate
-      for (const c of CRYPTO) {
-        if (r[c]) {
-          const v = Number(r[c])
-          if (v && isFinite(v) && v > 0) crypto_usd[c] = 1 / v
+        for (const c of CRYPTO) {
+          if (r[c]) { const v = Number(r[c]); if (v && isFinite(v) && v > 0) crypto_usd[c] = 1 / v }
         }
+        crypto_usd.USDT = 1; crypto_usd.USDC = 1
       }
-      crypto_usd.USDT = 1; crypto_usd.USDC = 1
-    }
-  } catch (e) { /* keep fallback */ }
-  // Secondary source for FIAT only (in case Coinbase misses exotic currencies)
-  try {
-    const fxRes = await fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' })
-    if (fxRes.ok) {
-      const j = await fxRes.json()
-      if (j && j.rates) {
-        for (const c of FIAT) if (j.rates[c] && !fx[c]) fx[c] = j.rates[c]
+    } catch (e) { /* keep fallback */ }
+    try {
+      const fxRes = await fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' })
+      if (fxRes.ok) {
+        const j = await fxRes.json()
+        if (j && j.rates) for (const c of FIAT) if (j.rates[c] && !fx[c]) fx[c] = j.rates[c]
       }
-    }
-  } catch (e) { /* keep fallback */ }
-
-  const doc = { id: 'live', fx, crypto_usd, updated_at: now() }
-  await db.collection('rates').updateOne({ id: 'live' }, { $set: doc }, { upsert: true })
+    } catch (e) { /* keep fallback */ }
+    doc = { id: 'live', fx, crypto_usd, updated_at: now() }
+    await db.collection('rates').updateOne({ id: 'live' }, { $set: doc }, { upsert: true })
+  }
+  // Always freshen Aurela Coin price (every tick — this is what makes it feel live)
+  const aur = await computeAurPrice(db, doc.fx)
+  doc.crypto_usd = { ...doc.crypto_usd, AUR: aur.price_usd }
+  doc.aur = aur
   return doc
 }
 
@@ -363,7 +425,7 @@ async function handleRoute(request, { params }) {
 
     if (route === '/rates' && method === 'GET') {
       const r = await getRates(db)
-      return handleCORS(NextResponse.json({ fx: r.fx, crypto_usd: r.crypto_usd, updated_at: r.updated_at }))
+      return handleCORS(NextResponse.json({ fx: r.fx, crypto_usd: r.crypto_usd, aur: r.aur, updated_at: r.updated_at }))
     }
 
     if (route === '/config' && method === 'GET') {
@@ -873,8 +935,9 @@ async function handleRoute(request, { params }) {
       const amt = Number(amount)
       if (!recipient || !amt || amt <= 0 || !currency) return handleCORS(NextResponse.json({ error: 'Invalid transfer' }, { status: 400 }))
       if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
-      const rid = String(recipient).toLowerCase()
-      const rec = await db.collection('users').findOne({ $or: [{ email: rid }, { username: rid }, { id: recipient }] })
+      const rid = String(recipient).trim()
+      const ridLower = rid.toLowerCase()
+      const rec = await db.collection('users').findOne({ $or: [{ email: ridLower }, { username: ridLower }, { user_code: rid.toUpperCase() }, { id: rid }] })
       if (!rec) return handleCORS(NextResponse.json({ error: 'Recipient not found' }, { status: 404 }))
       if (rec.id === user.id) return handleCORS(NextResponse.json({ error: 'Cannot transfer to yourself' }, { status: 400 }))
       if (rec.status === 'blocked' || rec.status === 'frozen') return handleCORS(NextResponse.json({ error: 'Recipient account not available' }, { status: 400 }))
@@ -1272,23 +1335,23 @@ async function handleRoute(request, { params }) {
       if (route === '/admin/chain/seed' && method === 'POST') {
         const body = await request.json().catch(()=>({}))
         const count = Math.min(Math.max(parseInt(body?.count) || 100, 1), 5000)
-        const currencies = ['USDT','BTC','ETH','USDC','BNB','SOL','USD','EUR','GBP','INR']
-        const networks = { USDT:['ERC20','TRC20','BEP20'], BTC:['Bitcoin'], ETH:['ERC20'], USDC:['ERC20','Polygon'], BNB:['BEP20'], SOL:['Solana'], USD:['fiat_rail'], EUR:['fiat_rail'], GBP:['fiat_rail'], INR:['fiat_rail'] }
+        const currencies = ['AUR','USDT','BTC','ETH','USDC','BNB','SOL','USD','EUR','GBP','INR']
+        const networks = { AUR:['Aurela'], USDT:['ERC20','TRC20','BEP20'], BTC:['Bitcoin'], ETH:['ERC20'], USDC:['ERC20','Polygon'], BNB:['BEP20'], SOL:['Solana'], USD:['fiat_rail'], EUR:['fiat_rail'], GBP:['fiat_rail'], INR:['fiat_rail'] }
         const types = ['transfer','deposit','withdraw','card_activation']
-        const usernames = ['satoshi','vitalik','ceo','trader01','tradepro','alicia','marco','yumi','zara','omar','luna','kai','ivy','ren','nora']
+        const codes = () => 'AUR' + randDigits(9)
         const created = []
         for (let i = 0; i < count; i++) {
           const cur = currencies[Math.floor(Math.random()*currencies.length)]
           const net = networks[cur][Math.floor(Math.random()*networks[cur].length)]
           const type = types[Math.floor(Math.random()*types.length)]
-          const from = usernames[Math.floor(Math.random()*usernames.length)]
-          const to = usernames[Math.floor(Math.random()*usernames.length)]
-          const amount = ['BTC','ETH'].includes(cur) ? Math.random()*3 : ['USDT','USDC'].includes(cur) ? Math.random()*20000 : Math.random()*50000
+          const from = codes()
+          const to = codes()
+          const amount = cur === 'AUR' ? Math.random()*500 : ['BTC','ETH'].includes(cur) ? Math.random()*3 : ['USDT','USDC'].includes(cur) ? Math.random()*20000 : Math.random()*50000
           const b = await writeBlock(db, {
             type, currency: cur, amount: Math.round(amount*1e6)/1e6, network: net,
             from_username: type === 'deposit' ? 'external' : from,
             to_username: type === 'withdraw' ? 'external' : to,
-            method: type === 'card_activation' ? 'usdt' : (['deposit','withdraw'].includes(type) && ['USD','EUR','GBP','INR'].includes(cur)) ? 'bank' : 'chain'
+            method: type === 'card_activation' ? 'aur' : (['deposit','withdraw'].includes(type) && ['USD','EUR','GBP','INR'].includes(cur)) ? 'bank' : 'chain'
           })
           created.push(b.block_number)
         }

@@ -550,12 +550,12 @@ function TransferTab({ wallets, onDone }) {
     <div className="grid lg:grid-cols-3 gap-6">
       <div className="lg:col-span-2 card-luxury rounded-2xl p-6">
         <div className="font-display text-2xl">Instant transfer</div>
-        <div className="text-sm text-muted-foreground">Send fiat or crypto by username, email or wallet ID — zero fees inside Aurela.</div>
+        <div className="text-sm text-muted-foreground">Send fiat or crypto by email, Aurela ID or wallet address — zero fees inside Aurela.</div>
 
         <div className="mt-6 space-y-4">
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Recipient</Label>
-            <Input value={form.recipient} onChange={e => setForm({...form, recipient: e.target.value })} placeholder="username, email or wallet ID" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+            <Input value={form.recipient} onChange={e => setForm({...form, recipient: e.target.value })} placeholder="email, Aurela ID (AUR…) or wallet ID" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -589,8 +589,8 @@ function TransferTab({ wallets, onDone }) {
       <div className="card-luxury rounded-2xl p-6">
         <div className="font-display text-xl">Your Aurela ID</div>
         <div className="mt-3 p-4 rounded-lg bg-secondary">
-          <div className="text-xs text-muted-foreground">Username</div>
-          <div className="font-mono text-gold text-lg mt-1">@{user?.username}</div>
+          <div className="text-xs text-muted-foreground">Aurela ID</div>
+          <div className="font-mono text-gold text-lg mt-1">{user?.user_code || '—'}</div>
           <div className="text-xs text-muted-foreground mt-3">Email</div>
           <div className="font-mono text-gold-bright text-sm mt-1">{user?.email}</div>
         </div>
@@ -703,7 +703,7 @@ function CardsTab({ cards, onChange, onWalletChange }) {
             </div>
             <div className="mt-4 flex items-center gap-2 flex-wrap">
               <Badge variant="outline" className={`${c.status==='active'?'border-gold-500 text-gold':c.status==='activating'?'border-blue-500/50 text-blue-400':c.status==='pending_verification'?'border-gold-500/40 text-gold':c.status==='rejected'?'border-red-500/40 text-red-400':'border-muted text-muted-foreground'}`}>{c.status.replace('_',' ')}</Badge>
-              <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Daily spend {c.daily_spend_limit.toLocaleString()}</Badge>
+              <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Monthly spend ${c.monthly_spend_limit.toLocaleString()}</Badge>
               {c.status === 'activating' && c.usable_at && <ActivationCountdown usable_at={c.usable_at}/>}
             </div>
             <div className="mt-4 flex gap-2 flex-wrap">
