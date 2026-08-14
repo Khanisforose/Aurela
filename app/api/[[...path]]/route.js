@@ -202,16 +202,25 @@ async function sendEmailOTP(email, code, purpose = 'signup') {  const apiKey = p
 
 // ---------- Seeding ----------
 async function ensureSeed(db) {
-  // Production reset: on first boot with new admin config, wipe all test data
+  // ⚠️ SAFETY: All migrations below MUST be idempotent and MUST NOT delete user data.
+  // Each migration checks for its own version marker and skips if already applied.
+  // The old destructive "wipe users on unknown version" logic caused data loss on
+  // every restart when the migration marker advanced beyond v4 — that has been REMOVED.
   const migration = await db.collection('system').findOne({ id: 'migration' })
-  if (!migration || migration.version !== 'v4_treasury_trc20') {
-    if (!migration || migration.version !== 'v3_production') {
-      const collectionsToWipe = ['users','wallets','transactions','sessions','cards','kyc','audit_logs','rates','status_checks']
-      for (const c of collectionsToWipe) {
-        try { await db.collection(c).deleteMany({}) } catch(e) {}
-      }
-    }
-    // v4: force treasury wallet to USDT TRC20
+  const appliedVersions = new Set()
+  if (migration?.versions) migration.versions.forEach(v => appliedVersions.add(v))
+  if (migration?.version) appliedVersions.add(migration.version)   // backwards-compat with old single-version marker
+  const markApplied = async (v) => {
+    appliedVersions.add(v)
+    await db.collection('system').updateOne(
+      { id: 'migration' },
+      { $addToSet: { versions: v }, $set: { last_version: v, last_ran_at: now() } },
+      { upsert: true }
+    )
+  }
+
+  // v4: force treasury wallet to USDT TRC20 (idempotent — just sets fields)
+  if (!appliedVersions.has('v4_treasury_trc20')) {
     await db.collection('settings').updateOne(
       { id: 'platform' },
       { $set: {
@@ -221,15 +230,11 @@ async function ensureSeed(db) {
       } },
       { upsert: false }
     )
-    await db.collection('system').updateOne(
-      { id: 'migration' },
-      { $set: { id: 'migration', version: 'v4_treasury_trc20', ran_at: now() } },
-      { upsert: true }
-    )
+    await markApplied('v4_treasury_trc20')
   }
 
   // v5: extend enabled_fiat / enabled_crypto to full supported lists (since we grew from 10 to 50/30)
-  if (!migration || migration.version !== 'v5_currency_toggle') {
+  if (!appliedVersions.has('v5_currency_toggle')) {
     const s = await db.collection('settings').findOne({ id: 'platform' })
     if (s) {
       const upd = {}
@@ -240,15 +245,11 @@ async function ensureSeed(db) {
         await db.collection('settings').updateOne({ id: 'platform' }, { $set: upd })
       }
     }
-    await db.collection('system').updateOne(
-      { id: 'migration' },
-      { $set: { id: 'migration', version: 'v5_currency_toggle', ran_at: now() } },
-      { upsert: true }
-    )
+    await markApplied('v5_currency_toggle')
   }
 
   // v7: auto-seed anonymized dummy blocks (replaces older seeded blocks with human names)
-  if (!migration || migration.version !== 'v7_anon_blocks') {
+  if (!appliedVersions.has('v7_anon_blocks')) {
     // Wipe any legacy dummy blocks with human names (from earlier v5 seeder) so the chain looks anonymized
     await db.collection('aurela_chain').deleteMany({ from_username: { $in: ['satoshi','vitalik','ceo','trader01','tradepro','alicia','marco','yumi','zara','omar','luna','kai','ivy','ren','nora'] } })
     await db.collection('aurela_chain').deleteMany({ to_username: { $in: ['satoshi','vitalik','ceo','trader01','tradepro','alicia','marco','yumi','zara','omar','luna','kai','ivy','ren','nora'] } })
@@ -271,11 +272,7 @@ async function ensureSeed(db) {
         })
       }
     }
-    await db.collection('system').updateOne(
-      { id: 'migration' },
-      { $set: { id: 'migration', version: 'v7_anon_blocks', ran_at: now() } },
-      { upsert: true }
-    )
+    await markApplied('v7_anon_blocks')
   }
 
   const existing = await db.collection('users').findOne({ role: 'super_admin' })
