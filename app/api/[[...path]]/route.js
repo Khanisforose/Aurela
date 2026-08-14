@@ -132,8 +132,34 @@ async function hasActiveCard(db, userId) {
 }
 
 // ---------- Email OTP via Resend ----------
-async function sendEmailOTP(email, code, purpose = 'signup') {
+async function sendEmail(email, subject, bodyHtml) {
   const apiKey = process.env.RESEND_API_KEY
+  const from = process.env.EMAIL_FROM || 'Aurela <onboarding@resend.dev>'
+  if (!apiKey) { console.log(`[AURELA email:no-service] to=${email} subject=${subject}`); return { delivered: false } }
+  const html = `<div style="background:#050507;color:#f5f5f0;font-family:'Helvetica Neue',Arial,sans-serif;padding:40px 20px"><div style="max-width:520px;margin:0 auto;background:linear-gradient(160deg,#141419 0%,#0b0b0f 100%);border:1px solid rgba(212,175,55,0.25);border-radius:16px;padding:36px"><div style="text-align:center;margin-bottom:24px"><div style="display:inline-block;font-family:'Playfair Display',Georgia,serif;font-size:26px;letter-spacing:8px;background:linear-gradient(120deg,#8f6b18,#d4af37,#f5e29d,#d4af37,#8f6b18);-webkit-background-clip:text;background-clip:text;color:transparent">AURELA</div></div>${bodyHtml}<hr style="border:none;border-top:1px solid rgba(212,175,55,0.12);margin:28px 0"/><p style="color:#7a7a72;font-size:11px;text-align:center;margin:0">\u00a9 ${new Date().getFullYear()} Aurela Wallet</p></div></div>`
+  try {
+    const res = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from, to: [email], subject, html }) })
+    if (!res.ok) { const err = await res.text(); console.error('[Resend] failure', res.status, err); return { delivered: false, error: err } }
+    return { delivered: true }
+  } catch (e) { console.error('[Resend] error', e); return { delivered: false, error: String(e) } }
+}
+
+// Push a notification row into user_notifications AND fire an email (best effort, fire-and-forget)
+async function notifyUser(db, userId, { kind, title, body, meta = {} }) {
+  await db.collection('user_notifications').insertOne({
+    id: uuidv4(), user_id: userId, kind, title, body,
+    meta, read: false, created_at: now()
+  })
+  try {
+    const u = await db.collection('users').findOne({ id: userId }, { projection: { email: 1, full_name: 1 } })
+    if (u?.email) {
+      const emailBody = `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 12px">${title}</h1><p style="color:#a8a8a0;font-size:14px;line-height:1.6;margin:0 0 20px">${body}</p><p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0">Sign in at <a href="https://www.aurelawallet.com" style="color:#d4af37">aurelawallet.com</a> to see the details.</p>`
+      sendEmail(u.email, `[Aurela] ${title}`, emailBody).catch(()=>{})
+    }
+  } catch (e) { /* non-fatal */ }
+}
+
+async function sendEmailOTP(email, code, purpose = 'signup') {  const apiKey = process.env.RESEND_API_KEY
   const from = process.env.EMAIL_FROM || 'Aurela <onboarding@resend.dev>'
   if (!apiKey) {
     console.log(`[AURELA OTP:no-service] to=${email} code=${code} purpose=${purpose}`)
@@ -309,18 +335,22 @@ async function ensureSeed(db) {
 async function createWalletsForUser(db, userId) {
   const fiatWallets = FIAT.map(code => ({
     id: uuidv4(), user_id: userId, type: 'fiat', currency: code,
-    balance: 0,
-    pending: 0, created_at: now()
+    balance: 0, pending: 0, created_at: now()
   }))
   const cryptoWallets = CRYPTO.map(code => ({
     id: uuidv4(), user_id: userId, type: 'crypto', currency: code,
-    balance: code === 'AUR' ? 5 : 0,   // Welcome bonus: 5 Aurela Coin
+    balance: 0,   // No auto-credit — AUR welcome is claim-only after KYC (see /api/claim/welcome)
     pending: 0,
     address: generateMockAddress(code),
     networks: CRYPTO_NETWORKS[code] || ['ERC20'],
     created_at: now()
   }))
   await db.collection('wallets').insertMany([...fiatWallets, ...cryptoWallets])
+  // Create a pending reward that user can claim after KYC approval
+  await db.collection('user_rewards').insertOne({
+    id: uuidv4(), user_id: userId, type: 'aur_welcome', amount: 5, currency: 'AUR',
+    status: 'pending', requires: 'kyc_approved', created_at: now()
+  })
 }
 
 function generateMockAddress(code) {
@@ -363,11 +393,11 @@ async function computeAurPrice(db, currentFx) {
 
 async function getRates(db) {
   const cached = await db.collection('rates').findOne({ id: 'live' })
-  const stale = !cached || (Date.now() - new Date(cached.updated_at).getTime() > 30 * 1000)
-  let doc = cached
+  const stale = !cached || (Date.now() - new Date(cached.updated_at).getTime() > 15 * 1000)   // Refresh from Coinbase every 15s
+  let baseDoc = cached
   if (stale) {
-    let fx = { ...FALLBACK_FX }
-    let crypto_usd = { ...FALLBACK_CRYPTO_USD }
+    let fx = { ...(cached?.fx || FALLBACK_FX) }
+    let base_crypto_usd = { ...(cached?.base_crypto_usd || cached?.crypto_usd || FALLBACK_CRYPTO_USD) }
     try {
       const cbRes = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD', { cache: 'no-store' })
       if (cbRes.ok) {
@@ -377,26 +407,46 @@ async function getRates(db) {
           if (r[c]) { const v = Number(r[c]); if (v && isFinite(v)) fx[c] = v }
         }
         for (const c of CRYPTO) {
-          if (r[c]) { const v = Number(r[c]); if (v && isFinite(v) && v > 0) crypto_usd[c] = 1 / v }
+          if (c === 'AUR') continue
+          if (r[c]) { const v = Number(r[c]); if (v && isFinite(v) && v > 0) base_crypto_usd[c] = 1 / v }
         }
-        crypto_usd.USDT = 1; crypto_usd.USDC = 1
+        base_crypto_usd.USDT = 1; base_crypto_usd.USDC = 1
       }
-    } catch (e) { /* keep fallback */ }
+    } catch (e) { /* keep prior */ }
     try {
       const fxRes = await fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' })
       if (fxRes.ok) {
         const j = await fxRes.json()
         if (j && j.rates) for (const c of FIAT) if (j.rates[c] && !fx[c]) fx[c] = j.rates[c]
       }
-    } catch (e) { /* keep fallback */ }
-    doc = { id: 'live', fx, crypto_usd, updated_at: now() }
-    await db.collection('rates').updateOne({ id: 'live' }, { $set: doc }, { upsert: true })
+    } catch (e) { /* keep prior */ }
+    baseDoc = { id: 'live', fx, base_crypto_usd, crypto_history: cached?.crypto_history || {}, updated_at: now() }
+    await db.collection('rates').updateOne({ id: 'live' }, { $set: baseDoc }, { upsert: true })
   }
-  // Always freshen Aurela Coin price (every tick — this is what makes it feel live)
-  const aur = await computeAurPrice(db, doc.fx)
-  doc.crypto_usd = { ...doc.crypto_usd, AUR: aur.price_usd }
-  doc.aur = aur
-  return doc
+  // Apply per-call jitter: keeps prices anchored to real Coinbase base but adds micro-movement so tickers feel live.
+  // Stablecoins (USDT/USDC) don't jitter. Volatile coins get ±0.15%, mid ±0.08%, majors ±0.05%.
+  const jitterPct = { BTC: 0.05, ETH: 0.05, USDT: 0, USDC: 0, BNB: 0.08, SOL: 0.15, XRP: 0.15, ADA: 0.15, DOGE: 0.25, MATIC: 0.15, AVAX: 0.15, DOT: 0.15, TRX: 0.10, LINK: 0.10, ATOM: 0.15, LTC: 0.10, BCH: 0.10, XLM: 0.15, NEAR: 0.15, APT: 0.20, ARB: 0.15, OP: 0.15, SUI: 0.20, TON: 0.10, SHIB: 0.30, PEPE: 0.40, INJ: 0.20, FIL: 0.15, ICP: 0.15, HBAR: 0.15 }
+  const crypto_usd = {}
+  for (const [c, base] of Object.entries(baseDoc.base_crypto_usd || {})) {
+    const j = (jitterPct[c] ?? 0.10) / 100
+    const noise = (Math.random() - 0.5) * 2 * j
+    crypto_usd[c] = Math.max(0, base * (1 + noise))
+  }
+  // Append to rolling history (per-asset, last 120 points), skipping AUR (has its own)
+  const prevHist = baseDoc.crypto_history || {}
+  const tNow = Date.now()
+  const crypto_history = { ...prevHist }
+  for (const c of Object.keys(crypto_usd)) {
+    if (c === 'AUR') continue
+    const arr = Array.isArray(prevHist[c]) ? [...prevHist[c]] : []
+    arr.push({ t: tNow, p: crypto_usd[c] })
+    crypto_history[c] = arr.slice(-120)
+  }
+  await db.collection('rates').updateOne({ id: 'live' }, { $set: { crypto_history } })
+  // AUR from its own simulator
+  const aur = await computeAurPrice(db, baseDoc.fx)
+  crypto_usd.AUR = aur.price_usd
+  return { fx: baseDoc.fx, crypto_usd, crypto_history, aur, updated_at: baseDoc.updated_at }
 }
 
 function convertToUSD(amount, currency, rates) {
@@ -425,7 +475,29 @@ async function handleRoute(request, { params }) {
 
     if (route === '/rates' && method === 'GET') {
       const r = await getRates(db)
-      return handleCORS(NextResponse.json({ fx: r.fx, crypto_usd: r.crypto_usd, aur: r.aur, updated_at: r.updated_at }))
+      // Compute % change vs first history point (used for live tickers with mini-arrows)
+      const change = {}
+      const hist = r.crypto_history || {}
+      for (const c of Object.keys(r.crypto_usd || {})) {
+        const arr = hist[c] || []
+        if (arr.length >= 2) {
+          const first = arr[0].p, last = arr[arr.length-1].p
+          if (first > 0) change[c] = ((last - first) / first) * 100
+        }
+      }
+      // Include AUR change from its own history
+      if (r.aur?.history?.length >= 2) {
+        const f = r.aur.history[0].usd, l = r.aur.history[r.aur.history.length-1].usd
+        if (f > 0) change.AUR = ((l - f) / f) * 100
+      }
+      return handleCORS(NextResponse.json({
+        fx: r.fx,
+        crypto_usd: r.crypto_usd,
+        crypto_history: r.crypto_history,
+        crypto_change: change,
+        aur: r.aur,
+        updated_at: r.updated_at
+      }))
     }
 
     if (route === '/config' && method === 'GET') {
@@ -853,6 +925,44 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ ok: true }))
     }
 
+    // User notifications (per-user notification bell)
+    if (route === '/notifications' && method === 'GET') {
+      const list = await db.collection('user_notifications').find({ user_id: user.id }).sort({ created_at: -1 }).limit(50).toArray()
+      const unread = await db.collection('user_notifications').countDocuments({ user_id: user.id, read: false })
+      return handleCORS(NextResponse.json({ notifications: clean(list), unread }))
+    }
+    if (route === '/notifications/read' && method === 'POST') {
+      await db.collection('user_notifications').updateMany({ user_id: user.id, read: false }, { $set: { read: true, read_at: now() } })
+      return handleCORS(NextResponse.json({ ok: true }))
+    }
+
+    // Claim AUR welcome reward — only after KYC approved
+    if (route === '/claim/welcome' && method === 'POST') {
+      const reward = await db.collection('user_rewards').findOne({ user_id: user.id, type: 'aur_welcome', status: 'pending' })
+      if (!reward) return handleCORS(NextResponse.json({ error: 'No pending welcome reward — either already claimed or not eligible.' }, { status: 400 }))
+      if (user.kyc_status !== 'approved') return handleCORS(NextResponse.json({ error: 'Complete identity verification (KYC) to claim your reward.', code: 'KYC_REQUIRED' }, { status: 403 }))
+      const w = await db.collection('wallets').findOne({ user_id: user.id, currency: 'AUR' })
+      if (!w) return handleCORS(NextResponse.json({ error: 'AUR wallet not found' }, { status: 404 }))
+      await db.collection('wallets').updateOne({ id: w.id }, { $inc: { balance: reward.amount } })
+      await db.collection('user_rewards').updateOne({ id: reward.id }, { $set: { status: 'claimed', claimed_at: now() } })
+      await writeBlock(db, { type: 'reward', currency: 'AUR', amount: reward.amount, network: 'Aurela', to_user_id: user.id, from_username: 'aurela_treasury', method: 'welcome_bonus' })
+      await notifyUser(db, user.id, { kind: 'reward', title: 'Welcome reward claimed', body: `You just claimed ${reward.amount} AUR — welcome to Aurela.` })
+      await audit(db, user.id, 'reward.claim', { type: 'aur_welcome', amount: reward.amount })
+      return handleCORS(NextResponse.json({ ok: true, credited: reward.amount, currency: 'AUR' }))
+    }
+    // Reward status check (frontend uses this to show the pop-up)
+    if (route === '/claim/status' && method === 'GET') {
+      const reward = await db.collection('user_rewards').findOne({ user_id: user.id, type: 'aur_welcome' })
+      return handleCORS(NextResponse.json({
+        has_reward: !!reward,
+        status: reward?.status || null,
+        amount: reward?.amount || 5,
+        currency: 'AUR',
+        kyc_status: user.kyc_status || 'unverified',
+        eligible: reward?.status === 'pending' && user.kyc_status === 'approved',
+      }))
+    }
+
     // Profile
     if (route === '/profile' && method === 'PUT') {
       const body = await request.json()
@@ -959,6 +1069,7 @@ async function handleRoute(request, { params }) {
         from_user_id: user.id, to_user_id: rec.id, from_username: user.username, to_username: rec.username,
       })
       await audit(db, user.id, 'transfer.internal', { to: rec.username, amount: amt, currency, block: block.block_number })
+      await notifyUser(db, rec.id, { kind: 'transfer_in', title: 'Payment received', body: `You received ${amt} ${currency} from Aurela ID ${user.user_code || 'a member'}.` })
       return handleCORS(NextResponse.json({ ok: true, transaction: clean(tx), block: clean(block) }))
     }
 
@@ -1205,6 +1316,11 @@ async function handleRoute(request, { params }) {
         const status = action === 'approve' ? 'approved' : 'rejected'
         await db.collection('kyc').updateOne({ id: kycId }, { $set: { status, reviewed_at: now() } })
         await db.collection('users').updateOne({ id: rec.user_id }, { $set: { kyc_status: status } })
+        if (status === 'approved') {
+          await notifyUser(db, rec.user_id, { kind: 'kyc_approved', title: 'Identity verified 🎉', body: 'Your identity verification has been approved. All features are now unlocked — including your 5 AUR welcome reward. Head to the dashboard to claim it.' })
+        } else {
+          await notifyUser(db, rec.user_id, { kind: 'kyc_rejected', title: 'Identity verification rejected', body: 'Your KYC submission was rejected. Please review your documents and try again.' })
+        }
         await audit(db, user.id, `admin.kyc.${action}`, { kyc_id: kycId, user_id: rec.user_id })
         return handleCORS(NextResponse.json({ ok: true }))
       }
@@ -1248,8 +1364,10 @@ async function handleRoute(request, { params }) {
           await db.collection('transactions').insertOne(tx)
           await writeBlock(db, { type: 'deposit', tx_id: tx.id, currency: req.currency, amount: req.amount, network: CRYPTO.includes(req.currency) ? 'external' : 'fiat_rail', to_user_id: req.user_id, to_username: req.to_username, from_username: req.method })
           await db.collection('deposit_requests').updateOne({ id: depId }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
+          await notifyUser(db, req.user_id, { kind: 'deposit_approved', title: 'Deposit credited', body: `Your ${req.amount} ${req.currency} deposit has been verified and credited to your wallet.` })
         } else {
           await db.collection('deposit_requests').updateOne({ id: depId }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id } })
+          await notifyUser(db, req.user_id, { kind: 'deposit_rejected', title: 'Deposit rejected', body: `Your ${req.amount} ${req.currency} deposit request was rejected. Please contact support if this seems wrong.` })
         }
         await audit(db, user.id, `admin.deposit.${action}`, { deposit_id: depId })
         return handleCORS(NextResponse.json({ ok: true }))
@@ -1280,10 +1398,12 @@ async function handleRoute(request, { params }) {
           await db.collection('transactions').insertOne(tx)
           await writeBlock(db, { type: 'withdraw', tx_id: tx.id, currency: wreq.currency, amount: wreq.amount, network: isCrypto ? (wreq.network || 'external') : 'fiat_rail', from_user_id: wreq.user_id, from_username: wreq.username, to_username: 'external', destination: wreq.destination, method: wreq.method })
           await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
+          await notifyUser(db, wreq.user_id, { kind: 'withdraw_approved', title: 'Withdrawal released', body: `Your withdrawal of ${wreq.amount} ${wreq.currency} to ${wreq.destination || 'external'} has been approved and released.` })
         } else {
           // Rejected — return the locked funds to available balance
           if (wallet) await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: wreq.amount, locked: -wreq.amount } })
           await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id } })
+          await notifyUser(db, wreq.user_id, { kind: 'withdraw_rejected', title: 'Withdrawal rejected', body: `Your withdrawal of ${wreq.amount} ${wreq.currency} was rejected and the funds have been returned to your wallet.` })
         }
         await audit(db, user.id, `admin.withdraw.${action}`, { withdraw_id: wid })
         return handleCORS(NextResponse.json({ ok: true }))
@@ -1385,8 +1505,10 @@ async function handleRoute(request, { params }) {
           const finalUsable = immediate ? now() : new Date(Date.now() + 24*60*60*1000)
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), usable_at: finalUsable, activated_at: immediate ? now() : null } })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
+          await notifyUser(db, card.user_id, { kind: 'card_activated', title: 'Card approved', body: immediate ? `Your Aurela ${card.tier} card is now active and ready to use.` : `Your Aurela ${card.tier} card has been approved. It will unlock for use in 24 hours.` })
         } else {
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'rejected' } })
+          await notifyUser(db, card.user_id, { kind: 'card_rejected', title: 'Card activation rejected', body: `Your ${card.tier} card activation was rejected. The USDT transfer could not be verified — please contact support.` })
         }
         await audit(db, user.id, `admin.card.${action}`, { card_id: cardId })
         return handleCORS(NextResponse.json({ ok: true }))

@@ -54,6 +54,9 @@ export function Dashboard() {
   const [txs, setTxs] = useState([])
   const [cards, setCards] = useState([])
   const [notif, setNotif] = useState({ total: 0, counts: {}, items: [] })
+  const [userNotif, setUserNotif] = useState({ notifications: [], unread: 0 })
+  const [claim, setClaim] = useState(null)
+  const [claimOpen, setClaimOpen] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const NAV = isAdmin ? [...USER_NAV, ...ADMIN_NAV] : USER_NAV
@@ -74,13 +77,19 @@ export function Dashboard() {
     if (!isAdmin) return
     try { const n = await api.get('/admin/notifications'); setNotif(n) } catch(e) {}
   }
-  const loadAll = async () => { await Promise.all([loadWallets(), loadTxs(), loadCards(), loadNotif()]) }
+  const loadUserNotif = async () => {
+    try { const n = await api.get('/notifications'); setUserNotif(n) } catch(e) {}
+  }
+  const loadClaim = async () => {
+    try { const c = await api.get('/claim/status'); setClaim(c); if (c.has_reward && c.status === 'pending' && !claimOpen) setClaimOpen(true) } catch(e) {}
+  }
+  const loadAll = async () => { await Promise.all([loadWallets(), loadTxs(), loadCards(), loadNotif(), loadUserNotif(), loadClaim()]) }
 
   useEffect(() => { loadAll() }, [])
   // Auto-refresh every 5s (driven by store `tick`)
   useEffect(() => {
     if (!user) return
-    loadWallets(); loadTxs(); loadCards(); loadNotif()
+    loadWallets(); loadTxs(); loadCards(); loadNotif(); loadUserNotif()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick])
 
@@ -229,6 +238,37 @@ export function Dashboard() {
                   </DropdownMenuContent>
                 </DropdownMenu>
               )}
+              {!isAdmin && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="relative h-10 w-10 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 flex items-center justify-center transition">
+                      <Bell className="h-4 w-4 text-gold"/>
+                      {userNotif.unread > 0 && (
+                        <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+                          {userNotif.unread > 99 ? '99+' : userNotif.unread}
+                        </span>
+                      )}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-80 bg-onyx-900 border-gold-500/25">
+                    <DropdownMenuLabel className="text-muted-foreground flex items-center justify-between">
+                      <span className="text-foreground text-sm">Your notifications</span>
+                      {userNotif.unread > 0 && <button onClick={() => api.post('/notifications/read', {}).then(loadUserNotif)} className="text-[10px] text-gold uppercase tracking-widest hover:underline">Mark all read</button>}
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator className="bg-gold-500/15"/>
+                    <div className="max-h-80 overflow-y-auto">
+                      {userNotif.notifications?.length === 0 && <div className="p-4 text-xs text-muted-foreground text-center">No notifications yet</div>}
+                      {userNotif.notifications?.map(n => (
+                        <div key={n.id} className={`px-3 py-2 border-b border-gold-500/5 ${n.read ? 'opacity-60' : ''}`}>
+                          <div className="text-xs font-medium text-gold-bright">{n.title}</div>
+                          <div className="text-[11px] text-muted-foreground mt-0.5">{n.body}</div>
+                          <div className="text-[9px] text-muted-foreground mt-1">{new Date(n.created_at).toLocaleString()}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="flex items-center gap-2 pr-2 pl-1 py-1 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 transition">
@@ -313,6 +353,34 @@ export function Dashboard() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Welcome AUR reward popup — shown once when a pending reward exists */}
+      <Dialog open={claimOpen} onOpenChange={setClaimOpen}>
+        <DialogContent className="bg-onyx-900 border-gold-500/30 max-w-md">
+          <DialogHeader><DialogTitle className="font-display text-center text-2xl gold-text">🎁 Welcome to Aurela</DialogTitle></DialogHeader>
+          <div className="text-center py-2">
+            <div className="text-6xl my-2">🪙</div>
+            <div className="font-display text-3xl gold-text">5 AUR</div>
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground mt-1">Aurela Coin welcome reward</div>
+            {claim?.eligible ? (
+              <>
+                <p className="text-sm text-muted-foreground mt-4">Your identity is verified. Claim your welcome reward now.</p>
+                <Button className="gold-btn mt-5 w-full rounded-full h-11"
+                  onClick={async () => {
+                    try { const res = await api.post('/claim/welcome', {}); toast.success(`+${res.credited} ${res.currency} credited!`); setClaimOpen(false); await refreshUser(); await loadWallets(); await loadClaim(); await loadUserNotif() }
+                    catch(e) { toast.error(e.message) }
+                  }}>Claim 5 AUR</Button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-muted-foreground mt-4">Complete your <span className="text-gold">Identity Verification (KYC)</span> to claim this reward. This is required by our banking partners.</p>
+                <Button className="gold-btn mt-5 w-full rounded-full h-11" onClick={() => { setClaimOpen(false); setTab('kyc') }}>Complete KYC to claim reward</Button>
+                <button onClick={() => setClaimOpen(false)} className="mt-2 text-[11px] text-muted-foreground hover:text-gold">Remind me later</button>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

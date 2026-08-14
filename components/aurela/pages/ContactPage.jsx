@@ -76,6 +76,11 @@ export function ContactPage() {
             </div>
             <div className="card-luxury rounded-2xl p-6">
               <MapPin className="h-5 w-5 text-gold-bright"/>
+              <div className="font-display text-lg mt-3">Office address</div>
+              <div className="text-sm text-gold leading-relaxed">248 3rd St #434<br/>Oakland, CA 94607<br/>United States</div>
+            </div>
+            <div className="card-luxury rounded-2xl p-6">
+              <MapPin className="h-5 w-5 text-gold-bright"/>
               <div className="font-display text-lg mt-3">Domain</div>
               <div className="text-sm text-gold">www.aurelawallet.com</div>
               <div className="text-xs text-muted-foreground mt-1">Global service platform</div>
