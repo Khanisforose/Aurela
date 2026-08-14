@@ -131,6 +131,76 @@ async function hasActiveCard(db, userId) {
   return !!c
 }
 
+// ---------- Per-user card fee resolver ----------
+// Returns the activation fee for a user + tier. Checks user override first, then admin global default.
+async function resolveCardFee(db, userDoc, tier) {
+  const override = userDoc?.card_fee_overrides?.[tier]
+  if (typeof override === 'number' && override >= 0) return override
+  const settings = await db.collection('settings').findOne({ id: 'platform' })
+  const globalFee = settings?.card_activation_fees?.[tier]
+  if (typeof globalFee === 'number' && globalFee >= 0) return globalFee
+  return CARD_TIERS[tier]?.activation_fee_usdt ?? 0
+}
+
+// ---------- Aurela Chain — Auto-simulation daemon ----------
+// The chain writes a fresh block every 4-8 seconds automatically (like a real block explorer).
+// Piggybacks on the /rates polling: each poll triggers this tick which decides if enough time has
+// elapsed to mint a new block. Uses admin-configured card fees for card_activation blocks.
+let _lastChainTickAt = 0
+let _chainTickInFlight = false
+async function simulateChainTick(db) {
+  if (_chainTickInFlight) return
+  const nowMs = Date.now()
+  // Between 4s and 8s per block, randomized so it feels organic
+  const nextInterval = 4000 + Math.floor(Math.random() * 4000)
+  if (nowMs - _lastChainTickAt < nextInterval) return
+  _chainTickInFlight = true
+  try {
+    _lastChainTickAt = nowMs
+    const settings = await db.collection('settings').findOne({ id: 'platform' })
+    const fees = settings?.card_activation_fees || { basic: 10, premium: 50, elite: 200 }
+    const currencies = ['AUR','USDT','BTC','ETH','USDC','BNB','SOL','XRP','TRX','MATIC','AVAX','USD','EUR','GBP','INR','AED','JPY']
+    const networks = {
+      AUR:['Aurela'], USDT:['ERC20','TRC20','BEP20'], BTC:['Bitcoin'], ETH:['ERC20'], USDC:['ERC20','Polygon'],
+      BNB:['BEP20'], SOL:['Solana'], XRP:['XRP'], TRX:['TRC20'], MATIC:['Polygon'], AVAX:['Avalanche'],
+      USD:['fiat_rail'], EUR:['fiat_rail'], GBP:['fiat_rail'], INR:['fiat_rail'], AED:['fiat_rail'], JPY:['fiat_rail']
+    }
+    // Weighted block-type distribution — more transfers/deposits, fewer card activations (realistic)
+    const typeRoll = Math.random()
+    const type = typeRoll < 0.4 ? 'transfer' : typeRoll < 0.65 ? 'deposit' : typeRoll < 0.85 ? 'withdraw' : typeRoll < 0.93 ? 'card_activation' : 'reward'
+    const genCode = () => 'AUR' + randDigits(9)
+    let cur, amount, network
+    if (type === 'card_activation') {
+      // Card activation blocks: always USDT, amount = admin-configured tier fee
+      cur = 'USDT'
+      const tierPick = Math.random() < 0.6 ? 'basic' : Math.random() < 0.8 ? 'premium' : 'elite'
+      amount = fees[tierPick] ?? 10
+      network = 'TRC20'
+    } else if (type === 'reward') {
+      cur = 'AUR'
+      amount = Math.round((Math.random() * 5 + 1) * 100) / 100   // 1-6 AUR
+      network = 'Aurela'
+    } else {
+      cur = currencies[Math.floor(Math.random() * currencies.length)]
+      network = networks[cur][Math.floor(Math.random() * networks[cur].length)]
+      if (['BTC','ETH'].includes(cur)) amount = Math.round(Math.random() * 3 * 1e6) / 1e6
+      else if (['USDT','USDC'].includes(cur)) amount = Math.round(Math.random() * 20000 * 100) / 100
+      else if (cur === 'AUR') amount = Math.round(Math.random() * 500 * 100) / 100
+      else amount = Math.round(Math.random() * 50000 * 100) / 100
+    }
+    await writeBlock(db, {
+      type, currency: cur, amount, network,
+      from_username: type === 'deposit' ? 'external' : type === 'reward' ? 'aurela_treasury' : genCode(),
+      to_username: type === 'withdraw' ? 'external' : type === 'card_activation' ? 'aurela_treasury' : genCode(),
+      method: type === 'card_activation' ? 'usdt' : type === 'reward' ? 'welcome_bonus' : (['deposit','withdraw'].includes(type) && ['USD','EUR','GBP','INR','AED','JPY'].includes(cur)) ? 'bank' : 'chain'
+    })
+  } catch (e) {
+    console.error('[chain-sim] tick error', e)
+  } finally {
+    _chainTickInFlight = false
+  }
+}
+
 // ---------- Email OTP via Resend ----------
 async function sendEmail(email, subject, bodyHtml) {
   const apiKey = process.env.RESEND_API_KEY
@@ -471,6 +541,8 @@ async function handleRoute(request, { params }) {
     if (route === '/health' && method === 'GET') return handleCORS(NextResponse.json({ ok: true }))
 
     if (route === '/rates' && method === 'GET') {
+      // Fire-and-forget chain simulation tick (writes 1 block if enough time has elapsed)
+      simulateChainTick(db).catch(() => {})
       const r = await getRates(db)
       // Compute % change vs first history point (used for live tickers with mini-arrows)
       const change = {}
@@ -515,6 +587,8 @@ async function handleRoute(request, { params }) {
         enabled_withdrawal_methods: s?.enabled_withdrawal_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
         all_deposit_methods: [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
         all_withdrawal_methods: [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
+        apk_url: s?.apk_url || '',
+        apk_version: s?.apk_version || '',
       }))
     }
 
@@ -748,7 +822,15 @@ async function handleRoute(request, { params }) {
     if (route === '/auth/me' && method === 'GET') {
       const user = await getUserByToken(db, request)
       if (!user) return handleCORS(NextResponse.json({ error: 'Unauthorized' }, { status: 401 }))
-      return handleCORS(NextResponse.json({ user: clean(user) }))
+      // Resolve per-user card fees so frontend sees the effective price (override or global)
+      const settings = await db.collection('settings').findOne({ id: 'platform' })
+      const globalFees = settings?.card_activation_fees || { basic: 10, premium: 50, elite: 200 }
+      const cardFees = {}
+      for (const tier of ['basic','premium','elite']) {
+        const override = user?.card_fee_overrides?.[tier]
+        cardFees[tier] = (typeof override === 'number' && override >= 0) ? override : (globalFees[tier] ?? CARD_TIERS[tier]?.activation_fee_usdt ?? 0)
+      }
+      return handleCORS(NextResponse.json({ user: clean(user), card_fees: cardFees }))
     }
 
     if (route === '/auth/logout' && method === 'POST') {
@@ -1156,7 +1238,7 @@ async function handleRoute(request, { params }) {
       if (existingCards.length >= 3) return handleCORS(NextResponse.json({ error: 'You already hold the maximum of 3 Aurela cards. Delete one to request another.' }, { status: 400 }))
       if (existingCards.some(c => c.tier === tier)) return handleCORS(NextResponse.json({ error: `You already have an Aurela ${tier} card. Only one card per tier is permitted.` }, { status: 400 }))
       const settings = await db.collection('settings').findOne({ id: 'platform' })
-      const fee = settings?.card_activation_fees?.[tier] ?? CARD_TIERS[tier].activation_fee_usdt
+      const fee = await resolveCardFee(db, user, tier)
       const card = {
         id: uuidv4(), user_id: user.id, tier, tier_name: CARD_TIERS[tier].name,
         number: fmtCardNumber(), expiry: cardExpiry(), cvv: randDigits(3),
@@ -1296,6 +1378,18 @@ async function handleRoute(request, { params }) {
             user_id: targetId, from_username: 'aurela_admin', to_username: target.username,
             status: 'completed', created_at: now()
           })
+        } else if (action === 'card_fees') {
+          // Admin sets per-user card activation fee overrides. Payload: { overrides: { basic?, premium?, elite? } }
+          // Any tier omitted or set to null falls back to global admin default.
+          const body = await request.json()
+          const raw = body?.overrides || {}
+          const clean = {}
+          for (const t of ['basic','premium','elite']) {
+            if (raw[t] === null || raw[t] === '' || typeof raw[t] === 'undefined') continue
+            const n = Number(raw[t])
+            if (Number.isFinite(n) && n >= 0) clean[t] = n
+          }
+          await db.collection('users').updateOne({ id: targetId }, { $set: { card_fee_overrides: clean } })
         }
         await audit(db, user.id, `admin.user.${action}`, { target: targetId })
         return handleCORS(NextResponse.json({ ok: true }))
@@ -1328,7 +1422,7 @@ async function handleRoute(request, { params }) {
       if (route === '/admin/settings' && method === 'PUT') {
         const body = await request.json()
         const upd = {}
-        for (const k of ['card_activation_wallet','card_activation_network','card_activation_fees','enabled_fiat','enabled_crypto','maintenance_mode','enabled_deposit_methods','enabled_withdrawal_methods']) {
+        for (const k of ['card_activation_wallet','card_activation_network','card_activation_fees','enabled_fiat','enabled_crypto','maintenance_mode','enabled_deposit_methods','enabled_withdrawal_methods','apk_url','apk_version']) {
           if (k in body) upd[k] = body[k]
         }
         upd.updated_at = now()

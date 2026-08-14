@@ -117,6 +117,39 @@ function UsersAdmin() {
   const [adjForm, setAdjForm] = useState({ currency: 'USD', amount: '', kind: 'credit' })
   const [detail, setDetail] = useState(null) // { user, wallets, cards, transactions, kyc, sessions }
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [feeOverrides, setFeeOverrides] = useState({ basic: '', premium: '', elite: '' })
+  const [savingFees, setSavingFees] = useState(false)
+
+  // Load fee overrides into local editor whenever a user detail is opened
+  useEffect(() => {
+    if (detail?.user) {
+      const ov = detail.user.card_fee_overrides || {}
+      setFeeOverrides({
+        basic: (typeof ov.basic === 'number') ? String(ov.basic) : '',
+        premium: (typeof ov.premium === 'number') ? String(ov.premium) : '',
+        elite: (typeof ov.elite === 'number') ? String(ov.elite) : '',
+      })
+    }
+  }, [detail?.user?.id])
+
+  const saveFees = async () => {
+    if (!detail?.user?.id) return
+    setSavingFees(true)
+    try {
+      const payload = { overrides: {} }
+      for (const t of ['basic','premium','elite']) {
+        const raw = feeOverrides[t]
+        if (raw === '' || raw === null) continue   // empty -> tier falls back to global
+        const n = Number(raw)
+        if (Number.isFinite(n) && n >= 0) payload.overrides[t] = n
+      }
+      await api.post(`/admin/users/${detail.user.id}/card_fees`, payload)
+      toast.success('Card fees updated for this user')
+      // Reflect in local detail
+      setDetail({ ...detail, user: { ...detail.user, card_fee_overrides: payload.overrides } })
+    } catch(e) { toast.error(e.message) }
+    finally { setSavingFees(false) }
+  }
 
   const load = async () => {
     try { const { users } = await api.get('/admin/users' + (q ? `?q=${encodeURIComponent(q)}` : '')); setUsers(users) } catch(e) {}
@@ -294,6 +327,33 @@ function UsersAdmin() {
                     </div>
                   ))}
                 </div>
+              </div>
+
+              {/* Per-user card activation fee overrides */}
+              <div className="p-4 rounded-xl border border-gold-500/25 bg-gradient-to-br from-gold-500/5 to-transparent">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <div className="text-xs uppercase tracking-widest text-gold">Card activation fees · per-user override</div>
+                    <div className="text-[10px] text-muted-foreground mt-0.5">Leave a field blank to fall back to the global admin default. Values are in USDT.</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2 mt-3">
+                  {['basic','premium','elite'].map(t => (
+                    <div key={t}>
+                      <Label className="text-[10px] uppercase tracking-widest text-muted-foreground">{t}</Label>
+                      <Input
+                        type="number" step="any" min="0"
+                        value={feeOverrides[t]}
+                        onChange={e => setFeeOverrides({ ...feeOverrides, [t]: e.target.value })}
+                        placeholder="default"
+                        className="mt-1 bg-secondary border-gold-500/20 h-10 font-mono"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <Button size="sm" onClick={saveFees} disabled={savingFees} className="gold-btn mt-3 rounded-lg">
+                  {savingFees ? 'Saving…' : 'Save card fees for this user'}
+                </Button>
               </div>
 
               {/* KYC snapshot */}
@@ -489,7 +549,8 @@ function SettingsAdmin() {
     card_activation_wallet: '', card_activation_network: 'ERC20',
     card_activation_fees: { basic: 10, premium: 50, elite: 200 },
     enabled_deposit_methods: [], enabled_withdrawal_methods: [],
-    enabled_fiat: [], enabled_crypto: []
+    enabled_fiat: [], enabled_crypto: [],
+    apk_url: '', apk_version: ''
   })
 
   const METHOD_LABELS = {
@@ -517,6 +578,8 @@ function SettingsAdmin() {
         enabled_withdrawal_methods: settings.enabled_withdrawal_methods || allMethods,
         enabled_fiat: settings.enabled_fiat || (config?.all_fiat || []),
         enabled_crypto: settings.enabled_crypto || (config?.all_crypto || []),
+        apk_url: settings.apk_url || '',
+        apk_version: settings.apk_version || '',
       })
     }).catch(()=>{})
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -562,6 +625,22 @@ function SettingsAdmin() {
                 <Input type="number" value={form.card_activation_fees[t]} onChange={e => setForm({ ...form, card_activation_fees: { ...form.card_activation_fees, [t]: Number(e.target.value) } })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
               </div>
             ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="card-luxury rounded-2xl p-6">
+        <div className="font-display text-2xl">Mobile App (APK)</div>
+        <div className="text-sm text-muted-foreground">Configure the "Download App" popup. Generate an APK by uploading your live URL to <a className="text-gold hover:underline" target="_blank" rel="noopener noreferrer" href="https://www.pwabuilder.com">pwabuilder.com</a>, host the .apk on your server, then paste the URL below.</div>
+        <div className="mt-6 space-y-4">
+          <div>
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">APK download URL</Label>
+            <Input value={form.apk_url} onChange={e => setForm({ ...form, apk_url: e.target.value })} placeholder="https://aurelawallet.com/downloads/aurela.apk" className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-sm"/>
+            <div className="text-[10px] text-muted-foreground mt-1">Leave blank until your APK is ready — the popup will show "Coming soon" instead.</div>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-widest text-muted-foreground">Version label</Label>
+            <Input value={form.apk_version} onChange={e => setForm({ ...form, apk_version: e.target.value })} placeholder="1.0.0" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
           </div>
         </div>
       </div>

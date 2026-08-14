@@ -33,13 +33,15 @@ export function AppProvider({ children }) {
   const [rates, setRates] = useState(null)
   const [config, setConfig] = useState(null)
   const [tick, setTick] = useState(0)   // increments every 5s while a user is signed-in — components subscribe to auto-refresh
+  const [cardFees, setCardFees] = useState(null)   // per-user resolved card activation fees { basic, premium, elite }
 
   const refreshUser = useCallback(async () => {
     try {
-      const { user } = await api.get('/auth/me')
-      setUser(user)
-      return user
-    } catch(e) { setUser(null); api.setToken(null); return null }
+      const res = await api.get('/auth/me')
+      setUser(res.user)
+      if (res.card_fees) setCardFees(res.card_fees)
+      return res.user
+    } catch(e) { setUser(null); setCardFees(null); api.setToken(null); return null }
   }, [])
 
   useEffect(() => {
@@ -88,7 +90,7 @@ export function AppProvider({ children }) {
   }
 
   return (
-    <AppCtx.Provider value={{ api, user, setUser, loading, route, setRoute, publicPage, setPublicPage, authMode, setAuthMode, rates, setRates, config, tick, login, register, logout, refreshUser }}>
+    <AppCtx.Provider value={{ api, user, setUser, loading, route, setRoute, publicPage, setPublicPage, authMode, setAuthMode, rates, setRates, config, tick, cardFees, login, register, logout, refreshUser }}>
       {children}
     </AppCtx.Provider>
   )

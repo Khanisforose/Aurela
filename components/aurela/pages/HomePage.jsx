@@ -4,7 +4,7 @@ import { useApp, CoinIcon, FlagIcon } from '../store'
 import { AurelaLogo } from '../Logo'
 import { Button } from '@/components/ui/button'
 import { motion } from 'framer-motion'
-import { ArrowRight, ShieldCheck, Globe2, Zap, CreditCard, Bitcoin, Users, LockKeyhole, Sparkles, TrendingUp, ChevronRight, Check } from 'lucide-react'
+import { ArrowRight, ShieldCheck, Globe2, Zap, CreditCard, Bitcoin, Users, LockKeyhole, Sparkles, TrendingUp, ChevronRight, Check, Handshake } from 'lucide-react'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 
 const features = [
@@ -133,6 +133,26 @@ export function HomePage({ goAuth, goPage }) {
           </div>
           <div className="mt-10">
             <Button onClick={() => goPage('features')} variant="outline" className="border-gold-500/40 rounded-full">See all features <ChevronRight className="ml-1 h-4 w-4"/></Button>
+          </div>
+        </div>
+      </section>
+
+      {/* Partners strip */}
+      <section className="py-16 relative">
+        <div className="container mx-auto">
+          <div className="flex items-end justify-between flex-wrap gap-3 mb-8">
+            <div>
+              <div className="inline-flex items-center gap-2 text-xs uppercase tracking-widest text-gold"><Handshake className="h-3.5 w-3.5"/> Our ecosystem</div>
+              <h2 className="font-display text-3xl md:text-4xl mt-2">Trusted alongside the <span className="gold-text">world's finest.</span></h2>
+            </div>
+            <Button onClick={() => goPage('partners')} variant="outline" className="border-gold-500/40 rounded-full">All partners <ChevronRight className="ml-1 h-4 w-4"/></Button>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 md:gap-4">
+            {['Binance','Coinbase','JPMorgan Chase','HSBC','Visa','Mastercard','PayPal','Stripe','Revolut','Wise','Apple Pay','Google Pay'].map(name => (
+              <button key={name} onClick={() => goPage('partners')} className="card-luxury rounded-xl h-20 flex items-center justify-center text-center px-3 transition hover:border-gold-500/60 hover:shadow-[0_0_20px_rgba(212,175,55,0.25)] border border-gold-500/15">
+                <span className="font-display text-sm md:text-base leading-tight" style={{ WebkitTextStroke: '0.5px rgba(212,175,55,0.85)', WebkitTextFillColor: 'transparent', letterSpacing: '0.02em' }}>{name}</span>
+              </button>
+            ))}
           </div>
         </div>
       </section>

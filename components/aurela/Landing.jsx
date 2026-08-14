@@ -16,12 +16,15 @@ import { ContactPage } from './pages/ContactPage'
 import { TermsPage } from './pages/TermsPage'
 import { PrivacyPage } from './pages/PrivacyPage'
 import { CompliancePage } from './pages/CompliancePage'
+import { PartnersPage } from './pages/PartnersPage'
+import { DownloadAppButton, DownloadAppModal } from './DownloadApp'
 
 const NAV = [
   { id: 'home', label: 'Home' },
   { id: 'features', label: 'Features' },
   { id: 'cards', label: 'Cards' },
   { id: 'services', label: 'Services' },
+  { id: 'partners', label: 'Partners' },
   { id: 'about', label: 'About Us' },
 ]
 
@@ -58,6 +61,7 @@ export function Landing() {
           </nav>
 
           <div className="hidden md:flex items-center gap-3">
+            <DownloadAppButton />
             <Button variant="ghost" onClick={() => goAuth('login')} className="text-foreground hover:text-gold">Sign in</Button>
             <Button onClick={() => goAuth('register')} className="gold-btn rounded-full px-5">Open account <ArrowRight className="ml-2 h-4 w-4"/></Button>
           </div>
@@ -78,11 +82,14 @@ export function Landing() {
                   <Button variant="outline" onClick={() => goAuth('login')} className="flex-1 border-gold-500/40">Sign in</Button>
                   <Button onClick={() => goAuth('register')} className="gold-btn flex-1 rounded-full">Open account</Button>
                 </div>
+                <DownloadAppButton fullWidth />
               </div>
             </motion.div>
           )}
         </AnimatePresence>
       </header>
+
+      <DownloadAppModal />
 
       {/* Page content */}
       <AnimatePresence mode="wait">
@@ -92,6 +99,7 @@ export function Landing() {
           {publicPage === 'cards' && <CardsPage goAuth={goAuth} />}
           {publicPage === 'services' && <ServicesPage goAuth={goAuth} />}
           {publicPage === 'about' && <AboutPage goAuth={goAuth} />}
+          {publicPage === 'partners' && <PartnersPage />}
           {publicPage === 'contact' && <ContactPage />}
           {publicPage === 'terms' && <TermsPage />}
           {publicPage === 'privacy' && <PrivacyPage />}

@@ -665,7 +665,7 @@ function TransferTab({ wallets, onDone }) {
 }
 
 function CardsTab({ cards, onChange, onWalletChange }) {
-  const { api, user, config } = useApp()
+  const { api, user, config, cardFees } = useApp()
   const [openReq, setOpenReq] = useState(false)
   const [openAct, setOpenAct] = useState(null)
   const [tier, setTier] = useState('basic')
@@ -801,7 +801,8 @@ function CardsTab({ cards, onChange, onWalletChange }) {
           <DialogHeader><DialogTitle className="font-display">Choose your Aurela card</DialogTitle></DialogHeader>
           <div className="space-y-3">
             {['basic','premium','elite'].map(t => {
-              const fee = config?.activation_fees?.[t]
+              // Prefer user-specific override (from /auth/me) — falls back to global admin default
+              const fee = (cardFees && typeof cardFees[t] === 'number') ? cardFees[t] : config?.activation_fees?.[t]
               return (
                 <button key={t} onClick={() => setTier(t)} className={`w-full text-left card-luxury rounded-xl p-4 ${tier===t?'ring-1 ring-gold-500':''}`}>
                   <div className="flex items-center justify-between">
