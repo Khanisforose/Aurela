@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useMemo, useCallback } from 'react'
-import { useApp, FIAT_META, CRYPTO_META, fmt, KYC_DOCS_BY_COUNTRY, KYC_COUNTRIES, FIAT_METHODS } from './store'
+import { useApp, FIAT_META, CRYPTO_META, fmt, KYC_DOCS_BY_COUNTRY, KYC_COUNTRIES, FIAT_METHODS, CoinIcon, FlagIcon } from './store'
 import { AurelaLogo, AurelaWordmark } from './Logo'
 import { CardVisual } from './Landing'
 import { Button } from '@/components/ui/button'
@@ -397,7 +397,7 @@ function CurrencySwitcher({ onSaved }) {
       </SelectTrigger>
       <SelectContent>
         {Object.entries(FIAT_META).map(([c, m]) => (
-          <SelectItem key={c} value={c}>{m.flag} {c}</SelectItem>
+          <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><FlagIcon code={c} size={18}/> {c}</span></SelectItem>
         ))}
       </SelectContent>
     </Select>
@@ -491,9 +491,7 @@ function WalletRow({ w }) {
   return (
     <div className="flex items-center justify-between">
       <div className="flex items-center gap-3">
-        <div className="h-9 w-9 rounded-full bg-gradient-to-br from-gold-500/25 to-gold-800/25 border border-gold-500/25 flex items-center justify-center text-sm">
-          {w.type === 'fiat' ? meta?.flag : <span className="text-gold-bright text-[10px] font-bold">{w.currency}</span>}
-        </div>
+        {w.type === 'fiat' ? <FlagIcon code={w.currency} size={36}/> : <CoinIcon code={w.currency} size={36}/>}
         <div>
           <div className="text-sm">{w.currency}</div>
           <div className="text-xs text-muted-foreground">{w.type === 'fiat' ? meta?.name : meta?.name}</div>
@@ -538,9 +536,7 @@ function WalletsTab({ wallets, kind }) {
           <div key={w.id} className="card-luxury rounded-2xl p-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-full bg-gradient-to-br from-gold-500/25 to-gold-800/25 border border-gold-500/25 flex items-center justify-center">
-                  {kind === 'fiat' ? <span className="text-lg">{meta?.flag}</span> : <span className="text-[10px] font-bold text-gold-bright">{w.currency}</span>}
-                </div>
+                {kind === 'fiat' ? <FlagIcon code={w.currency} size={40}/> : <CoinIcon code={w.currency} size={40}/>}
                 <div>
                   <div className="font-display text-lg">{w.currency}</div>
                   <div className="text-xs text-muted-foreground">{meta?.name}</div>
@@ -632,9 +628,9 @@ function TransferTab({ wallets, onDone }) {
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                 <SelectContent>
                   {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
-                  {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
+                  {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><FlagIcon code={c} size={18}/> {c}</span></SelectItem>)}
                   {enabledCrypto.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>}
-                  {Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><CoinIcon code={c} size={18}/> {c}</span></SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -991,9 +987,9 @@ function DepositTab({ wallets, onDone }) {
                 <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
                 <SelectContent className="max-h-72">
                   {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
-                  {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
+                  {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><FlagIcon code={c} size={18}/> {c}</span></SelectItem>)}
                   {cryptoEnabled && enabledCrypto.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>}
-                  {cryptoEnabled && Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {cryptoEnabled && Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><CoinIcon code={c} size={18}/> {c}</span></SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -1157,9 +1153,9 @@ function WithdrawTab({ wallets, onDone }) {
               <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
               <SelectContent className="max-h-72">
                 {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
-                {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}>{FIAT_META[c].flag} {c}</SelectItem>)}
+                {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><FlagIcon code={c} size={18}/> {c}</span></SelectItem>)}
                 {cryptoEnabled && enabledCrypto.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>}
-                {cryptoEnabled && Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                {cryptoEnabled && Object.keys(CRYPTO_META).filter(c => enabledCrypto.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><CoinIcon code={c} size={18}/> {c}</span></SelectItem>)}
               </SelectContent>
             </Select>
             {wallet && <div className="text-xs text-muted-foreground mt-1">Available: {fmt(wallet.balance, wallet.currency)}</div>}

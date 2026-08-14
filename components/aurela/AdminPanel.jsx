@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useApp, FIAT_META, CRYPTO_META, fmt } from './store'
+import { useApp, FIAT_META, CRYPTO_META, fmt, CoinIcon, FlagIcon } from './store'
 import { AurelaWordmark } from './Logo'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -203,9 +203,9 @@ function UsersAdmin() {
                   <SelectTrigger className="mt-2 bg-secondary border-gold-500/20"><SelectValue/></SelectTrigger>
                   <SelectContent>
                     <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>
-                    {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                    {Object.keys(FIAT_META).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><FlagIcon code={c} size={18}/> {c}</span></SelectItem>)}
                     <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Crypto</div>
-                    {Object.keys(CRYPTO_META).map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                    {Object.keys(CRYPTO_META).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><CoinIcon code={c} size={18}/> {c}</span></SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -634,7 +634,7 @@ function SettingsAdmin() {
             return (
               <button key={c} type="button" onClick={() => setForm({ ...form, enabled_fiat: toggle(form.enabled_fiat, c) })} className={`flex items-center justify-between p-3 rounded-lg border transition ${on ? 'bg-gold-500/10 border-gold-500/50' : 'bg-secondary/60 border-gold-500/10 opacity-60'}`}>
                 <div className="text-sm flex items-center gap-2">
-                  <span>{FIAT_META[c]?.flag}</span>
+                  <FlagIcon code={c} size={20}/>
                   <span className="font-mono">{c}</span>
                 </div>
                 <span className={`w-8 h-4 rounded-full flex items-center px-0.5 transition ${on ? 'bg-gradient-to-r from-gold-500 to-gold-700 justify-end' : 'bg-secondary border border-gold-500/20 justify-start'}`}>
@@ -663,7 +663,10 @@ function SettingsAdmin() {
             const on = form.enabled_crypto.includes(c)
             return (
               <button key={c} type="button" onClick={() => setForm({ ...form, enabled_crypto: toggle(form.enabled_crypto, c) })} className={`flex items-center justify-between p-3 rounded-lg border transition ${on ? 'bg-gold-500/10 border-gold-500/50' : 'bg-secondary/60 border-gold-500/10 opacity-60'}`}>
-                <div className="text-sm font-mono">{c}</div>
+                <div className="text-sm flex items-center gap-2">
+                  <CoinIcon code={c} size={20}/>
+                  <span className="font-mono">{c}</span>
+                </div>
                 <span className={`w-8 h-4 rounded-full flex items-center px-0.5 transition ${on ? 'bg-gradient-to-r from-gold-500 to-gold-700 justify-end' : 'bg-secondary border border-gold-500/20 justify-start'}`}>
                   <span className={`h-3 w-3 rounded-full ${on ? 'bg-onyx-900' : 'bg-muted-foreground'}`}/>
                 </span>

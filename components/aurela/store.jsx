@@ -97,90 +97,135 @@ export function AppProvider({ children }) {
 export function useApp() { return useContext(AppCtx) }
 
 // Utilities
+// Every fiat has a `cc` (ISO-2 country code) used to fetch a flag PNG from flagcdn.com
 export const FIAT_META = {
-  USD: { symbol: '$', flag: '🇺🇸', name: 'US Dollar' },
-  EUR: { symbol: '€', flag: '🇪🇺', name: 'Euro' },
-  GBP: { symbol: '£', flag: '🇬🇧', name: 'British Pound' },
-  INR: { symbol: '₹', flag: '🇮🇳', name: 'Indian Rupee' },
-  AED: { symbol: 'AED', flag: '🇦🇪', name: 'UAE Dirham' },
-  JPY: { symbol: '¥', flag: '🇯🇵', name: 'Japanese Yen' },
-  CAD: { symbol: 'C$', flag: '🇨🇦', name: 'Canadian Dollar' },
-  AUD: { symbol: 'A$', flag: '🇦🇺', name: 'Australian Dollar' },
-  SGD: { symbol: 'S$', flag: '🇸🇬', name: 'Singapore Dollar' },
-  CHF: { symbol: 'Fr', flag: '🇨🇭', name: 'Swiss Franc' },
-  NZD: { symbol: 'NZ$', flag: '🇳🇿', name: 'New Zealand Dollar' },
-  HKD: { symbol: 'HK$', flag: '🇭🇰', name: 'Hong Kong Dollar' },
-  KRW: { symbol: '₩', flag: '🇰🇷', name: 'South Korean Won' },
-  CNY: { symbol: '¥', flag: '🇨🇳', name: 'Chinese Yuan' },
-  MXN: { symbol: 'Mex$', flag: '🇲🇽', name: 'Mexican Peso' },
-  BRL: { symbol: 'R$', flag: '🇧🇷', name: 'Brazilian Real' },
-  ZAR: { symbol: 'R', flag: '🇿🇦', name: 'South African Rand' },
-  TRY: { symbol: '₺', flag: '🇹🇷', name: 'Turkish Lira' },
-  RUB: { symbol: '₽', flag: '🇷🇺', name: 'Russian Ruble' },
-  SEK: { symbol: 'kr', flag: '🇸🇪', name: 'Swedish Krona' },
-  NOK: { symbol: 'kr', flag: '🇳🇴', name: 'Norwegian Krone' },
-  DKK: { symbol: 'kr', flag: '🇩🇰', name: 'Danish Krone' },
-  PLN: { symbol: 'zł', flag: '🇵🇱', name: 'Polish Złoty' },
-  THB: { symbol: '฿', flag: '🇹🇭', name: 'Thai Baht' },
-  MYR: { symbol: 'RM', flag: '🇲🇾', name: 'Malaysian Ringgit' },
-  IDR: { symbol: 'Rp', flag: '🇮🇩', name: 'Indonesian Rupiah' },
-  PHP: { symbol: '₱', flag: '🇵🇭', name: 'Philippine Peso' },
-  VND: { symbol: '₫', flag: '🇻🇳', name: 'Vietnamese Dong' },
-  EGP: { symbol: 'E£', flag: '🇪🇬', name: 'Egyptian Pound' },
-  SAR: { symbol: 'SR', flag: '🇸🇦', name: 'Saudi Riyal' },
-  NGN: { symbol: '₦', flag: '🇳🇬', name: 'Nigerian Naira' },
-  ARS: { symbol: '$', flag: '🇦🇷', name: 'Argentine Peso' },
-  CLP: { symbol: '$', flag: '🇨🇱', name: 'Chilean Peso' },
-  COP: { symbol: '$', flag: '🇨🇴', name: 'Colombian Peso' },
-  ILS: { symbol: '₪', flag: '🇮🇱', name: 'Israeli Shekel' },
-  CZK: { symbol: 'Kč', flag: '🇨🇿', name: 'Czech Koruna' },
-  HUF: { symbol: 'Ft', flag: '🇭🇺', name: 'Hungarian Forint' },
-  QAR: { symbol: 'QR', flag: '🇶🇦', name: 'Qatari Riyal' },
-  KWD: { symbol: 'KD', flag: '🇰🇼', name: 'Kuwaiti Dinar' },
-  BHD: { symbol: 'BD', flag: '🇧🇭', name: 'Bahraini Dinar' },
-  OMR: { symbol: 'OR', flag: '🇴🇲', name: 'Omani Rial' },
-  JOD: { symbol: 'JD', flag: '🇯🇴', name: 'Jordanian Dinar' },
-  LKR: { symbol: '₨', flag: '🇱🇰', name: 'Sri Lankan Rupee' },
-  PKR: { symbol: '₨', flag: '🇵🇰', name: 'Pakistani Rupee' },
-  BDT: { symbol: '৳', flag: '🇧🇩', name: 'Bangladeshi Taka' },
-  KES: { symbol: 'KSh', flag: '🇰🇪', name: 'Kenyan Shilling' },
-  GHS: { symbol: 'GH₵', flag: '🇬🇭', name: 'Ghanaian Cedi' },
-  TWD: { symbol: 'NT$', flag: '🇹🇼', name: 'Taiwan Dollar' },
-  UAH: { symbol: '₴', flag: '🇺🇦', name: 'Ukrainian Hryvnia' },
-  RON: { symbol: 'lei', flag: '🇷🇴', name: 'Romanian Leu' },
+  USD: { symbol: '$', flag: '🇺🇸', cc: 'us', name: 'US Dollar' },
+  EUR: { symbol: '€', flag: '🇪🇺', cc: 'eu', name: 'Euro' },
+  GBP: { symbol: '£', flag: '🇬🇧', cc: 'gb', name: 'British Pound' },
+  INR: { symbol: '₹', flag: '🇮🇳', cc: 'in', name: 'Indian Rupee' },
+  AED: { symbol: 'AED', flag: '🇦🇪', cc: 'ae', name: 'UAE Dirham' },
+  JPY: { symbol: '¥', flag: '🇯🇵', cc: 'jp', name: 'Japanese Yen' },
+  CAD: { symbol: 'C$', flag: '🇨🇦', cc: 'ca', name: 'Canadian Dollar' },
+  AUD: { symbol: 'A$', flag: '🇦🇺', cc: 'au', name: 'Australian Dollar' },
+  SGD: { symbol: 'S$', flag: '🇸🇬', cc: 'sg', name: 'Singapore Dollar' },
+  CHF: { symbol: 'Fr', flag: '🇨🇭', cc: 'ch', name: 'Swiss Franc' },
+  NZD: { symbol: 'NZ$', flag: '🇳🇿', cc: 'nz', name: 'New Zealand Dollar' },
+  HKD: { symbol: 'HK$', flag: '🇭🇰', cc: 'hk', name: 'Hong Kong Dollar' },
+  KRW: { symbol: '₩', flag: '🇰🇷', cc: 'kr', name: 'South Korean Won' },
+  CNY: { symbol: '¥', flag: '🇨🇳', cc: 'cn', name: 'Chinese Yuan' },
+  MXN: { symbol: 'Mex$', flag: '🇲🇽', cc: 'mx', name: 'Mexican Peso' },
+  BRL: { symbol: 'R$', flag: '🇧🇷', cc: 'br', name: 'Brazilian Real' },
+  ZAR: { symbol: 'R', flag: '🇿🇦', cc: 'za', name: 'South African Rand' },
+  TRY: { symbol: '₺', flag: '🇹🇷', cc: 'tr', name: 'Turkish Lira' },
+  RUB: { symbol: '₽', flag: '🇷🇺', cc: 'ru', name: 'Russian Ruble' },
+  SEK: { symbol: 'kr', flag: '🇸🇪', cc: 'se', name: 'Swedish Krona' },
+  NOK: { symbol: 'kr', flag: '🇳🇴', cc: 'no', name: 'Norwegian Krone' },
+  DKK: { symbol: 'kr', flag: '🇩🇰', cc: 'dk', name: 'Danish Krone' },
+  PLN: { symbol: 'zł', flag: '🇵🇱', cc: 'pl', name: 'Polish Złoty' },
+  THB: { symbol: '฿', flag: '🇹🇭', cc: 'th', name: 'Thai Baht' },
+  MYR: { symbol: 'RM', flag: '🇲🇾', cc: 'my', name: 'Malaysian Ringgit' },
+  IDR: { symbol: 'Rp', flag: '🇮🇩', cc: 'id', name: 'Indonesian Rupiah' },
+  PHP: { symbol: '₱', flag: '🇵🇭', cc: 'ph', name: 'Philippine Peso' },
+  VND: { symbol: '₫', flag: '🇻🇳', cc: 'vn', name: 'Vietnamese Dong' },
+  EGP: { symbol: 'E£', flag: '🇪🇬', cc: 'eg', name: 'Egyptian Pound' },
+  SAR: { symbol: 'SR', flag: '🇸🇦', cc: 'sa', name: 'Saudi Riyal' },
+  NGN: { symbol: '₦', flag: '🇳🇬', cc: 'ng', name: 'Nigerian Naira' },
+  ARS: { symbol: '$', flag: '🇦🇷', cc: 'ar', name: 'Argentine Peso' },
+  CLP: { symbol: '$', flag: '🇨🇱', cc: 'cl', name: 'Chilean Peso' },
+  COP: { symbol: '$', flag: '🇨🇴', cc: 'co', name: 'Colombian Peso' },
+  ILS: { symbol: '₪', flag: '🇮🇱', cc: 'il', name: 'Israeli Shekel' },
+  CZK: { symbol: 'Kč', flag: '🇨🇿', cc: 'cz', name: 'Czech Koruna' },
+  HUF: { symbol: 'Ft', flag: '🇭🇺', cc: 'hu', name: 'Hungarian Forint' },
+  QAR: { symbol: 'QR', flag: '🇶🇦', cc: 'qa', name: 'Qatari Riyal' },
+  KWD: { symbol: 'KD', flag: '🇰🇼', cc: 'kw', name: 'Kuwaiti Dinar' },
+  BHD: { symbol: 'BD', flag: '🇧🇭', cc: 'bh', name: 'Bahraini Dinar' },
+  OMR: { symbol: 'OR', flag: '🇴🇲', cc: 'om', name: 'Omani Rial' },
+  JOD: { symbol: 'JD', flag: '🇯🇴', cc: 'jo', name: 'Jordanian Dinar' },
+  LKR: { symbol: '₨', flag: '🇱🇰', cc: 'lk', name: 'Sri Lankan Rupee' },
+  PKR: { symbol: '₨', flag: '🇵🇰', cc: 'pk', name: 'Pakistani Rupee' },
+  BDT: { symbol: '৳', flag: '🇧🇩', cc: 'bd', name: 'Bangladeshi Taka' },
+  KES: { symbol: 'KSh', flag: '🇰🇪', cc: 'ke', name: 'Kenyan Shilling' },
+  GHS: { symbol: 'GH₵', flag: '🇬🇭', cc: 'gh', name: 'Ghanaian Cedi' },
+  TWD: { symbol: 'NT$', flag: '🇹🇼', cc: 'tw', name: 'Taiwan Dollar' },
+  UAH: { symbol: '₴', flag: '🇺🇦', cc: 'ua', name: 'Ukrainian Hryvnia' },
+  RON: { symbol: 'lei', flag: '🇷🇴', cc: 'ro', name: 'Romanian Leu' },
 }
+// Crypto icons served from CoinCap's public asset CDN. AUR uses our custom uploaded logo.
+const cc = (sym) => `https://assets.coincap.io/assets/icons/${sym.toLowerCase()}@2x.png`
 export const CRYPTO_META = {
-  AUR: { name: 'Aurela Coin', color: '#d4af37' },
-  BTC: { name: 'Bitcoin', color: '#f7931a' },
-  ETH: { name: 'Ethereum', color: '#627eea' },
-  USDT: { name: 'Tether', color: '#26a17b' },
-  USDC: { name: 'USD Coin', color: '#2775ca' },
-  BNB: { name: 'BNB', color: '#f3ba2f' },
-  SOL: { name: 'Solana', color: '#9945ff' },
-  XRP: { name: 'XRP', color: '#00aae4' },
-  ADA: { name: 'Cardano', color: '#0033ad' },
-  DOGE: { name: 'Dogecoin', color: '#c2a633' },
-  MATIC: { name: 'Polygon', color: '#8247e5' },
-  AVAX: { name: 'Avalanche', color: '#e84142' },
-  DOT: { name: 'Polkadot', color: '#e6007a' },
-  TRX: { name: 'TRON', color: '#ff060a' },
-  LINK: { name: 'Chainlink', color: '#2a5ada' },
-  ATOM: { name: 'Cosmos', color: '#2e3148' },
-  LTC: { name: 'Litecoin', color: '#a6a9aa' },
-  BCH: { name: 'Bitcoin Cash', color: '#0ac18e' },
-  XLM: { name: 'Stellar', color: '#7d00ff' },
-  NEAR: { name: 'NEAR Protocol', color: '#00c1de' },
-  APT: { name: 'Aptos', color: '#5b9dd9' },
-  ARB: { name: 'Arbitrum', color: '#28a0f0' },
-  OP: { name: 'Optimism', color: '#ff0420' },
-  SUI: { name: 'Sui', color: '#6fbcf0' },
-  TON: { name: 'Toncoin', color: '#0088cc' },
-  SHIB: { name: 'Shiba Inu', color: '#ffa409' },
-  PEPE: { name: 'Pepe', color: '#3fac31' },
-  INJ: { name: 'Injective', color: '#00f2fe' },
-  FIL: { name: 'Filecoin', color: '#0090ff' },
-  ICP: { name: 'Internet Computer', color: '#3b00b9' },
-  HBAR: { name: 'Hedera', color: '#8259ef' },
+  AUR: { name: 'Aurela Coin', color: '#d4af37', logoUrl: '/aur-coin.png' },
+  BTC: { name: 'Bitcoin', color: '#f7931a', logoUrl: cc('BTC') },
+  ETH: { name: 'Ethereum', color: '#627eea', logoUrl: cc('ETH') },
+  USDT: { name: 'Tether', color: '#26a17b', logoUrl: cc('USDT') },
+  USDC: { name: 'USD Coin', color: '#2775ca', logoUrl: cc('USDC') },
+  BNB: { name: 'BNB', color: '#f3ba2f', logoUrl: cc('BNB') },
+  SOL: { name: 'Solana', color: '#9945ff', logoUrl: cc('SOL') },
+  XRP: { name: 'XRP', color: '#00aae4', logoUrl: cc('XRP') },
+  ADA: { name: 'Cardano', color: '#0033ad', logoUrl: cc('ADA') },
+  DOGE: { name: 'Dogecoin', color: '#c2a633', logoUrl: cc('DOGE') },
+  MATIC: { name: 'Polygon', color: '#8247e5', logoUrl: cc('MATIC') },
+  AVAX: { name: 'Avalanche', color: '#e84142', logoUrl: cc('AVAX') },
+  DOT: { name: 'Polkadot', color: '#e6007a', logoUrl: cc('DOT') },
+  TRX: { name: 'TRON', color: '#ff060a', logoUrl: cc('TRX') },
+  LINK: { name: 'Chainlink', color: '#2a5ada', logoUrl: cc('LINK') },
+  ATOM: { name: 'Cosmos', color: '#2e3148', logoUrl: cc('ATOM') },
+  LTC: { name: 'Litecoin', color: '#a6a9aa', logoUrl: cc('LTC') },
+  BCH: { name: 'Bitcoin Cash', color: '#0ac18e', logoUrl: cc('BCH') },
+  XLM: { name: 'Stellar', color: '#7d00ff', logoUrl: cc('XLM') },
+  NEAR: { name: 'NEAR Protocol', color: '#00c1de', logoUrl: cc('NEAR') },
+  APT: { name: 'Aptos', color: '#5b9dd9', logoUrl: cc('APT') },
+  ARB: { name: 'Arbitrum', color: '#28a0f0', logoUrl: cc('ARB') },
+  OP: { name: 'Optimism', color: '#ff0420', logoUrl: cc('OP') },
+  SUI: { name: 'Sui', color: '#6fbcf0', logoUrl: cc('SUI') },
+  TON: { name: 'Toncoin', color: '#0088cc', logoUrl: cc('TON') },
+  SHIB: { name: 'Shiba Inu', color: '#ffa409', logoUrl: cc('SHIB') },
+  PEPE: { name: 'Pepe', color: '#3fac31', logoUrl: cc('PEPE') },
+  INJ: { name: 'Injective', color: '#00f2fe', logoUrl: cc('INJ') },
+  FIL: { name: 'Filecoin', color: '#0090ff', logoUrl: cc('FIL') },
+  ICP: { name: 'Internet Computer', color: '#3b00b9', logoUrl: cc('ICP') },
+  HBAR: { name: 'Hedera', color: '#8259ef', logoUrl: cc('HBAR') },
+}
+
+// -----------------------------------------------------------------------------
+// Circular gold-bordered icon components for premium currency display.
+// CoinIcon renders a crypto logo; FlagIcon renders a country flag for fiat.
+// Both gracefully fall back to a text/emoji rendering if the image fails.
+// -----------------------------------------------------------------------------
+export function CoinIcon({ code, size = 24, className = '' }) {
+  const meta = CRYPTO_META[code]
+  const [err, setErr] = useState(false)
+  const style = { width: size, height: size, minWidth: size, minHeight: size }
+  return (
+    <span
+      style={style}
+      className={`inline-flex items-center justify-center rounded-full border border-gold-bright/60 bg-black/40 overflow-hidden shrink-0 shadow-[0_0_6px_rgba(212,175,55,0.25)] ${className}`}
+    >
+      {meta?.logoUrl && !err ? (
+        <img src={meta.logoUrl} alt={code} width={size} height={size} className="w-full h-full object-cover" onError={() => setErr(true)} />
+      ) : (
+        <span className="text-[9px] font-bold text-gold-bright leading-none">{code}</span>
+      )}
+    </span>
+  )
+}
+
+export function FlagIcon({ code, size = 24, className = '' }) {
+  const meta = FIAT_META[code]
+  const [err, setErr] = useState(false)
+  const url = meta?.cc ? `https://flagcdn.com/w80/${meta.cc}.png` : null
+  const style = { width: size, height: size, minWidth: size, minHeight: size }
+  return (
+    <span
+      style={style}
+      className={`inline-flex items-center justify-center rounded-full border border-gold-bright/60 bg-black/40 overflow-hidden shrink-0 shadow-[0_0_6px_rgba(212,175,55,0.25)] ${className}`}
+    >
+      {url && !err ? (
+        <img src={url} alt={code} width={size} height={size} className="w-full h-full object-cover" onError={() => setErr(true)} />
+      ) : (
+        <span className="text-sm leading-none">{meta?.flag || code}</span>
+      )}
+    </span>
+  )
 }
 
 export function fmt(amount, currency, opts = {}) {

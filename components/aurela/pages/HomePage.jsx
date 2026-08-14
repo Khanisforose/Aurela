@@ -1,6 +1,6 @@
 'use client'
 
-import { useApp } from '../store'
+import { useApp, CoinIcon, FlagIcon } from '../store'
 import { AurelaLogo } from '../Logo'
 import { Button } from '@/components/ui/button'
 import { motion } from 'framer-motion'
@@ -88,17 +88,23 @@ export function HomePage({ goAuth, goPage }) {
             </div>
             <div className="flex gap-3 overflow-x-auto pb-2 mb-3">
               {Object.entries(rates.crypto_usd || {}).map(([k,v]) => (
-                <div key={k} className="glass rounded-xl px-4 py-3 min-w-[150px]">
-                  <div className="text-xs text-muted-foreground">{k}/USD</div>
-                  <div className="font-mono text-lg text-gold-bright">${Number(v).toLocaleString(undefined,{maximumFractionDigits: v < 0.01 ? 8 : v < 1 ? 4 : 2})}</div>
+                <div key={k} className="glass rounded-xl px-4 py-3 min-w-[160px] flex items-center gap-3">
+                  <CoinIcon code={k} size={32}/>
+                  <div>
+                    <div className="text-xs text-muted-foreground">{k}/USD</div>
+                    <div className="font-mono text-lg text-gold-bright">${Number(v).toLocaleString(undefined,{maximumFractionDigits: v < 0.01 ? 8 : v < 1 ? 4 : 2})}</div>
+                  </div>
                 </div>
               ))}
             </div>
             <div className="flex gap-3 overflow-x-auto pb-2">
               {Object.entries(rates.fx || {}).slice(0, 20).filter(([k]) => k !== 'USD').map(([k,v]) => (
-                <div key={k} className="glass rounded-xl px-4 py-3 min-w-[140px]">
-                  <div className="text-xs text-muted-foreground">USD/{k}</div>
-                  <div className="font-mono text-lg text-gold-bright">{Number(v).toLocaleString(undefined,{maximumFractionDigits: v < 1 ? 4 : 2})}</div>
+                <div key={k} className="glass rounded-xl px-4 py-3 min-w-[150px] flex items-center gap-3">
+                  <FlagIcon code={k} size={32}/>
+                  <div>
+                    <div className="text-xs text-muted-foreground">USD/{k}</div>
+                    <div className="font-mono text-lg text-gold-bright">{Number(v).toLocaleString(undefined,{maximumFractionDigits: v < 1 ? 4 : 2})}</div>
+                  </div>
                 </div>
               ))}
             </div>
