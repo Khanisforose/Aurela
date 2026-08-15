@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.aurelawallet.www.twa",
+        "sha256_cert_fingerprints": ["30:EB:DA:21:27:86:99:BE:16:6D:F8:70:AF:C5:A9:19:A1:89:C8:8A:7B:AA:A3:59:47:A1:A8:D4:1E:27:43:8E"]
+      }
+    }]

@@ -87,3 +87,11 @@ node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
 credentials.json
 *.key
 .credentials
+
+# ---- Android signing artifacts — NEVER commit these ----
+signing.keystore
+signing-key-info.txt
+*.keystore
+*.jks
+Aurela.aab
+*.aab

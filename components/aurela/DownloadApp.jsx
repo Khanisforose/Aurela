@@ -81,8 +81,8 @@ export function DownloadAppModal() {
     setDeferredPrompt(null)
   }
 
-  const apkUrl = config?.apk_url || ''
-  const apkVersion = config?.apk_version || 'latest'
+  const apkUrl = config?.apk_url || '/aurela.apk'
+  const apkVersion = config?.apk_version || '1.0.0'
 
   return (
     <AnimatePresence>
@@ -146,7 +146,7 @@ export function DownloadAppModal() {
 
                   {/* Android APK direct download (from admin-configured URL) */}
                   {(platform === 'android' || platform === 'desktop') && apkUrl && (
-                    <a href={apkUrl} target="_blank" rel="noopener noreferrer" className="block mt-4 p-5 rounded-2xl bg-secondary/70 border border-gold-500/30 hover:border-gold-500/70 hover:bg-secondary transition group">
+                    <a href={apkUrl} download="aurela.apk" target={apkUrl.startsWith('http') ? '_blank' : undefined} rel="noopener noreferrer" className="block mt-4 p-5 rounded-2xl bg-secondary/70 border border-gold-500/30 hover:border-gold-500/70 hover:bg-secondary transition group">
                       <div className="flex items-center gap-3">
                         <div className="h-12 w-12 rounded-xl bg-emerald-500/15 flex items-center justify-center border border-emerald-500/30">
                           <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none"><path d="M17.523 15.34a1.055 1.055 0 100-2.11 1.055 1.055 0 000 2.11zm-11.046 0a1.055 1.055 0 100-2.11 1.055 1.055 0 000 2.11zm11.421-6.184l1.877-3.25a.39.39 0 10-.676-.39l-1.9 3.29a11.769 11.769 0 00-9.398 0l-1.9-3.29a.39.39 0 10-.676.39l1.877 3.25C3.9 10.828 1.7 13.907 1.5 17.5h21c-.2-3.593-2.4-6.672-5.602-8.344z" fill="#3ddc84"/></svg>
