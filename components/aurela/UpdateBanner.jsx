@@ -21,6 +21,31 @@ export function UpdateBanner() {
   const [available, setAvailable] = useState(false)
   const [serverVersion, setServerVersion] = useState('')
   const [refreshing, setRefreshing] = useState(false)
+  const [isInstalled, setIsInstalled] = useState(false)
+
+  // Detect installed mode ONCE on mount. We only show the update banner inside the
+  // installed PWA / APK — plain browser tab users don't get bothered.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const check = () => {
+      const standalone = window.matchMedia('(display-mode: standalone)').matches
+        || window.matchMedia('(display-mode: fullscreen)').matches
+        || window.matchMedia('(display-mode: minimal-ui)').matches
+        || window.navigator.standalone === true                 // iOS Safari
+        || document.referrer.startsWith('android-app://')        // TWA
+      setIsInstalled(standalone)
+    }
+    check()
+    // Re-check if the user installs mid-session
+    const mq = window.matchMedia('(display-mode: standalone)')
+    const onChange = () => check()
+    if (mq.addEventListener) mq.addEventListener('change', onChange)
+    else if (mq.addListener) mq.addListener(onChange)
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', onChange)
+      else if (mq.removeListener) mq.removeListener(onChange)
+    }
+  }, [])
 
   const dismissRecently = useCallback(() => {
     const at = Number(localStorage.getItem(LS_DISMISSED) || 0)
@@ -28,33 +53,35 @@ export function UpdateBanner() {
   }, [])
 
   const check = useCallback(async () => {
+    if (!isInstalled) return   // browser users are not nagged
     try {
       const res = await fetch('/api/version', { cache: 'no-store' }).then(r => r.json())
       const server = res.version || ''
       setServerVersion(server)
       const current = localStorage.getItem(LS_CURRENT) || ''
       if (!current) {
-        // First load — just cache the version
         localStorage.setItem(LS_CURRENT, server)
         return
       }
       if (server && server !== current && !dismissRecently()) setAvailable(true)
     } catch (e) { /* offline is fine */ }
-  }, [dismissRecently])
+  }, [dismissRecently, isInstalled])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
+    if (!isInstalled) return   // browser users are not nagged
     check()
     const t = setInterval(check, POLL_INTERVAL_MS)
     // Re-check when the tab regains focus (users often background then return)
     const onFocus = () => check()
     window.addEventListener('focus', onFocus)
     return () => { clearInterval(t); window.removeEventListener('focus', onFocus) }
-  }, [check])
+  }, [check, isInstalled])
 
   // Service worker update path — fires when a new SW has finished installing and is waiting
   useEffect(() => {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return
+    if (!isInstalled) return   // browser users are not nagged
     let waiting = null
     const handleWaiting = (reg) => {
       if (reg.waiting) { waiting = reg.waiting; if (!dismissRecently()) setAvailable(true) }
@@ -81,7 +108,7 @@ export function UpdateBanner() {
       window.location.reload()
     })
     return () => { waiting = null }
-  }, [dismissRecently])
+  }, [dismissRecently, isInstalled])
 
   const refresh = async () => {
     setRefreshing(true)
