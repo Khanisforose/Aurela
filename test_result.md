@@ -578,6 +578,54 @@ backend:
           agent: "testing"
           comment: "✅ LIVE CRYPTO TICKER TEST COMPLETE - ALL 5/5 TESTS PASSED! Comprehensive testing of live crypto price updates completed successfully. **TEST 1: ALL CRYPTOS HAVE LIVE MOVEMENT (PASS)** - BTC, ETH, SOL, DOGE prices all change between calls with small movements (±0.01% to ±0.27%) ✅. USDT and USDC remain stable at exactly $1.000000 ✅. AUR price moving independently (±0.41% to ±0.76%) ✅. All price changes within expected jitter range (±0.5% for majors, higher for volatile coins) ✅. **TEST 2: HISTORY ARRAYS GROW (PASS)** - BTC history array grew from 49 to 54 entries over 6 seconds ✅. SOL history array grew from 49 to 54 entries ✅. Both arrays properly capped at 120 max entries (rolling window) ✅. **TEST 3: CRYPTO_CHANGE FIELD (PASS)** - Response includes crypto_change object with % values for all 31 cryptos (BTC, ETH, SOL, DOGE, AUR, etc.) ✅. All change values are small numbers within expected range (-5% to +5%) ✅. BTC: +0.06%, ETH: +0.04%, SOL: +0.05%, AUR: -0.78% ✅. **TEST 4: PRICES ANCHORED TO REALITY (PASS)** - BTC price at $62,829 (within $50k-$120k realistic range) ✅. ETH price at $1,878 (within $1k-$5k realistic range) ✅. USDT exactly $1 ✅. USDC exactly $1 ✅. **REGRESSION (PASS)** - GET /api/health → 200 ok:true ✅. GET /api/config → 200 with 50 enabled_fiat and 31 enabled_crypto (including AUR) ✅. POST /api/auth/login with admin@aurelawallet.com / Aurela@123# → 200 with token and super_admin role ✅. All crypto prices now tick live with per-call jitter (±0.05% for BTC/ETH, ±0.15% for SOL, ±0.25% for DOGE, etc.) while staying anchored to real Coinbase base prices. Stablecoins (USDT/USDC) have 0% jitter. History arrays grow with each call and cap at 120 entries. No regressions detected. Live ticker feature working perfectly."
 
+  - task: "Payment sent notification (transfer_out) for sender"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ FEATURE 1 PASSED (7/7 tests). Payment notification bug fix verified working correctly. Created two test users (sender and recipient), credited 100 USDT to sender, executed transfer of 5 USDT. **SENDER NOTIFICATION (PASS)** - User A (sender) receives notification with kind='transfer_out' and title='Payment sent' after sending 5 USDT to User B ✅. **RECIPIENT NOTIFICATION (PASS)** - User B (recipient) receives notification with kind='transfer_in' and title='Payment received' after receiving 5 USDT from User A ✅. Both notifications created correctly via notifyUser() calls at lines 1204 and 1206 in route.js. Transfer endpoint POST /api/transfer working correctly with recipient parameter. Complete notification flow verified end-to-end."
+
+  - task: "Swap endpoint (fiat <-> crypto) with KYC gating"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ FEATURE 2 PASSED (12/12 tests). Swap endpoint fully functional with all validations. **KYC GATING (PASS)** - Non-KYC user attempting POST /api/swap correctly blocked with 403 status and code='KYC_REQUIRED' ✅. **SWAP QUOTE (PASS)** - POST /api/swap/quote returns correct response with to_amount, rate, fee_bps=50 (0.5%), fee_usd, usd_value=100 ✅. **SWAP EXECUTION (PASS)** - POST /api/swap successfully executes USD->BTC swap: USD wallet debited 100 (200→100), BTC wallet credited 0.0012855 (0→0.0012855) ✅. **TRANSACTION RECORD (PASS)** - Transaction created with type='swap', from_currency='USD', to_currency='BTC', from_amount=100, to_amount=0.0012855, fee_bps=50 ✅. **CHAIN BLOCK (PASS)** - Public chain block written with type='swap', block_number=1421 ✅. **ERROR CASES (PASS)** - Same-currency swap (USD->USD) correctly rejected with 400 ✅. Insufficient balance swap (500 USD when only 100 available) correctly rejected with 400 ✅. Complete swap feature working perfectly with proper fee calculation (0.5% platform fee), wallet updates, transaction logging, and chain visibility."
+
+  - task: "Public chain endpoints (no auth required)"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ FEATURE 3 PASSED (7/7 tests). All public chain endpoints working correctly without authentication. **GET /api/public/chain (PASS)** - Returns {total, page, limit, blocks} with proper pagination. Verified projection strips sensitive fields (from_user_id, to_user_id, tx_id) from blocks ✅. Pagination with limit=5&page=2 works correctly ✅. **GET /api/public/chain/stats (PASS)** - Returns all required fields: total_blocks=1416, latest_block, latest_timestamp, blocks_24h, avg_block_time_seconds, network='Aurela Mainnet', chain_id='AURELA-1', registered_addresses ✅. **GET /api/public/chain/search (PASS)** - Block number search returns {kind:'block', block:{...}} ✅. Aurela ID search (AUR035073192) returns {kind:'address', address:{...}, blocks:[...]} ✅. Nonsense query returns {kind:'not_found'} ✅. Empty query correctly rejected with 400 ✅. All endpoints accessible without auth token, proper security projection applied, complete public blockchain explorer functionality working."
+
+  - task: "Sitemap.xml + robots.txt + /scan page"
+    implemented: true
+    working: true
+    file: "/app/app/sitemap.js, /app/public/robots.txt, /app/app/scan/page.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "testing"
+          comment: "✅ FEATURE 4 PASSED (3/3 tests). SEO and public pages working correctly. **GET /sitemap.xml (PASS)** - Returns valid XML sitemap containing required URLs: https://www.aurelawallet.com/ and https://www.aurelawallet.com/scan ✅. Sitemap generated dynamically via /app/app/sitemap.js with proper priority and changefreq values ✅. **GET /robots.txt (PASS)** - Returns robots.txt file containing 'Sitemap: https://www.aurelawallet.com/sitemap.xml' reference ✅. File located at /app/public/robots.txt ✅. **GET /scan (PASS)** - Returns server-rendered HTML page with valid HTML structure ✅. Chain explorer scan page accessible at /scan route ✅. Complete SEO setup working for search engine indexing."
+
 frontend:
   - task: "Luxury Landing page (black/gold, hero, features, cards, pricing, FAQ, CTA)"
     implemented: true
@@ -618,7 +666,7 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 8
+  test_sequence: 9
   run_ui: false
 
 test_plan:
@@ -806,3 +854,8 @@ agent_communication:
       message: "IMPORTANT — please test the 4 new backend features listed above under the tasks: (1) Idempotent seed migrations, (2) Auto chain simulation, (3) Per-user card fees, (4) PWA/APK config. Admin creds unchanged: admin@aurelawallet.com / Aurela@123#. Do NOT test partner logos, download-app modal UI, or any frontend — user asked to skip frontend testing for this batch. Focus on: idempotent migrations (call /api/rates or restart-triggered code paths and verify user data survives), chain simulation (hit /api/rates 10 times over ~1 minute and verify chain total grows by ~10-15 blocks), per-user card fees (create user → admin sets override → user's /auth/me and /cards/request use override), APK settings (PUT then GET returns saved value)."
     - agent: "testing"
       message: "✅ 4 NEW FEATURES TEST COMPLETE - ALL 5/5 TESTS PASSED (100%)! Comprehensive backend testing completed successfully. **FEATURE 1: IDEMPOTENT SEED MIGRATIONS (CRITICAL DATA-LOSS FIX) - PASS** - Created fresh test user via registration ✅. User exists in MongoDB ✅. Hit /api/rates 20 times (triggers ensureSeed) ✅. User count BEFORE: 2, AFTER: 2 (unchanged) ✅. Test user still exists ✅. **CRITICAL FIX VERIFIED:** No user data is wiped on repeated ensureSeed calls. This fixes the production bug where user data was lost on every restart. **FEATURE 2: AUTO CHAIN SIMULATION - PASS** - Baseline chain: 638 blocks ✅. Hit /api/rates 10 times over ~1 minute ✅. New chain: 644 blocks (grew by 6) ✅. Blocks properly hash-linked ✅. Block numbers increment correctly ✅. Mix of types: withdraw, card_activation, deposit, transfer ✅. Card activation blocks use USDT with admin-configured fees (15, 60, 250) ✅. Currencies varied (11 different) ✅. **FEATURE 3: PER-USER CARD FEE OVERRIDES - PASS** - Admin sets overrides (basic:5, premium:25, elite:100) → 200 ✅. Verified in admin user detail ✅. Clearing overrides works ✅. **FEATURE 4: PWA MANIFEST + APK URL - PASS** - Config has apk_url and apk_version ✅. Admin sets APK URL → persists correctly ✅. /manifest.json valid with 4 icons ✅. /sw.js valid ✅. Icons exist (192, 512) ✅. **REGRESSION SANITY - PASS** - Health, admin login, rates, wallets all working ✅. All 4 new features working perfectly. No regressions detected. Backend is production-ready."
+
+    - agent: "user"
+      message: "Focused test of NEW backend features in the Aurela app. Admin: admin@aurelawallet.com / Aurela@123#. FEATURE 1 — Payment sent notification (bug fix): Create/login two users, give sender USDT balance, transfer, verify both sender (transfer_out) and recipient (transfer_in) notifications exist. FEATURE 2 — Swap endpoint: Test swap/quote and swap execution with KYC gating, verify wallets update, transaction record created, chain block written, non-KYC user gets 403, same-currency and insufficient balance errors. FEATURE 3 — Public chain endpoints (no auth): GET /api/public/chain with pagination, GET /api/public/chain/stats, GET /api/public/chain/search with block number/Aurela ID/nonsense/empty query. Verify projection strips from_user_id, to_user_id, tx_id. FEATURE 4 — Sitemap + robots: GET /sitemap.xml contains required URLs, GET /robots.txt contains sitemap reference, GET /scan returns HTML. REGRESSION: Existing GET /api/rates, admin login, GET /api/config still work."
+    - agent: "testing"
+      message: "✅ NEW FEATURES TEST COMPLETE - ALL 5/5 TESTS PASSED (100%)! Comprehensive backend testing of 4 new features completed successfully. **FEATURE 1: PAYMENT SENT NOTIFICATION (BUG FIX) - PASS (7/7 tests)** - Created two test users (sender AUR365875630, recipient AUR604938818) ✅. Credited 100 USDT to sender ✅. Executed transfer of 5 USDT via POST /api/transfer with recipient parameter ✅. **SENDER NOTIFICATION VERIFIED:** User A has notification with kind='transfer_out' and title='Payment sent' ✅. **RECIPIENT NOTIFICATION VERIFIED:** User B has notification with kind='transfer_in' and title='Payment received' ✅. Both notifications created correctly via notifyUser() calls at lines 1204 and 1206 in route.js. Complete notification flow working end-to-end. **FEATURE 2: SWAP ENDPOINT - PASS (12/12 tests)** - Non-KYC user correctly blocked with 403 code='KYC_REQUIRED' ✅. KYC submission and approval working ✅. POST /api/swap/quote returns correct response: to_amount=0.00128563, rate=1.285629263331662e-05, fee_bps=50 (0.5%), fee_usd=0.5, usd_value=100 ✅. POST /api/swap executes USD->BTC swap successfully: USD wallet 200→100, BTC wallet 0→0.0012855 ✅. Transaction record created with type='swap', from_currency='USD', to_currency='BTC', from_amount=100, to_amount=0.0012855, fee_bps=50 ✅. Chain block written with type='swap', block_number=1421 ✅. Same-currency swap (USD->USD) correctly rejected with 400 ✅. Insufficient balance swap (500 when only 100 available) correctly rejected with 400 ✅. Complete swap feature working with proper fee calculation, wallet updates, transaction logging, and chain visibility. **FEATURE 3: PUBLIC CHAIN ENDPOINTS - PASS (7/7 tests)** - GET /api/public/chain (no auth) returns {total:1415, page, limit, blocks} with proper pagination ✅. Verified projection strips sensitive fields (from_user_id, to_user_id, tx_id) ✅. Pagination with limit=5&page=2 works correctly ✅. GET /api/public/chain/stats returns all required fields: total_blocks=1416, latest_block, latest_timestamp, blocks_24h, avg_block_time_seconds, network='Aurela Mainnet', chain_id='AURELA-1', registered_addresses ✅. GET /api/public/chain/search with block number returns {kind:'block', block:{...}} ✅. Search with Aurela ID (AUR035073192) returns {kind:'address', address:{...}, blocks:[...]} ✅. Nonsense query returns {kind:'not_found'} ✅. Empty query correctly rejected with 400 ✅. All endpoints accessible without auth, proper security projection applied. **FEATURE 4: SITEMAP + ROBOTS - PASS (3/3 tests)** - GET /sitemap.xml returns valid XML containing https://www.aurelawallet.com/ and https://www.aurelawallet.com/scan ✅. GET /robots.txt contains 'Sitemap: https://www.aurelawallet.com/sitemap.xml' reference ✅. GET /scan returns server-rendered HTML page ✅. Complete SEO setup working. **REGRESSION - PASS (3/3 tests)** - GET /api/rates working ✅. Admin login working ✅. GET /api/config working ✅. All 4 new features working perfectly. No regressions detected. Backend is production-ready."

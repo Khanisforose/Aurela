@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Allow: /scan
+Disallow: /api/
+Disallow: /admin
+
+Sitemap: https://www.aurelawallet.com/sitemap.xml

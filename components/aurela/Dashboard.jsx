@@ -21,12 +21,16 @@ import {
 } from 'lucide-react'
 import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { SwapTab } from './SwapTab'
+import { BottomNav, MOBILE_TABS } from './BottomNav'
+import { PasscodeLock, PasscodeSettings, usePasscodeLock } from './PasscodeLock'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'fiat', label: 'Fiat Wallets', icon: Wallet },
   { id: 'crypto', label: 'Crypto Wallets', icon: Bitcoin },
   { id: 'transfer', label: 'Send', icon: Send },
+  { id: 'swap', label: 'Swap', icon: ArrowDownToLine },
   { id: 'cards', label: 'Cards', icon: CreditCard },
   { id: 'deposit', label: 'Deposit', icon: ArrowDownToLine },
   { id: 'withdraw', label: 'Withdraw', icon: ArrowUpFromLine },
@@ -58,6 +62,7 @@ export function Dashboard() {
   const [claim, setClaim] = useState(null)
   const [claimOpen, setClaimOpen] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const passcode = usePasscodeLock({ enabled: true })
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const NAV = isAdmin ? [...USER_NAV, ...ADMIN_NAV] : USER_NAV
 
@@ -142,7 +147,7 @@ export function Dashboard() {
         </Button>
       </aside>
 
-      <main className="lg:ml-64 min-h-screen">
+      <main className="lg:ml-64 min-h-screen pb-20 md:pb-6">
         {/* Mobile slide-in nav drawer */}
         {mobileNavOpen && (
           <div className="fixed inset-0 z-50 lg:hidden" onClick={() => setMobileNavOpen(false)}>
@@ -332,6 +337,8 @@ export function Dashboard() {
               {tab === 'fiat' && <WalletsTab wallets={fiatWallets} kind="fiat"/>}
               {tab === 'crypto' && <WalletsTab wallets={cryptoWallets} kind="crypto"/>}
               {tab === 'transfer' && <TransferTab wallets={wallets} onDone={loadAll}/>}
+              {tab === 'swap' && <SwapTab onDone={loadAll}/>}
+              {tab === 'wallets_fiat' && <WalletsTab wallets={fiatWallets} kind="fiat"/>}
               {tab === 'cards' && <CardsTab cards={cards} onChange={loadCards} onWalletChange={loadWallets}/>}
               {tab === 'deposit' && <DepositTab wallets={wallets} onDone={loadAll}/>}
               {tab === 'withdraw' && <WithdrawTab wallets={wallets} onDone={loadAll}/>}
@@ -381,6 +388,12 @@ export function Dashboard() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Mobile bottom navigation (Binance-style, only visible on <md) */}
+      <BottomNav tab={tab} setTab={setTab} tabs={MOBILE_TABS} />
+
+      {/* App lock overlay — only shows when installed as PWA and passcode is set */}
+      <PasscodeLock ctrl={passcode} />
     </div>
   )
 }
@@ -1439,6 +1452,7 @@ function ChangePasswordForm() {
 
 function ProfileTab({ user, onDone }) {
   const { api } = useApp()
+  const passcode = usePasscodeLock({ enabled: false })  // read-only view used just for the settings block
   const [form, setForm] = useState({
     full_name: user?.full_name || '', phone: user?.phone || '',
     address: user?.address || '', city: user?.city || '', country: user?.country || '', postal_code: user?.postal_code || '',
@@ -1598,6 +1612,11 @@ function ProfileTab({ user, onDone }) {
           </div>
         </div>
         <ChangePasswordForm/>
+      </div>
+
+      {/* Passcode + biometric app lock */}
+      <div className="lg:col-span-2">
+        <PasscodeSettings ctrl={passcode} />
       </div>
 
       <div className="card-luxury rounded-2xl p-6 lg:col-span-2">

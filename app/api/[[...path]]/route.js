@@ -540,6 +540,58 @@ async function handleRoute(request, { params }) {
     if (route === '/' && method === 'GET') return handleCORS(NextResponse.json({ ok: true, app: 'Aurela' }))
     if (route === '/health' && method === 'GET') return handleCORS(NextResponse.json({ ok: true }))
 
+    // -------- Public Chain (no auth — enables SEO-indexable block explorer at /scan) --------
+    if (route === '/public/chain' && method === 'GET') {
+      simulateChainTick(db).catch(() => {})   // keep the chain alive from the public feed too
+      const url = new URL(request.url)
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200)
+      const page = Math.max(parseInt(url.searchParams.get('page') || '1'), 1)
+      const skip = (page - 1) * limit
+      const total = await db.collection('aurela_chain').estimatedDocumentCount()
+      const blocks = await db.collection('aurela_chain').find({}, { projection: { _id: 0, from_user_id: 0, to_user_id: 0, tx_id: 0 } }).sort({ block_number: -1 }).skip(skip).limit(limit).toArray()
+      return handleCORS(NextResponse.json({ total, page, limit, blocks: clean(blocks) }))
+    }
+    if (route === '/public/chain/stats' && method === 'GET') {
+      simulateChainTick(db).catch(() => {})
+      const total = await db.collection('aurela_chain').estimatedDocumentCount()
+      const latest = await db.collection('aurela_chain').find({}, { projection: { _id: 0, block_number: 1, timestamp: 1, type: 1, currency: 1 } }).sort({ block_number: -1 }).limit(1).toArray()
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+      const dailyBlocks = await db.collection('aurela_chain').countDocuments({ timestamp: { $gte: dayAgo } })
+      const users = await db.collection('users').estimatedDocumentCount()
+      return handleCORS(NextResponse.json({
+        total_blocks: total,
+        latest_block: latest?.[0]?.block_number || 0,
+        latest_timestamp: latest?.[0]?.timestamp || null,
+        blocks_24h: dailyBlocks,
+        avg_block_time_seconds: dailyBlocks > 0 ? Math.round((24 * 60 * 60) / dailyBlocks) : null,
+        network: 'Aurela Mainnet',
+        chain_id: 'AURELA-1',
+        registered_addresses: users,
+      }))
+    }
+    if (route === '/public/chain/search' && method === 'GET') {
+      const url = new URL(request.url)
+      const q = (url.searchParams.get('q') || '').trim()
+      if (!q) return handleCORS(NextResponse.json({ error: 'empty query' }, { status: 400 }))
+      // Try block number, block hash, or Aurela ID
+      if (/^\d+$/.test(q)) {
+        const b = await db.collection('aurela_chain').findOne({ block_number: parseInt(q) }, { projection: { _id: 0, from_user_id: 0, to_user_id: 0, tx_id: 0 } })
+        if (b) return handleCORS(NextResponse.json({ kind: 'block', block: clean(b) }))
+      }
+      if (q.startsWith('0x') || q.length >= 32) {
+        const b = await db.collection('aurela_chain').findOne({ hash: q }, { projection: { _id: 0, from_user_id: 0, to_user_id: 0, tx_id: 0 } })
+        if (b) return handleCORS(NextResponse.json({ kind: 'block', block: clean(b) }))
+      }
+      if (/^AUR\d+$/i.test(q)) {
+        const code = q.toUpperCase()
+        const u = await db.collection('users').findOne({ user_code: code }, { projection: { _id: 0, id: 1, user_code: 1, created_at: 1 } })
+        if (u) {
+          const blocks = await db.collection('aurela_chain').find({ $or: [{ from_username: code }, { to_username: code }] }, { projection: { _id: 0, from_user_id: 0, to_user_id: 0, tx_id: 0 } }).sort({ block_number: -1 }).limit(50).toArray()
+          return handleCORS(NextResponse.json({ kind: 'address', address: { code, joined: u.created_at }, blocks: clean(blocks) }))
+        }
+      }
+      return handleCORS(NextResponse.json({ kind: 'not_found' }))
+    }
     if (route === '/rates' && method === 'GET') {
       // Fire-and-forget chain simulation tick (writes 1 block if enough time has elapsed)
       simulateChainTick(db).catch(() => {})
@@ -1148,8 +1200,105 @@ async function handleRoute(request, { params }) {
         from_user_id: user.id, to_user_id: rec.id, from_username: user.username, to_username: rec.username,
       })
       await audit(db, user.id, 'transfer.internal', { to: rec.username, amount: amt, currency, block: block.block_number })
+      // Notify recipient
       await notifyUser(db, rec.id, { kind: 'transfer_in', title: 'Payment received', body: `You received ${amt} ${currency} from Aurela ID ${user.user_code || 'a member'}.` })
+      // Notify sender (missing before — this is the "money sent" email/notification fix)
+      await notifyUser(db, user.id, { kind: 'transfer_out', title: 'Payment sent', body: `You sent ${amt} ${currency} to Aurela ID ${rec.user_code || rec.username || 'a member'}.` })
       return handleCORS(NextResponse.json({ ok: true, transaction: clean(tx), block: clean(block) }))
+    }
+
+    // -------- Swap: fiat <-> crypto (uses live rates + platform swap fee) --------
+    if (route === '/swap' && method === 'POST') {
+      if (user.kyc_status !== 'approved') return handleCORS(NextResponse.json({ error: 'Identity verification required to swap.', code: 'KYC_REQUIRED' }, { status: 403 }))
+      const body = await request.json()
+      const { from_currency, to_currency, amount } = body || {}
+      const amt = Number(amount)
+      if (!amt || amt <= 0 || !from_currency || !to_currency) return handleCORS(NextResponse.json({ error: 'Invalid swap' }, { status: 400 }))
+      if (from_currency === to_currency) return handleCORS(NextResponse.json({ error: 'Choose two different currencies to swap' }, { status: 400 }))
+      const all = [...FIAT, ...CRYPTO]
+      if (!all.includes(from_currency) || !all.includes(to_currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
+      // Source wallet must have balance
+      const src = await db.collection('wallets').findOne({ user_id: user.id, currency: from_currency })
+      if (!src || Number(src.balance || 0) < amt) return handleCORS(NextResponse.json({ error: 'Insufficient balance' }, { status: 400 }))
+      // Load live rates and compute conversion via USD as pivot
+      const r = await getRates(db)
+      const asUsd = (cur, val) => {
+        if (cur === 'USD') return val
+        if (FIAT.includes(cur)) { const fx = r?.fx?.[cur]; return fx ? val / fx : null }
+        if (CRYPTO.includes(cur)) { const px = r?.crypto_usd?.[cur]; return px ? val * px : null }
+        return null
+      }
+      const fromUsd = (cur, usd) => {
+        if (cur === 'USD') return usd
+        if (FIAT.includes(cur)) { const fx = r?.fx?.[cur]; return fx ? usd * fx : null }
+        if (CRYPTO.includes(cur)) { const px = r?.crypto_usd?.[cur]; return px ? usd / px : null }
+        return null
+      }
+      const usdValue = asUsd(from_currency, amt)
+      if (!usdValue || usdValue <= 0) return handleCORS(NextResponse.json({ error: 'Unable to price this swap right now' }, { status: 400 }))
+      // Platform swap fee (default 0.5%, admin-configurable via settings.swap_fee_bps)
+      const settings = await db.collection('settings').findOne({ id: 'platform' })
+      const feeBps = typeof settings?.swap_fee_bps === 'number' ? settings.swap_fee_bps : 50   // 50 basis points = 0.5%
+      const netUsd = usdValue * (1 - feeBps / 10000)
+      const toAmount = fromUsd(to_currency, netUsd)
+      if (!toAmount || toAmount <= 0) return handleCORS(NextResponse.json({ error: 'Unable to price this swap right now' }, { status: 400 }))
+      // Ensure destination wallet exists
+      let dst = await db.collection('wallets').findOne({ user_id: user.id, currency: to_currency })
+      if (!dst) {
+        const type = FIAT.includes(to_currency) ? 'fiat' : 'crypto'
+        dst = { id: uuidv4(), user_id: user.id, currency: to_currency, type, balance: 0, created_at: now() }
+        await db.collection('wallets').insertOne(dst)
+      }
+      // Debit source, credit destination
+      const roundedFrom = Math.round(amt * 1e8) / 1e8
+      const roundedTo = Math.round(toAmount * 1e8) / 1e8
+      await db.collection('wallets').updateOne({ id: src.id }, { $inc: { balance: -roundedFrom } })
+      await db.collection('wallets').updateOne({ id: dst.id }, { $inc: { balance:  roundedTo } })
+      // Log transaction pair (single row with dual currency info)
+      const tx = {
+        id: uuidv4(), user_id: user.id, type: 'swap', status: 'completed',
+        from_currency, from_amount: roundedFrom,
+        to_currency, to_amount: roundedTo,
+        usd_value: Math.round(usdValue * 100) / 100,
+        fee_bps: feeBps, fee_usd: Math.round(usdValue * (feeBps / 10000) * 100) / 100,
+        created_at: now(),
+      }
+      await db.collection('transactions').insertOne(tx)
+      // Write block for public chain visibility
+      const block = await writeBlock(db, {
+        type: 'swap', tx_id: tx.id,
+        currency: from_currency, amount: roundedFrom, to_currency, to_amount: roundedTo,
+        network: 'Aurela', from_user_id: user.id, to_user_id: user.id,
+        from_username: user.username, to_username: user.username, method: 'swap'
+      })
+      await audit(db, user.id, 'swap', { from: from_currency, to: to_currency, amount: roundedFrom, block: block.block_number })
+      await notifyUser(db, user.id, { kind: 'swap', title: 'Swap executed', body: `You swapped ${roundedFrom} ${from_currency} → ${roundedTo} ${to_currency}. Rate reference: 1 ${from_currency} ≈ ${(roundedTo/roundedFrom).toFixed(6)} ${to_currency}.` })
+      return handleCORS(NextResponse.json({ ok: true, transaction: clean(tx), block: clean(block), rate: roundedTo / roundedFrom, fee_bps: feeBps }))
+    }
+
+    // Quote a swap without executing — returns estimated to_amount, rate, fee
+    if (route === '/swap/quote' && method === 'POST') {
+      const body = await request.json()
+      const { from_currency, to_currency, amount } = body || {}
+      const amt = Number(amount)
+      if (!amt || amt <= 0 || !from_currency || !to_currency || from_currency === to_currency) return handleCORS(NextResponse.json({ error: 'Invalid quote' }, { status: 400 }))
+      const r = await getRates(db)
+      const asUsd = (cur, val) => cur === 'USD' ? val : (FIAT.includes(cur) ? (r?.fx?.[cur] ? val / r.fx[cur] : null) : (r?.crypto_usd?.[cur] ? val * r.crypto_usd[cur] : null))
+      const fromUsd = (cur, usd) => cur === 'USD' ? usd : (FIAT.includes(cur) ? (r?.fx?.[cur] ? usd * r.fx[cur] : null) : (r?.crypto_usd?.[cur] ? usd / r.crypto_usd[cur] : null))
+      const usdValue = asUsd(from_currency, amt)
+      if (!usdValue) return handleCORS(NextResponse.json({ error: 'Unable to price' }, { status: 400 }))
+      const settings = await db.collection('settings').findOne({ id: 'platform' })
+      const feeBps = typeof settings?.swap_fee_bps === 'number' ? settings.swap_fee_bps : 50
+      const netUsd = usdValue * (1 - feeBps / 10000)
+      const toAmount = fromUsd(to_currency, netUsd)
+      return handleCORS(NextResponse.json({
+        from_currency, to_currency, amount: amt,
+        to_amount: toAmount ? Math.round(toAmount * 1e8) / 1e8 : null,
+        rate: toAmount ? (toAmount / amt) : null,
+        fee_bps: feeBps,
+        fee_usd: Math.round(usdValue * (feeBps / 10000) * 100) / 100,
+        usd_value: Math.round(usdValue * 100) / 100,
+      }))
     }
 
     // Helper: KYC gate
