@@ -3,6 +3,12 @@ import { v4 as uuidv4 } from 'uuid'
 import { NextResponse } from 'next/server'
 import crypto from 'crypto'
 import webpush from 'web-push'
+import pkg from '../../../package.json'
+
+// -------- App version (bumped on every meaningful release) --------
+// Server tells clients this version; clients cache it and show "Update available" when it changes.
+const APP_VERSION = pkg.version
+const BUILD_TIME  = new Date().toISOString()   // set at cold-start; a fresh deploy gets a new build_time
 
 // ============================================================
 // AURELA — Global Digital Banking & Crypto Platform (MVP API)
@@ -627,6 +633,18 @@ async function handleRoute(request, { params }) {
     // ---------- Public ----------
     if (route === '/' && method === 'GET') return handleCORS(NextResponse.json({ ok: true, app: 'Aurela' }))
     if (route === '/health' && method === 'GET') return handleCORS(NextResponse.json({ ok: true }))
+
+    // -------- App version — used by the client update-banner poll --------
+    // Returns the currently deployed version + a build timestamp. Clients cache the version
+    // in localStorage and show an "Update available" banner when the server ships a newer one.
+    if (route === '/version' && method === 'GET') {
+      return handleCORS(NextResponse.json({
+        version: APP_VERSION,
+        build_time: BUILD_TIME,
+        min_supported_client: APP_VERSION,   // hard-cut version; clients older than this get force-refreshed
+        changelog: 'Swap, Portfolio Chart, Push Notifications, Deep Links, Chain Scan, Partners.',
+      }))
+    }
 
     // -------- Public Chain (no auth — enables SEO-indexable block explorer at /scan) --------
     if (route === '/public/chain' && method === 'GET') {

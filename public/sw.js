@@ -1,6 +1,6 @@
 // Aurela Service Worker — MVP install-only worker (no aggressive caching).
 // Its primary purpose is to enable PWA install eligibility.
-const CACHE = 'aurela-v1'
+const CACHE = 'aurela-v2'   // bump when app-shell changes to invalidate cached shell
 const APP_SHELL = ['/', '/manifest.json', '/aur-coin.png', '/icons/icon-192.png', '/icons/icon-512.png']
 
 self.addEventListener('install', (event) => {
@@ -15,6 +15,11 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
   )
   self.clients.claim()
+})
+
+// Listen for SKIP_WAITING message from the client (used by the update banner)
+self.addEventListener('message', (event) => {
+  if (event.data === 'SKIP_WAITING' || event.data?.type === 'SKIP_WAITING') self.skipWaiting()
 })
 
 self.addEventListener('fetch', (event) => {

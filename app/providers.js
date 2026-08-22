@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AppProvider } from '@/components/aurela/store'
 import { Toaster } from 'sonner'
 import { GoogleOAuthProvider } from '@react-oauth/google'
+import { UpdateBanner } from '@/components/aurela/UpdateBanner'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,6 +22,7 @@ export function Providers({ children }) {
     <QueryClientProvider client={queryClient}>
       <AppProvider>
         {children}
+        <UpdateBanner />
         <Toaster theme="dark" position="top-right" richColors closeButton toastOptions={{ style: { background: '#0b0b0f', border: '1px solid rgba(212,175,55,0.3)', color: '#f5f5f0' } }} />
       </AppProvider>
     </QueryClientProvider>
