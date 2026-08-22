@@ -1,5 +1,6 @@
 const nextConfig = {
-  output: 'standalone',
+  // Removed `output: 'standalone'` — we run `next start` directly which is simpler for our Docker deploy
+  // and gets rid of the runtime warning about standalone/start mismatch.
   images: {
     unoptimized: true,
     remotePatterns: [
