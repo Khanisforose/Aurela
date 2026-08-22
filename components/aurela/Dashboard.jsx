@@ -24,6 +24,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { SwapTab } from './SwapTab'
 import { BottomNav, MOBILE_TABS } from './BottomNav'
 import { PasscodeLock, PasscodeSettings, usePasscodeLock } from './PasscodeLock'
+import { PortfolioChart } from './PortfolioChart'
+import { PushSettings } from './PushSettings'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -65,6 +67,14 @@ export function Dashboard() {
   const passcode = usePasscodeLock({ enabled: true })
   const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const NAV = isAdmin ? [...USER_NAV, ...ADMIN_NAV] : USER_NAV
+
+  // Deep-link handler: read ?tab=X from the URL and switch dashboard on mount
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const sp = new URLSearchParams(window.location.search)
+    const t = sp.get('tab')
+    if (t && (USER_NAV.find(n => n.id === t) || (isAdmin && ADMIN_NAV.find(n => n.id === t)))) setTab(t)
+  }, [isAdmin])
 
   // Close mobile nav after selecting a tab
   const goTab = useCallback((id) => { setTab(id); setMobileNavOpen(false) }, [])
@@ -434,12 +444,16 @@ function OverviewTab({ user, totals, wallets, txs, cards, onTab }) {
           <div className="text-sm text-muted-foreground mt-1">≈ {fmt(totals.usd, 'USD')} across {wallets.length} wallets</div>
           <div className="mt-6 flex flex-wrap gap-3">
             <Button onClick={() => onTab('transfer')} className="gold-btn rounded-full"><Send className="h-4 w-4 mr-2"/> Send</Button>
+            <Button onClick={() => onTab('swap')} variant="outline" className="rounded-full border-gold-500/40">Swap</Button>
             <Button onClick={() => onTab('deposit')} variant="outline" className="rounded-full border-gold-500/40"><ArrowDownToLine className="h-4 w-4 mr-2"/> Deposit</Button>
             <Button onClick={() => onTab('withdraw')} variant="outline" className="rounded-full border-gold-500/40"><ArrowUpFromLine className="h-4 w-4 mr-2"/> Withdraw</Button>
             <Button onClick={() => onTab('cards')} variant="outline" className="rounded-full border-gold-500/40"><CreditCard className="h-4 w-4 mr-2"/> Cards</Button>
           </div>
         </div>
       </div>
+
+      {/* 30-day portfolio chart */}
+      <PortfolioChart />
 
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Fiat holdings */}
@@ -610,6 +624,25 @@ function TransferTab({ wallets, onDone }) {
   const enabledCrypto = config?.enabled_crypto || Object.keys(CRYPTO_META)
   const [form, setForm] = useState({ recipient: '', currency: 'USD', amount: '', note: '' })
   const [loading, setLoading] = useState(false)
+
+  // Deep-link prefill: reads ?send_to / ?send_amount / ?send_currency / ?send_memo from URL once on mount
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const sp = new URLSearchParams(window.location.search)
+    const to = sp.get('send_to'), amt = sp.get('send_amount'), cur = sp.get('send_currency'), memo = sp.get('send_memo')
+    if (to || amt || cur || memo) {
+      setForm(f => ({
+        recipient: to || f.recipient,
+        currency: cur || f.currency,
+        amount: amt || f.amount,
+        note: memo || f.note,
+      }))
+      // Clean the URL so a refresh doesn't repopulate stale values
+      const url = new URL(window.location.href)
+      ;['send_to','send_amount','send_currency','send_memo'].forEach(k => url.searchParams.delete(k))
+      window.history.replaceState({}, '', url.toString())
+    }
+  }, [])
 
   const submit = async () => {
     setLoading(true)
@@ -1612,6 +1645,11 @@ function ProfileTab({ user, onDone }) {
           </div>
         </div>
         <ChangePasswordForm/>
+      </div>
+
+      {/* Push notifications */}
+      <div className="lg:col-span-2">
+        <PushSettings />
       </div>
 
       {/* Passcode + biometric app lock */}

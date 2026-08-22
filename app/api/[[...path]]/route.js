@@ -2,6 +2,7 @@ import { MongoClient } from 'mongodb'
 import { v4 as uuidv4 } from 'uuid'
 import { NextResponse } from 'next/server'
 import crypto from 'crypto'
+import webpush from 'web-push'
 
 // ============================================================
 // AURELA — Global Digital Banking & Crypto Platform (MVP API)
@@ -14,8 +15,76 @@ async function connectToMongo() {
     await client.connect()
     db = client.db(process.env.DB_NAME)
     await ensureSeed(db)
+    await ensureVapid(db)
   }
   return db
+}
+
+// -------- VAPID / Web Push --------
+// Keys are generated once on first boot and stored in `system` collection.
+// Public key is served via /api/push/config; private key is used server-side only.
+let _vapidReady = false
+async function ensureVapid(db) {
+  const existing = await db.collection('system').findOne({ id: 'vapid' })
+  let publicKey, privateKey
+  if (existing?.public && existing?.private) {
+    publicKey = existing.public
+    privateKey = existing.private
+  } else {
+    const keys = webpush.generateVAPIDKeys()
+    publicKey = keys.publicKey
+    privateKey = keys.privateKey
+    await db.collection('system').updateOne(
+      { id: 'vapid' },
+      { $set: { id: 'vapid', public: publicKey, private: privateKey, created_at: new Date().toISOString() } },
+      { upsert: true }
+    )
+  }
+  const contact = process.env.PUSH_CONTACT_EMAIL || 'mailto:support@aurelawallet.com'
+  webpush.setVapidDetails(contact, publicKey, privateKey)
+  _vapidReady = true
+}
+
+async function sendPushToUser(db, userId, payload) {
+  if (!_vapidReady) return
+  const subs = await db.collection('push_subscriptions').find({ user_id: userId }).toArray()
+  await Promise.allSettled(subs.map(async (s) => {
+    try {
+      await webpush.sendNotification(s.subscription, JSON.stringify(payload))
+    } catch (e) {
+      // 404/410 means subscription is dead — remove it silently
+      if (e?.statusCode === 404 || e?.statusCode === 410) {
+        await db.collection('push_subscriptions').deleteOne({ _id: s._id })
+      }
+    }
+  }))
+}
+
+// -------- Portfolio snapshots (daily rollup for the 30-day chart) --------
+async function snapshotPortfolio(db, userId) {
+  try {
+    const day = new Date().toISOString().slice(0, 10)   // YYYY-MM-DD
+    const wallets = await db.collection('wallets').find({ user_id: userId }).toArray()
+    const rates = await getRates(db)
+    const usdOf = (cur, val) => {
+      if (!val) return 0
+      if (cur === 'USD') return val
+      if (rates?.fx?.[cur]) return val / rates.fx[cur]
+      if (rates?.crypto_usd?.[cur]) return val * rates.crypto_usd[cur]
+      return 0
+    }
+    const total = wallets.reduce((sum, w) => sum + usdOf(w.currency, Number(w.balance || 0)), 0)
+    const rounded = Math.round(total * 100) / 100
+    // Atomic upsert — race-safe (no duplicate documents for same user+day)
+    await db.collection('portfolio_snapshots').updateOne(
+      { user_id: userId, day },
+      {
+        $set: { total_usd: rounded, updated_at: new Date().toISOString() },
+        $setOnInsert: { id: uuidv4(), user_id: userId, day, created_at: new Date().toISOString() }
+      },
+      { upsert: true }
+    )
+  } catch(e) {}
 }
 
 function handleCORS(response) {
@@ -226,6 +295,8 @@ async function notifyUser(db, userId, { kind, title, body, meta = {} }) {
       const emailBody = `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 12px">${title}</h1><p style="color:#a8a8a0;font-size:14px;line-height:1.6;margin:0 0 20px">${body}</p><p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0">Sign in at <a href="https://www.aurelawallet.com" style="color:#d4af37">aurelawallet.com</a> to see the details.</p>`
       sendEmail(u.email, `[Aurela] ${title}`, emailBody).catch(()=>{})
     }
+    // Fire-and-forget web push
+    sendPushToUser(db, userId, { title, body, kind, tag: kind, url: '/' }).catch(()=>{})
   } catch (e) { /* non-fatal */ }
 }
 
@@ -346,13 +417,30 @@ async function ensureSeed(db) {
   }
 
   const existing = await db.collection('users').findOne({ role: 'super_admin' })
+  // Backfill user_code + name fields for any existing admin missing them (needed for the /pay lookup deep-link)
+  if (existing) {
+    const patch = {}
+    if (!existing.user_code) {
+      let user_code = 'AUR' + randDigits(9)
+      for (let i = 0; i < 6 && await db.collection('users').findOne({ user_code }); i++) user_code = 'AUR' + randDigits(9)
+      patch.user_code = user_code
+    }
+    if (!existing.first_name) patch.first_name = 'Aurela'
+    if (!existing.last_name)  patch.last_name  = 'Admin'
+    if (Object.keys(patch).length > 0) await db.collection('users').updateOne({ id: existing.id }, { $set: patch })
+  }
   if (!existing) {
     const salt = newSalt()
+    let user_code = 'AUR' + randDigits(9)
+    for (let i = 0; i < 6 && await db.collection('users').findOne({ user_code }); i++) user_code = 'AUR' + randDigits(9)
     const admin = {
       id: uuidv4(),
       username: 'aurela_admin',
+      user_code,
       email: 'admin@aurelawallet.com',
       full_name: 'Aurela Administrator',
+      first_name: 'Aurela',
+      last_name: 'Admin',
       phone: '',
       role: 'super_admin',
       status: 'active',
@@ -618,6 +706,29 @@ async function handleRoute(request, { params }) {
         crypto_change: change,
         aur: r.aur,
         updated_at: r.updated_at
+      }))
+    }
+
+    // -------- Web Push: public VAPID key --------
+    if (route === '/push/config' && method === 'GET') {
+      const v = await db.collection('system').findOne({ id: 'vapid' })
+      return handleCORS(NextResponse.json({ public_key: v?.public || null }))
+    }
+
+    // -------- Public /pay preview — looks up a recipient by Aurela ID (no auth) --------
+    if (route === '/pay/lookup' && method === 'GET') {
+      const url = new URL(request.url)
+      const code = (url.searchParams.get('to') || '').trim().toUpperCase()
+      if (!/^AUR\d+$/.test(code)) return handleCORS(NextResponse.json({ error: 'Invalid Aurela ID' }, { status: 400 }))
+      const u = await db.collection('users').findOne({ user_code: code }, { projection: { _id: 0, user_code: 1, first_name: 1, last_name: 1, country: 1, created_at: 1 } })
+      if (!u) return handleCORS(NextResponse.json({ error: 'Recipient not found' }, { status: 404 }))
+      return handleCORS(NextResponse.json({
+        recipient: {
+          code: u.user_code,
+          name: (u.first_name || '') + (u.last_name ? ' ' + u.last_name[0] + '.' : ''),
+          country: u.country || null,
+          joined: u.created_at,
+        }
       }))
     }
 
@@ -1155,10 +1266,61 @@ async function handleRoute(request, { params }) {
       }))
       const totalUSD = enriched.reduce((s,w)=> s + (w.balance_usd || 0), 0)
       const totalPreferred = convertUSDTo(totalUSD, user.preferred_currency, rates)
+      // Fire-and-forget daily portfolio snapshot (for the 30-day chart)
+      snapshotPortfolio(db, user.id).catch(()=>{})
       return handleCORS(NextResponse.json({
         wallets: enriched,
         totals: { usd: totalUSD, preferred: totalPreferred, preferred_currency: user.preferred_currency }
       }))
+    }
+
+    // -------- Portfolio history (30-day chart) --------
+    if (route === '/portfolio/history' && method === 'GET') {
+      const url = new URL(request.url)
+      const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '30'), 1), 365)
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+      // Make sure today is captured
+      await snapshotPortfolio(db, user.id).catch(()=>{})
+      const snaps = await db.collection('portfolio_snapshots')
+        .find({ user_id: user.id, day: { $gte: since } })
+        .sort({ day: 1 })
+        .toArray()
+      const points = snaps.map(s => ({ date: s.day, total_usd: s.total_usd }))
+      // Also return current total (if no snapshots yet, at least show one point)
+      if (points.length === 0) {
+        const wallets = await db.collection('wallets').find({ user_id: user.id }).toArray()
+        const rates = await getRates(db)
+        const total = wallets.reduce((sum, w) => sum + convertToUSD(w.balance, w.currency, rates), 0)
+        points.push({ date: new Date().toISOString().slice(0,10), total_usd: Math.round(total * 100) / 100 })
+      }
+      return handleCORS(NextResponse.json({ days, points }))
+    }
+
+    // -------- Web Push: subscribe / unsubscribe --------
+    if (route === '/push/subscribe' && method === 'POST') {
+      const body = await request.json()
+      if (!body?.subscription?.endpoint) return handleCORS(NextResponse.json({ error: 'invalid subscription' }, { status: 400 }))
+      await db.collection('push_subscriptions').updateOne(
+        { user_id: user.id, 'subscription.endpoint': body.subscription.endpoint },
+        { $set: {
+          user_id: user.id,
+          subscription: body.subscription,
+          user_agent: body.user_agent || null,
+          updated_at: new Date().toISOString(),
+        }, $setOnInsert: { id: uuidv4(), created_at: new Date().toISOString() } },
+        { upsert: true }
+      )
+      return handleCORS(NextResponse.json({ ok: true }))
+    }
+    if (route === '/push/unsubscribe' && method === 'POST') {
+      const body = await request.json()
+      if (body?.endpoint) await db.collection('push_subscriptions').deleteMany({ user_id: user.id, 'subscription.endpoint': body.endpoint })
+      else await db.collection('push_subscriptions').deleteMany({ user_id: user.id })
+      return handleCORS(NextResponse.json({ ok: true }))
+    }
+    if (route === '/push/test' && method === 'POST') {
+      await sendPushToUser(db, user.id, { title: 'Aurela notifications enabled', body: 'You will now receive alerts for deposits, transfers, swaps and card events.', kind: 'test', url: '/' })
+      return handleCORS(NextResponse.json({ ok: true }))
     }
 
     // Transactions
