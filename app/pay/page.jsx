@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
@@ -8,7 +8,16 @@ import { ArrowRight, Shield, Sparkles, Loader2, User, Send, ExternalLink } from 
 
 // Public /pay page — receives ?to=AUR123&amount=10&currency=USDT
 // Shows a payment card preview then deep-links into the app.
+// NOTE: useSearchParams() must be inside a <Suspense> boundary for Next.js 15 production builds.
 export default function PayPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-gold"/></div>}>
+      <PayInner/>
+    </Suspense>
+  )
+}
+
+function PayInner() {
   const router = useRouter()
   const sp = useSearchParams()
   const to = (sp.get('to') || '').toUpperCase()
