@@ -50,6 +50,19 @@ export default function RootLayout({ children }) {
         <meta name="apple-mobile-web-app-title" content="Aurela" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <script dangerouslySetInnerHTML={{__html:'window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);'}} />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              // Register the service worker as early as possible so PWABuilder and Chrome
+              // install prompts detect it during their initial page scan.
+              if ('serviceWorker' in navigator && location.hostname !== 'localhost') {
+                window.addEventListener('load', function() {
+                  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(err){ console.warn('SW register failed', err) });
+                });
+              }
+            `,
+          }}
+        />
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased" suppressHydrationWarning>
         <Providers>{children}</Providers>
