@@ -28,6 +28,8 @@
     { "name": "Aurela Scan",    "short_name": "Scan",  "description": "Aurela chain block explorer",   "url": "/scan?utm_source=pwa_shortcut", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
   ],
   "screenshots": [
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "form_factor": "narrow", "label": "Aurela home screen" }
+    { "src": "/screenshots/mobile-1.png",  "sizes": "1080x1920", "type": "image/png", "form_factor": "narrow", "label": "Aurela home — luxury digital banking" },
+    { "src": "/screenshots/mobile-2.png",  "sizes": "1080x1920", "type": "image/png", "form_factor": "narrow", "label": "Send, swap, save — all in one place" },
+    { "src": "/screenshots/desktop-1.png", "sizes": "1920x1080", "type": "image/png", "form_factor": "wide",   "label": "Aurela desktop dashboard" }
   ]
 }
