@@ -26,6 +26,7 @@ import { BottomNav, MOBILE_TABS } from './BottomNav'
 import { PasscodeLock, PasscodeSettings, usePasscodeLock } from './PasscodeLock'
 import { PortfolioChart } from './PortfolioChart'
 import { PushSettings } from './PushSettings'
+import { ErrorBoundary } from './ErrorBoundary'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -198,7 +199,7 @@ export function Dashboard() {
                 <Menu className="h-4 w-4 text-gold"/>
               </button>
               <div className="min-w-0">
-                <div className="text-[10px] sm:text-xs uppercase tracking-widest text-muted-foreground truncate">{tab === 'overview' ? 'Welcome back' : NAV.find(n => n.id === tab)?.label}</div>
+                <div className="text-[10px] sm:text-xs uppercase tracking-widest text-muted-foreground truncate">{tab === 'overview' ? 'Welcome back' : (NAV.find(n => n.id === tab)?.label || (tab === 'wallets' || tab === 'wallets_fiat' ? 'Wallets' : ''))}</div>
                 <div className="font-display text-base sm:text-2xl truncate">{user?.full_name || user?.username}</div>
               </div>
             </div>
@@ -343,12 +344,14 @@ export function Dashboard() {
         <div className="p-6">
           <AnimatePresence mode="wait">
             <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
+             <ErrorBoundary resetKey={tab}>
               {tab === 'overview' && <OverviewTab user={user} totals={totals} wallets={wallets} txs={txs} cards={cards} onTab={setTab}/>}
               {tab === 'fiat' && <WalletsTab wallets={fiatWallets} kind="fiat"/>}
               {tab === 'crypto' && <WalletsTab wallets={cryptoWallets} kind="crypto"/>}
               {tab === 'transfer' && <TransferTab wallets={wallets} onDone={loadAll}/>}
               {tab === 'swap' && <SwapTab onDone={loadAll}/>}
-              {tab === 'wallets_fiat' && <WalletsTab wallets={fiatWallets} kind="fiat"/>}
+              {/* Mobile "Wallets" tab: all wallets (fiat + crypto) with a sub-filter, sorted by balance */}
+              {(tab === 'wallets' || tab === 'wallets_fiat') && <WalletsTab wallets={wallets} kind="all"/>}
               {tab === 'cards' && <CardsTab cards={cards} onChange={loadCards} onWalletChange={loadWallets}/>}
               {tab === 'deposit' && <DepositTab wallets={wallets} onDone={loadAll}/>}
               {tab === 'withdraw' && <WithdrawTab wallets={wallets} onDone={loadAll}/>}
@@ -366,6 +369,7 @@ export function Dashboard() {
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
               {tab === 'admin_settings' && isAdmin && <SettingsAdmin/>}
               {tab === 'admin_audit' && isAdmin && <AuditAdmin/>}
+             </ErrorBoundary>
             </motion.div>
           </AnimatePresence>
         </div>
@@ -549,33 +553,70 @@ function MiniCard({ card }) {
   )
 }
 
+// Sort wallets: funded first (by USD value, then raw balance), then empty ones alphabetically.
+function sortWalletsByBalance(list) {
+  return [...(list || [])].sort((a, b) => {
+    const au = Number(a?.balance_usd) || 0, bu = Number(b?.balance_usd) || 0
+    if (bu !== au) return bu - au
+    const ab = Number(a?.balance) || 0, bb = Number(b?.balance) || 0
+    if (bb !== ab) return bb - ab
+    return String(a?.currency || '').localeCompare(String(b?.currency || ''))
+  })
+}
+
 function WalletsTab({ wallets, kind }) {
   const { config } = useApp()
+  const [sub, setSub] = useState('all') // only used when kind === 'all'
   const platformWallets = config?.platform_wallets || []
   const findPlatform = (asset, network) => platformWallets.find(p => p.asset === asset && (!network || p.network === network))
 
+  const safeWallets = Array.isArray(wallets) ? wallets : []
+  const visible = kind === 'all'
+    ? safeWallets.filter(w => sub === 'all' ? true : (w?.type === sub))
+    : safeWallets
+  const sorted = sortWalletsByBalance(visible)
+  const fundedCount = sorted.filter(w => (Number(w?.balance) || 0) > 0).length
+
   return (
-    <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-      {wallets.map(w => {
-        const meta = kind === 'fiat' ? FIAT_META[w.currency] : CRYPTO_META[w.currency]
-        const platformOptions = kind === 'crypto' ? platformWallets.filter(p => p.asset === w.currency) : []
+    <div className="space-y-4">
+      {kind === 'all' && (
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex gap-2">
+            {[['all', 'All'], ['fiat', 'Fiat'], ['crypto', 'Crypto']].map(([v, label]) => (
+              <button key={v} onClick={() => setSub(v)}
+                className={`px-3 py-1.5 rounded-full text-xs border transition-colors ${sub === v ? 'border-gold-500/60 bg-gold-500/10 text-gold' : 'border-gold-500/20 text-muted-foreground hover:text-gold'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="text-[11px] text-muted-foreground">{fundedCount} funded · {sorted.length - fundedCount} empty</div>
+        </div>
+      )}
+      {sorted.length === 0 && <div className="text-sm text-muted-foreground">No wallets to show.</div>}
+      <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+      {sorted.map(w => {
+        const wKind = kind === 'all' ? (w?.type === 'crypto' ? 'crypto' : 'fiat') : kind
+        const meta = wKind === 'fiat' ? FIAT_META[w.currency] : CRYPTO_META[w.currency]
+        const platformOptions = wKind === 'crypto' ? platformWallets.filter(p => p.asset === w.currency) : []
+        const isEmpty = (Number(w?.balance) || 0) <= 0
         return (
-          <div key={w.id} className="card-luxury rounded-2xl p-6">
+          <div key={w.id} className={`card-luxury rounded-2xl p-6 ${isEmpty ? 'opacity-80' : ''}`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                {kind === 'fiat' ? <FlagIcon code={w.currency} size={40}/> : <CoinIcon code={w.currency} size={40}/>}
+                {wKind === 'fiat' ? <FlagIcon code={w.currency} size={40}/> : <CoinIcon code={w.currency} size={40}/>}
                 <div>
                   <div className="font-display text-lg">{w.currency}</div>
                   <div className="text-xs text-muted-foreground">{meta?.name}</div>
                 </div>
               </div>
-              {kind === 'crypto' && <Badge variant="outline" className="border-gold-500/30 text-gold text-[10px]">{platformOptions[0]?.network || (w.networks||[])[0]}</Badge>}
+              {wKind === 'crypto' && <Badge variant="outline" className="border-gold-500/30 text-gold text-[10px]">{platformOptions[0]?.network || (w.networks||[])[0]}</Badge>}
+              {wKind === 'fiat' && kind === 'all' && <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Fiat</Badge>}
             </div>
             <div className="mt-4">
               <div className="font-display text-3xl gold-text">{fmt(w.balance, w.currency)}</div>
               <div className="text-xs text-muted-foreground mt-1">≈ {fmt(w.balance_usd, 'USD')}</div>
             </div>
-            {kind === 'crypto' && platformOptions.length > 0 && (
+            {wKind === 'crypto' && platformOptions.length > 0 && (
               <div className="mt-4 space-y-2">
                 <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Deposit address{platformOptions.length > 1 ? 'es' : ''}</div>
                 {platformOptions.map(p => (
@@ -589,12 +630,13 @@ function WalletsTab({ wallets, kind }) {
                 ))}
               </div>
             )}
-            {kind === 'crypto' && platformOptions.length === 0 && (
+            {wKind === 'crypto' && platformOptions.length === 0 && (
               <div className="mt-4 text-xs text-muted-foreground">Deposit address not yet configured by administration.</div>
             )}
           </div>
         )
       })}
+      </div>
     </div>
   )
 }

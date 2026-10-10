@@ -34,7 +34,7 @@ export function BottomNav({ tab, setTab, tabs }) {
 
 export const MOBILE_TABS = [
   { id: 'overview',     label: 'Home',    icon: Home },
-  { id: 'wallets_fiat', label: 'Wallets', icon: Repeat },
+  { id: 'wallets',      label: 'Wallets', icon: Repeat },
   { id: 'swap',         label: 'Swap',    icon: ArrowLeftRight },
   { id: 'cards',        label: 'Cards',   icon: CreditCard },
   { id: 'profile',      label: 'Me',      icon: User },

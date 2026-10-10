@@ -14,16 +14,24 @@ const BUILD_TIME  = new Date().toISOString()   // set at cold-start; a fresh dep
 // AURELA — Global Digital Banking & Crypto Platform (MVP API)
 // ============================================================
 
-let client, db
+let client, db, _connectPromise
 async function connectToMongo() {
-  if (!client) {
-    client = new MongoClient(process.env.MONGO_URL)
-    await client.connect()
-    db = client.db(process.env.DB_NAME)
-    await ensureSeed(db)
-    await ensureVapid(db)
+  if (db) return db
+  // Share a single in-flight connection promise so concurrent cold-start requests
+  // never observe a half-initialised `db` (previously caused "Cannot read properties of undefined (reading 'collection')").
+  if (!_connectPromise) {
+    _connectPromise = (async () => {
+      const c = new MongoClient(process.env.MONGO_URL)
+      await c.connect()
+      const d = c.db(process.env.DB_NAME)
+      await ensureSeed(d)
+      await ensureVapid(d)
+      client = c
+      db = d
+      return d
+    })().catch(err => { _connectPromise = null; throw err })
   }
-  return db
+  return _connectPromise
 }
 
 // -------- VAPID / Web Push --------
@@ -153,6 +161,10 @@ function cardExpiry() {
   return String(d.getMonth()+1).padStart(2,'0') + '/' + String(d.getFullYear()).slice(-2)
 }
 function now() { return new Date() }
+// Mongo projection that excludes the heavy base64 KYC document images from list responses.
+// Each image can be several MB, so lists must only carry metadata (images are loaded per-record).
+const KYC_LIST_PROJECTION = { doc_front: 0, doc_back: 0, selfie: 0 }
+
 function clean(doc) {
   if (!doc) return doc
   if (Array.isArray(doc)) return doc.map(clean)
@@ -1631,7 +1643,7 @@ async function handleRoute(request, { params }) {
           db.collection('wallets').find({ user_id: userId }).toArray(),
           db.collection('cards').find({ user_id: userId }).sort({ created_at: -1 }).toArray(),
           db.collection('transactions').find({ $or: [{ user_id: userId }, { from_user_id: userId }, { to_user_id: userId }] }).sort({ created_at: -1 }).limit(50).toArray(),
-          db.collection('kyc').find({ user_id: userId }).sort({ submitted_at: -1 }).limit(1).toArray(),
+          db.collection('kyc').find({ user_id: userId }, { projection: KYC_LIST_PROJECTION }).sort({ submitted_at: -1 }).limit(1).toArray(),
           db.collection('sessions').find({ user_id: userId }).sort({ created_at: -1 }).limit(5).toArray(),
         ])
         return handleCORS(NextResponse.json({
@@ -1724,8 +1736,20 @@ async function handleRoute(request, { params }) {
         return handleCORS(NextResponse.json({ ok: true }))
       }
       if (route === '/admin/kyc' && method === 'GET') {
-        const list = await db.collection('kyc').find({}).sort({ submitted_at: -1 }).toArray()
-        return handleCORS(NextResponse.json({ kyc: clean(list) }))
+        // IMPORTANT: never return the base64 document images in the list — each submission can be ~10MB.
+        // The list only needs metadata; images are fetched on-demand via GET /admin/kyc/:id.
+        const url = new URL(request.url)
+        const statusFilter = url.searchParams.get('status')
+        const limit = Math.min(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 500)
+        const q = statusFilter && statusFilter !== 'all' ? { status: statusFilter } : {}
+        const list = await db.collection('kyc')
+          .find(q, { projection: KYC_LIST_PROJECTION })
+          .sort({ submitted_at: -1 })
+          .limit(limit)
+          .toArray()
+        const total = await db.collection('kyc').countDocuments(q)
+        const pending = await db.collection('kyc').countDocuments({ status: 'pending' })
+        return handleCORS(NextResponse.json({ kyc: clean(list), total, pending }))
       }
       if (route.startsWith('/admin/kyc/') && method === 'POST') {
         const parts = route.split('/')
@@ -1847,7 +1871,7 @@ async function handleRoute(request, { params }) {
         const recent = await Promise.all([
           db.collection('deposit_requests').find({ status: 'pending' }).sort({ created_at: -1 }).limit(5).toArray(),
           db.collection('withdraw_requests').find({ status: 'pending' }).sort({ created_at: -1 }).limit(5).toArray(),
-          db.collection('kyc').find({ status: 'pending' }).sort({ submitted_at: -1 }).limit(5).toArray(),
+          db.collection('kyc').find({ status: 'pending' }, { projection: KYC_LIST_PROJECTION }).sort({ submitted_at: -1 }).limit(5).toArray(),
           db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation'] } }).sort({ activation_submitted_at: -1 }).limit(5).toArray()
         ])
         const items = []

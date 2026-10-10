@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { LayoutDashboard, Users, ShieldCheck, Settings, Receipt, ScrollText, LogOut, Search, Snowflake, Ban, Trash2, Plus, Minus, Wallet, Sparkles, ChevronRight, Copy, Edit3, X, Save, Check } from 'lucide-react'
+import { LayoutDashboard, Users, ShieldCheck, Settings, Receipt, ScrollText, LogOut, Search, Snowflake, Ban, Trash2, Plus, Minus, Wallet, Sparkles, ChevronRight, Copy, Edit3, X, Save, Check, RefreshCw, Loader2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 const ADMIN_NAV = [
@@ -401,32 +401,79 @@ function UsersAdmin() {
 function KycAdmin() {
   const { api, tick } = useApp()
   const [list, setList] = useState([])
+  const [meta, setMeta] = useState({ total: 0, pending: 0 })
+  const [filter, setFilter] = useState('pending')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [open, setOpen] = useState(null) // { kyc, user }
-  const load = async () => { try { const { kyc } = await api.get('/admin/kyc'); setList(kyc) } catch(e) {} }
-  useEffect(() => { load() }, [])
-  useEffect(() => { load() }, [tick])
+  const [detailLoading, setDetailLoading] = useState(false)
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const res = await api.get(`/admin/kyc?status=${encodeURIComponent(filter)}&limit=200`)
+      const rows = Array.isArray(res?.kyc) ? res.kyc : []
+      setList(rows)
+      setMeta({ total: Number(res?.total) || rows.length, pending: Number(res?.pending) || 0 })
+      setError('')
+    } catch(e) {
+      setError(e?.message || 'Failed to load KYC submissions')
+    } finally {
+      if (!silent) setLoading(false)
+    }
+  }
+  useEffect(() => { load() }, [filter])
+  // Background refresh on the global tick — silent, and skipped while a review dialog is open
+  useEffect(() => { if (!open) load(true) }, [tick])
   const openDetail = async (k) => {
+    setDetailLoading(true)
     try {
       const res = await api.get(`/admin/kyc/${k.id}`)
+      if (!res?.kyc) throw new Error('KYC record not found')
       setOpen(res)
-    } catch(e) { toast.error(e.message) }
+    } catch(e) { toast.error(e?.message || 'Could not open KYC review') }
+    finally { setDetailLoading(false) }
   }
-  const action = async (k, act) => { try { await api.post(`/admin/kyc/${k.id}/${act}`, {}); toast.success(`KYC ${act}d`); setOpen(null); load() } catch(e) { toast.error(e.message) } }
+  const action = async (k, act) => { try { await api.post(`/admin/kyc/${k.id}/${act}`, {}); toast.success(`KYC ${act}d`); setOpen(null); load() } catch(e) { toast.error(e?.message || 'Action failed') } }
+
+  const FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['all', 'All']]
 
   return (
     <div className="space-y-3">
-      {list.length === 0 && <div className="text-muted-foreground text-sm">No KYC submissions.</div>}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          {FILTERS.map(([v, label]) => (
+            <button key={v} onClick={() => setFilter(v)}
+              className={`px-3 py-1.5 rounded-full text-xs border transition-colors ${filter === v ? 'border-gold-500/60 bg-gold-500/10 text-gold' : 'border-gold-500/20 text-muted-foreground hover:text-gold'}`}>
+              {label}{v === 'pending' && meta.pending > 0 ? ` (${meta.pending})` : ''}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>{meta.total} record{meta.total === 1 ? '' : 's'}</span>
+          <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-7 px-2"><RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`}/></Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="card-luxury rounded-2xl p-5 border border-red-500/30 text-sm">
+          <div className="text-red-400">Could not load KYC submissions: {error}</div>
+          <Button size="sm" variant="outline" onClick={() => load()} className="mt-3 border-gold-500/40">Retry</Button>
+        </div>
+      )}
+      {loading && !error && <div className="text-muted-foreground text-sm flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Loading KYC submissions…</div>}
+      {!loading && !error && list.length === 0 && <div className="text-muted-foreground text-sm">No {filter === 'all' ? '' : filter + ' '}KYC submissions.</div>}
       {list.map(k => (
         <div key={k.id} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs flex-1 min-w-0">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs flex-1 min-w-0">
             <div><div className="text-muted-foreground uppercase text-[10px]">Full name</div><div className="truncate">{k.full_name || `${k.first_name || ''} ${k.last_name || ''}`.trim() || '—'}</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Country</div><div>{k.country || '—'}</div></div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Mobile</div><div>{k.mobile || '—'}</div></div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Document</div><div className="truncate">{k.id_type}</div></div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={k.status==='approved'?'border-emerald-500/40 text-emerald-400':k.status==='rejected'?'border-red-500/40 text-red-400':'border-gold-500/40 text-gold'}>{k.status}</Badge></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Mobile</div><div className="truncate">{k.mobile || '—'}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Document</div><div className="truncate">{k.id_type || '—'}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{k.submitted_at ? new Date(k.submitted_at).toLocaleString() : '—'}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={k.status==='approved'?'border-emerald-500/40 text-emerald-400':k.status==='rejected'?'border-red-500/40 text-red-400':'border-gold-500/40 text-gold'}>{k.status || 'pending'}</Badge></div>
           </div>
           <div className="flex gap-2 shrink-0">
-            <Button size="sm" variant="outline" onClick={()=>openDetail(k)} className="border-gold-500/40">Open review</Button>
+            <Button size="sm" variant="outline" onClick={()=>openDetail(k)} disabled={detailLoading} className="border-gold-500/40">{detailLoading ? <Loader2 className="h-3 w-3 animate-spin"/> : 'Open review'}</Button>
           </div>
         </div>
       ))}
