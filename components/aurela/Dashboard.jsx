@@ -27,6 +27,7 @@ import { PasscodeLock, PasscodeSettings, usePasscodeLock } from './PasscodeLock'
 import { PortfolioChart } from './PortfolioChart'
 import { PushSettings } from './PushSettings'
 import { ErrorBoundary } from './ErrorBoundary'
+import { WhatsNewDialog } from './WhatsNew'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -374,6 +375,9 @@ export function Dashboard() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* One-time "Aurela Updated" popup (per app version, per device) */}
+      <WhatsNewDialog />
 
       {/* Welcome AUR reward popup — shown once when a pending reward exists */}
       <Dialog open={claimOpen} onOpenChange={setClaimOpen}>

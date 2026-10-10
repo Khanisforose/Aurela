@@ -1,621 +1,600 @@
 #!/usr/bin/env python3
 """
-Backend test for KYC admin endpoints - Production bug fix verification
-Tests that GET /api/admin/kyc strips base64 images from list responses
-but GET /api/admin/kyc/:id still returns full images.
+Backend API Test Suite for Aurela - Card Approvals & Version Endpoint
+Tests the new admin card endpoints and version endpoint with whats_new feature
 """
 
 import requests
 import json
 import sys
-import base64
-from typing import Dict, Any
+import time
+from typing import Dict, Any, Optional
 
 # Configuration
 BASE_URL = "https://aurela-preview.preview.emergentagent.com/api"
 ADMIN_EMAIL = "admin@aurelawallet.com"
 ADMIN_PASSWORD = "Aurela@123#"
 
-# Test results tracking
-tests_passed = 0
-tests_failed = 0
-test_results = []
+# Test state
+admin_token = None
+test_user_token = None
+test_user_email = None
+test_card_id = None
 
-def log_test(test_name: str, passed: bool, message: str = ""):
-    """Log test result"""
-    global tests_passed, tests_failed
-    if passed:
-        tests_passed += 1
-        status = "✅ PASS"
-    else:
-        tests_failed += 1
-        status = "❌ FAIL"
-    
-    result = f"{status} - {test_name}"
-    if message:
-        result += f": {message}"
-    print(result)
-    test_results.append({"test": test_name, "passed": passed, "message": message})
+def log(msg: str, level: str = "INFO"):
+    """Log test messages"""
+    print(f"[{level}] {msg}")
 
-def admin_login() -> str:
-    """Login as admin and return token"""
-    print("\n=== Admin Login ===")
-    response = requests.post(
-        f"{BASE_URL}/auth/login",
-        json={"identifier": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
-    )
+def test_request(method: str, endpoint: str, token: Optional[str] = None, 
+                 data: Optional[Dict] = None, expected_status: int = 200) -> Dict[str, Any]:
+    """Make a test request and validate response"""
+    url = f"{BASE_URL}{endpoint}"
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     
-    if response.status_code != 200:
-        print(f"❌ Admin login failed: {response.status_code} - {response.text}")
-        sys.exit(1)
-    
-    data = response.json()
-    token = data.get("token")
-    print(f"✅ Admin logged in successfully. Role: {data.get('user', {}).get('role')}")
-    return token
+    try:
+        if method == "GET":
+            response = requests.get(url, headers=headers, timeout=10)
+        elif method == "POST":
+            response = requests.post(url, headers=headers, json=data, timeout=10)
+        elif method == "PUT":
+            response = requests.put(url, headers=headers, json=data, timeout=10)
+        elif method == "DELETE":
+            response = requests.delete(url, headers=headers, timeout=10)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        
+        log(f"{method} {endpoint} -> {response.status_code}")
+        
+        if response.status_code != expected_status:
+            log(f"Expected {expected_status}, got {response.status_code}: {response.text}", "ERROR")
+            return {"error": f"Status mismatch: expected {expected_status}, got {response.status_code}", "status": response.status_code, "body": response.text}
+        
+        return {"status": response.status_code, "data": response.json() if response.text else {}}
+    except Exception as e:
+        log(f"Request failed: {str(e)}", "ERROR")
+        return {"error": str(e), "status": 0}
 
-def register_test_user(token: str) -> Dict[str, Any]:
-    """Register a fresh test user and return user data"""
-    print("\n=== Registering Test User ===")
+def setup_test_user():
+    """Register and setup a test user with KYC approved"""
+    global test_user_token, test_user_email
     
-    # First, init registration
+    log("=== Setting up test user ===")
+    
+    # Generate unique email
     import random
-    random_num = random.randint(100000, 999999)
-    test_email = f"kyctest{random_num}@test.com"
-    test_password = "TestPass123!"
+    test_user_email = f"testuser_{random.randint(100000, 999999)}@test.com"
     
-    init_response = requests.post(
-        f"{BASE_URL}/auth/register/init",
-        json={
-            "first_name": "KYC",
-            "last_name": "Tester",
-            "email": test_email,
-            "country": "United States",
-            "phone": f"+1555{random_num}",
-            "password": test_password
-        }
-    )
-    
-    if init_response.status_code != 200:
-        print(f"❌ Registration init failed: {init_response.status_code} - {init_response.text}")
-        sys.exit(1)
-    
-    init_data = init_response.json()
-    signup_id = init_data.get("signup_id")
-    dev_otp = init_data.get("dev_otp")
-    
-    # If dev_otp is not provided, fetch from database
-    if not dev_otp:
-        from pymongo import MongoClient
-        client = MongoClient("mongodb://localhost:27017")
-        db = client["aurela"]
-        pending = db["pending_signups"].find_one({"id": signup_id})
-        if pending:
-            dev_otp = pending.get("code")
-        client.close()
-    
-    print(f"✅ Registration initiated. Signup ID: {signup_id}, OTP: {dev_otp}")
-    
-    # Verify registration
-    verify_response = requests.post(
-        f"{BASE_URL}/auth/register/verify",
-        json={"signup_id": signup_id, "code": dev_otp}
-    )
-    
-    if verify_response.status_code != 200:
-        print(f"❌ Registration verify failed: {verify_response.status_code} - {verify_response.text}")
-        sys.exit(1)
-    
-    verify_data = verify_response.json()
-    user_token = verify_data.get("token")
-    user_data = verify_data.get("user")
-    
-    print(f"✅ User registered successfully. User ID: {user_data.get('id')}, Email: {test_email}")
-    
-    return {
-        "email": test_email,
-        "password": test_password,
-        "token": user_token,
-        "user_id": user_data.get("id"),
-        "user": user_data
-    }
-
-def submit_kyc_with_large_images(user_token: str, user_id: str) -> str:
-    """Submit KYC with large base64 images and return KYC ID"""
-    print("\n=== Submitting KYC with Large Images ===")
-    
-    # Create large base64 data URIs (~300KB each)
-    large_image_data = "A" * 300000
-    doc_front = f"data:image/jpeg;base64,{large_image_data}"
-    doc_back = f"data:image/jpeg;base64,{large_image_data}"
-    selfie = f"data:image/jpeg;base64,{large_image_data}"
-    
-    kyc_payload = {
-        "first_name": "KYC",
-        "last_name": "Tester",
-        "dob": "1990-01-01",
+    # Register init
+    log(f"Registering user: {test_user_email}")
+    result = test_request("POST", "/auth/register/init", data={
+        "first_name": "Test",
+        "last_name": "User",
+        "email": test_user_email,
         "country": "United States",
-        "mobile": "+15551234567",
-        "id_type": "passport",
-        "id_number": "P123456789",
-        "doc_front": doc_front,
-        "doc_back": doc_back,
-        "selfie": selfie
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/kyc",
-        headers={"Authorization": f"Bearer {user_token}"},
-        json=kyc_payload
-    )
-    
-    if response.status_code != 200:
-        print(f"❌ KYC submission failed: {response.status_code} - {response.text}")
-        sys.exit(1)
-    
-    data = response.json()
-    kyc_id = data.get("kyc", {}).get("id")
-    print(f"✅ KYC submitted successfully. KYC ID: {kyc_id}")
-    print(f"   Payload size: ~{len(json.dumps(kyc_payload)) / 1024:.0f} KB")
-    
-    return kyc_id
-
-def test_admin_kyc_list(admin_token: str, kyc_id: str):
-    """Test 1: GET /api/admin/kyc - list should NOT include base64 images"""
-    print("\n=== TEST 1: Admin KYC List (No Images) ===")
-    
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    # Check status code
-    if response.status_code != 200:
-        log_test("Test 1: Status code", False, f"Expected 200, got {response.status_code}")
-        return
-    
-    log_test("Test 1: Status code", True, "200 OK")
-    
-    data = response.json()
-    
-    # Check response shape
-    has_kyc = "kyc" in data
-    has_total = "total" in data
-    has_pending = "pending" in data
-    
-    log_test("Test 1: Response shape", 
-             has_kyc and has_total and has_pending,
-             f"Has kyc: {has_kyc}, total: {has_total}, pending: {has_pending}")
-    
-    # Check that response body is small
-    response_size = len(response.text)
-    size_kb = response_size / 1024
-    
-    log_test("Test 1: Response size", 
-             size_kb < 200,
-             f"Response size: {size_kb:.1f} KB (should be < 200 KB)")
-    
-    # Check that NO items contain doc_front, doc_back, or selfie
-    kyc_list = data.get("kyc", [])
-    items_with_images = []
-    
-    for item in kyc_list:
-        if "doc_front" in item or "doc_back" in item or "selfie" in item:
-            items_with_images.append(item.get("id"))
-    
-    log_test("Test 1: No base64 images in list", 
-             len(items_with_images) == 0,
-             f"Items with images: {len(items_with_images)}")
-    
-    # Check that items still have required fields
-    if kyc_list:
-        first_item = kyc_list[0]
-        required_fields = ["id", "user_id", "country", "mobile", "id_type", "status", "submitted_at"]
-        missing_fields = [f for f in required_fields if f not in first_item]
-        
-        log_test("Test 1: Required fields present", 
-                 len(missing_fields) == 0,
-                 f"Missing fields: {missing_fields}" if missing_fields else "All required fields present")
-    
-    # Check sorting (should be by submitted_at desc)
-    if len(kyc_list) > 1:
-        is_sorted = all(kyc_list[i]["submitted_at"] >= kyc_list[i+1]["submitted_at"] 
-                       for i in range(len(kyc_list)-1))
-        log_test("Test 1: Sorted by submitted_at desc", is_sorted)
-
-def test_admin_kyc_filters(admin_token: str):
-    """Test 2: GET /api/admin/kyc with status filters and limit"""
-    print("\n=== TEST 2: Admin KYC Filters ===")
-    
-    # Test status=pending
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=pending",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        data = response.json()
-        kyc_list = data.get("kyc", [])
-        pending_count = data.get("pending", 0)
-        
-        # All items should have status=pending
-        all_pending = all(item.get("status") == "pending" for item in kyc_list)
-        log_test("Test 2: status=pending filter", all_pending, 
-                f"Found {len(kyc_list)} pending items, pending count: {pending_count}")
-    else:
-        log_test("Test 2: status=pending filter", False, f"Status: {response.status_code}")
-    
-    # Test status=approved
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=approved",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        data = response.json()
-        kyc_list = data.get("kyc", [])
-        all_approved = all(item.get("status") == "approved" for item in kyc_list)
-        log_test("Test 2: status=approved filter", all_approved,
-                f"Found {len(kyc_list)} approved items")
-    else:
-        log_test("Test 2: status=approved filter", False, f"Status: {response.status_code}")
-    
-    # Test status=rejected
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=rejected",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        data = response.json()
-        kyc_list = data.get("kyc", [])
-        all_rejected = all(item.get("status") == "rejected" for item in kyc_list)
-        log_test("Test 2: status=rejected filter", all_rejected,
-                f"Found {len(kyc_list)} rejected items")
-    else:
-        log_test("Test 2: status=rejected filter", False, f"Status: {response.status_code}")
-    
-    # Test status=all
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=all",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        data = response.json()
-        total = data.get("total", 0)
-        log_test("Test 2: status=all returns all", True, f"Total: {total}")
-    else:
-        log_test("Test 2: status=all returns all", False, f"Status: {response.status_code}")
-    
-    # Test limit=1
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?limit=1",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        data = response.json()
-        kyc_list = data.get("kyc", [])
-        total = data.get("total", 0)
-        
-        log_test("Test 2: limit=1", len(kyc_list) <= 1,
-                f"Returned {len(kyc_list)} items, total: {total}")
-    else:
-        log_test("Test 2: limit=1", False, f"Status: {response.status_code}")
-
-def test_admin_kyc_detail(admin_token: str, kyc_id: str):
-    """Test 3: GET /api/admin/kyc/:id - detail SHOULD include full images"""
-    print("\n=== TEST 3: Admin KYC Detail (With Images) ===")
-    
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc/{kyc_id}",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    # Check status code
-    if response.status_code != 200:
-        log_test("Test 3: Status code", False, f"Expected 200, got {response.status_code}")
-        return
-    
-    log_test("Test 3: Status code", True, "200 OK")
-    
-    data = response.json()
-    
-    # Check response shape
-    has_kyc = "kyc" in data
-    has_user = "user" in data
-    
-    log_test("Test 3: Response shape", has_kyc and has_user,
-            f"Has kyc: {has_kyc}, user: {has_user}")
-    
-    kyc = data.get("kyc", {})
-    
-    # Check that images ARE present
-    has_doc_front = "doc_front" in kyc
-    has_doc_back = "doc_back" in kyc
-    has_selfie = "selfie" in kyc
-    
-    log_test("Test 3: Images present", 
-             has_doc_front and has_doc_back and has_selfie,
-             f"doc_front: {has_doc_front}, doc_back: {has_doc_back}, selfie: {has_selfie}")
-    
-    # Check that images are the full base64 strings (should start with data:image)
-    if has_doc_front:
-        is_valid = kyc["doc_front"].startswith("data:image")
-        log_test("Test 3: doc_front is full image", is_valid,
-                f"Starts with 'data:image': {is_valid}")
-    
-    # Check that user object doesn't include password_hash/salt
-    user = data.get("user", {})
-    has_password = "password_hash" in user or "salt" in user
-    
-    log_test("Test 3: User no password", not has_password,
-            "User object should not include password_hash or salt")
-
-def test_admin_kyc_nonexistent(admin_token: str):
-    """Test 4: GET /api/admin/kyc/:id with nonexistent ID should return 404"""
-    print("\n=== TEST 4: Admin KYC Nonexistent ===")
-    
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc/nonexistent-kyc-id-12345",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    log_test("Test 4: Nonexistent KYC returns 404", 
-             response.status_code == 404,
-             f"Status: {response.status_code}")
-
-def test_admin_kyc_approve_reject(admin_token: str, test_user1: Dict, test_user2: Dict):
-    """Test 5: POST /api/admin/kyc/:id/approve and reject"""
-    print("\n=== TEST 5: Admin KYC Approve/Reject ===")
-    
-    kyc_id1 = test_user1["kyc_id"]
-    kyc_id2 = test_user2["kyc_id"]
-    
-    # Approve first KYC
-    response = requests.post(
-        f"{BASE_URL}/admin/kyc/{kyc_id1}/approve",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    log_test("Test 5: Approve KYC", 
-             response.status_code == 200 and response.json().get("ok") == True,
-             f"Status: {response.status_code}")
-    
-    # Check that it appears in approved list
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=approved",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        kyc_list = response.json().get("kyc", [])
-        kyc_ids = [k.get("id") for k in kyc_list]
-        log_test("Test 5: Approved KYC in approved list", kyc_id1 in kyc_ids)
-    
-    # Check that it doesn't appear in pending list
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=pending",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        kyc_list = response.json().get("kyc", [])
-        kyc_ids = [k.get("id") for k in kyc_list]
-        log_test("Test 5: Approved KYC not in pending list", kyc_id1 not in kyc_ids)
-    
-    # Check user's kyc_status
-    response = requests.get(
-        f"{BASE_URL}/auth/me",
-        headers={"Authorization": f"Bearer {test_user1['token']}"}
-    )
-    
-    if response.status_code == 200:
-        user = response.json().get("user", {})
-        log_test("Test 5: User kyc_status approved", 
-                user.get("kyc_status") == "approved",
-                f"kyc_status: {user.get('kyc_status')}")
-    
-    # Reject second KYC
-    response = requests.post(
-        f"{BASE_URL}/admin/kyc/{kyc_id2}/reject",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    log_test("Test 5: Reject KYC", 
-             response.status_code == 200 and response.json().get("ok") == True,
-             f"Status: {response.status_code}")
-    
-    # Check that it appears in rejected list
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc?status=rejected",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code == 200:
-        kyc_list = response.json().get("kyc", [])
-        kyc_ids = [k.get("id") for k in kyc_list]
-        log_test("Test 5: Rejected KYC in rejected list", kyc_id2 in kyc_ids)
-
-def test_admin_notifications(admin_token: str):
-    """Test 6: GET /api/admin/notifications should not contain base64 images"""
-    print("\n=== TEST 6: Admin Notifications (No Images) ===")
-    
-    response = requests.get(
-        f"{BASE_URL}/admin/notifications",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code != 200:
-        log_test("Test 6: Status code", False, f"Expected 200, got {response.status_code}")
-        return
-    
-    log_test("Test 6: Status code", True, "200 OK")
-    
-    response_text = response.text
-    
-    # Check that response does NOT contain "data:image" substring
-    has_images = "data:image" in response_text
-    
-    log_test("Test 6: No base64 images", not has_images,
-            "Response should not contain 'data:image' substring")
-    
-    data = response.json()
-    items = data.get("items", [])
-    
-    # Check that kyc items still appear
-    kyc_items = [item for item in items if item.get("kind") == "kyc"]
-    
-    log_test("Test 6: KYC items present", len(kyc_items) > 0,
-            f"Found {len(kyc_items)} KYC items in notifications")
-
-def test_admin_user_detail(admin_token: str, user_id: str):
-    """Test 7: GET /api/admin/users/:id should not include images in kyc object"""
-    print("\n=== TEST 7: Admin User Detail (No Images in KYC) ===")
-    
-    response = requests.get(
-        f"{BASE_URL}/admin/users/{user_id}",
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    
-    if response.status_code != 200:
-        log_test("Test 7: Status code", False, f"Expected 200, got {response.status_code}")
-        return
-    
-    log_test("Test 7: Status code", True, "200 OK")
-    
-    data = response.json()
-    kyc = data.get("kyc")
-    
-    if kyc:
-        # Check that images are NOT present
-        has_doc_front = "doc_front" in kyc
-        has_doc_back = "doc_back" in kyc
-        has_selfie = "selfie" in kyc
-        
-        log_test("Test 7: No images in KYC", 
-                not (has_doc_front or has_doc_back or has_selfie),
-                f"doc_front: {has_doc_front}, doc_back: {has_doc_back}, selfie: {has_selfie}")
-        
-        # Check that other fields are present
-        has_status = "status" in kyc
-        has_id_type = "id_type" in kyc
-        
-        log_test("Test 7: KYC metadata present", has_status and has_id_type,
-                f"status: {has_status}, id_type: {has_id_type}")
-    else:
-        log_test("Test 7: KYC object", False, "No KYC object found")
-
-def test_concurrency_regression(admin_token: str):
-    """Test 8: Concurrency regression - parallel requests should not fail"""
-    print("\n=== TEST 8: Concurrency Regression ===")
-    
-    import concurrent.futures
-    
-    def make_request(url: str) -> int:
-        """Make a request and return status code"""
+        "phone": "+1234567890",
+        "password": "TestPass123"
+    })
+    
+    if "error" in result:
+        log(f"Failed to register user: {result}", "ERROR")
+        return False
+    
+    signup_id = result["data"].get("signup_id")
+    dev_otp = result["data"].get("dev_otp")
+    
+    if not signup_id:
+        log("No signup_id returned", "ERROR")
+        return False
+    
+    # If no dev_otp, fetch from DB (email sent successfully)
+    if not dev_otp:
+        log("No dev_otp in response, fetching from DB...", "INFO")
+        # Fetch OTP from MongoDB
+        import subprocess
+        cmd = f'mongosh mongodb://localhost:27017/aurela --quiet --eval "db.pending_signups.findOne({{id: \\"{signup_id}\\"}})"'
         try:
-            response = requests.get(url, timeout=10)
-            return response.status_code
+            output = subprocess.check_output(cmd, shell=True, text=True)
+            import re
+            match = re.search(r"code:\s*'(\d+)'", output)
+            if match:
+                dev_otp = match.group(1)
+                log(f"Found OTP from DB: {dev_otp}", "INFO")
+            else:
+                log(f"Could not parse OTP from DB output: {output}", "ERROR")
+                return False
         except Exception as e:
-            print(f"Request failed: {e}")
-            return 0
+            log(f"Failed to fetch OTP from DB: {e}", "ERROR")
+            return False
     
-    # Fire 8 parallel GET /api/rates requests
-    rates_urls = [f"{BASE_URL}/rates" for _ in range(8)]
+    log(f"Verifying with OTP: {dev_otp}")
+    result = test_request("POST", "/auth/register/verify", data={
+        "signup_id": signup_id,
+        "code": dev_otp
+    })
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        rates_results = list(executor.map(make_request, rates_urls))
+    if "error" in result:
+        log(f"Failed to verify user: {result}", "ERROR")
+        return False
     
-    all_200 = all(status == 200 for status in rates_results)
-    none_500 = all(status != 500 for status in rates_results)
+    test_user_token = result["data"].get("token")
+    user_id = result["data"].get("user", {}).get("id")
     
-    log_test("Test 8: Parallel /rates requests", all_200 and none_500,
-            f"Results: {rates_results}")
+    if not test_user_token:
+        log("No token returned from verification", "ERROR")
+        return False
     
-    # Fire 4 parallel GET /api/config requests
-    config_urls = [f"{BASE_URL}/config" for _ in range(4)]
+    log(f"✅ User registered and verified. User ID: {user_id}")
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        config_results = list(executor.map(make_request, config_urls))
+    # Submit KYC
+    log("Submitting KYC...")
+    result = test_request("POST", "/kyc", token=test_user_token, data={
+        "first_name": "Test",
+        "last_name": "User",
+        "mobile": "+1234567890",
+        "country": "United States",
+        "state": "California",
+        "city": "San Francisco",
+        "address": "123 Test St",
+        "postal_code": "94102",
+        "occupation": "Software Engineer",
+        "id_type": "passport",
+        "id_number": "TEST123456",
+        "doc_front": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "doc_back": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "selfie": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    })
     
-    all_200 = all(status == 200 for status in config_results)
-    none_500 = all(status != 500 for status in config_results)
+    if "error" in result:
+        log(f"Failed to submit KYC: {result}", "ERROR")
+        return False
     
-    log_test("Test 8: Parallel /config requests", all_200 and none_500,
-            f"Results: {config_results}")
+    kyc_id = result["data"].get("kyc", {}).get("id")
+    log(f"✅ KYC submitted. KYC ID: {kyc_id}")
+    
+    # Admin approve KYC
+    log("Admin approving KYC...")
+    result = test_request("POST", f"/admin/kyc/{kyc_id}/approve", token=admin_token)
+    
+    if "error" in result:
+        log(f"Failed to approve KYC: {result}", "ERROR")
+        return False
+    
+    log("✅ KYC approved")
+    return True
 
-def test_quick_regression(admin_token: str, user_token: str):
-    """Test 9: Quick regression - basic endpoints still work"""
-    print("\n=== TEST 9: Quick Regression ===")
+def test_version_endpoint():
+    """Test 1: GET /api/version (no auth)"""
+    log("\n=== TEST 1: GET /api/version ===")
     
-    # GET /api/wallets (authenticated)
-    response = requests.get(
-        f"{BASE_URL}/wallets",
-        headers={"Authorization": f"Bearer {user_token}"}
-    )
+    result = test_request("GET", "/version")
     
-    log_test("Test 9: GET /wallets", response.status_code == 200,
-            f"Status: {response.status_code}")
+    if "error" in result:
+        log("❌ FAIL: Version endpoint failed", "ERROR")
+        return False
+    
+    data = result["data"]
+    
+    # Check version
+    if data.get("version") != "1.4.0":
+        log(f"❌ FAIL: Expected version 1.4.0, got {data.get('version')}", "ERROR")
+        return False
+    
+    # Check whats_new_title
+    if data.get("whats_new_title") != "Aurela Updated":
+        log(f"❌ FAIL: Expected whats_new_title 'Aurela Updated', got {data.get('whats_new_title')}", "ERROR")
+        return False
+    
+    # Check whats_new is array
+    whats_new = data.get("whats_new")
+    if not isinstance(whats_new, list) or len(whats_new) == 0:
+        log(f"❌ FAIL: whats_new should be non-empty array, got {whats_new}", "ERROR")
+        return False
+    
+    # Check build_time present
+    if not data.get("build_time"):
+        log("❌ FAIL: build_time not present", "ERROR")
+        return False
+    
+    log(f"✅ PASS: Version endpoint working correctly")
+    log(f"  - version: {data.get('version')}")
+    log(f"  - whats_new_title: {data.get('whats_new_title')}")
+    log(f"  - whats_new items: {len(whats_new)}")
+    log(f"  - build_time: {data.get('build_time')}")
+    return True
+
+def test_admin_cards_list():
+    """Test 2: GET /api/admin/cards with user population"""
+    log("\n=== TEST 2: GET /api/admin/cards ===")
+    
+    result = test_request("GET", "/admin/cards", token=admin_token)
+    
+    if "error" in result:
+        log("❌ FAIL: Admin cards list failed", "ERROR")
+        return False
+    
+    data = result["data"]
+    cards = data.get("cards", [])
+    
+    log(f"Found {len(cards)} cards")
+    
+    # Find our test card
+    test_card = None
+    for card in cards:
+        if card.get("user", {}).get("email") == test_user_email:
+            test_card = card
+            break
+    
+    if not test_card:
+        log(f"❌ FAIL: Test card not found in list", "ERROR")
+        return False
+    
+    # Verify user object structure
+    user = test_card.get("user")
+    if not user:
+        log("❌ FAIL: Card missing user object", "ERROR")
+        return False
+    
+    # Check required fields
+    required_fields = ["id", "username", "email", "kyc_status"]
+    for field in required_fields:
+        if field not in user:
+            log(f"❌ FAIL: User object missing required field: {field}", "ERROR")
+            return False
+    
+    # Check forbidden fields
+    forbidden_fields = ["password_hash", "salt", "_id"]
+    for field in forbidden_fields:
+        if field in user:
+            log(f"❌ FAIL: User object contains forbidden field: {field}", "ERROR")
+            return False
+    
+    log(f"✅ PASS: Admin cards list working correctly")
+    log(f"  - Test card found with user: {user.get('email')}")
+    log(f"  - User has required fields: {', '.join(required_fields)}")
+    log(f"  - User does not have forbidden fields")
+    return True
+
+def test_admin_card_detail():
+    """Test 3: GET /api/admin/cards/<card_id> with full details"""
+    log("\n=== TEST 3: GET /api/admin/cards/<card_id> ===")
+    
+    result = test_request("GET", f"/admin/cards/{test_card_id}", token=admin_token)
+    
+    if "error" in result:
+        log("❌ FAIL: Admin card detail failed", "ERROR")
+        return False
+    
+    data = result["data"]
+    
+    # Check required keys
+    required_keys = ["card", "user", "kyc", "usdt_wallet", "other_cards", "explorer_url"]
+    for key in required_keys:
+        if key not in data:
+            log(f"❌ FAIL: Response missing required key: {key}", "ERROR")
+            return False
+    
+    # Verify card
+    card = data.get("card")
+    if card.get("id") != test_card_id:
+        log(f"❌ FAIL: Card ID mismatch", "ERROR")
+        return False
+    
+    if card.get("activation_tx_hash") != "0xabc123def456789":
+        log(f"❌ FAIL: activation_tx_hash mismatch: {card.get('activation_tx_hash')}", "ERROR")
+        return False
+    
+    # Verify user
+    user = data.get("user")
+    if user.get("email") != test_user_email:
+        log(f"❌ FAIL: User email mismatch", "ERROR")
+        return False
+    
+    if "password_hash" in user or "salt" in user:
+        log(f"❌ FAIL: User contains password_hash or salt", "ERROR")
+        return False
+    
+    # Verify KYC (should not have doc images)
+    kyc = data.get("kyc")
+    if kyc:
+        forbidden_kyc_fields = ["doc_front", "doc_back", "selfie"]
+        for field in forbidden_kyc_fields:
+            if field in kyc:
+                log(f"❌ FAIL: KYC contains forbidden field: {field}", "ERROR")
+                return False
+    
+    # Verify USDT wallet
+    usdt_wallet = data.get("usdt_wallet")
+    if not isinstance(usdt_wallet.get("balance"), (int, float)):
+        log(f"❌ FAIL: USDT wallet balance is not a number", "ERROR")
+        return False
+    
+    # Verify other_cards is array
+    other_cards = data.get("other_cards")
+    if not isinstance(other_cards, list):
+        log(f"❌ FAIL: other_cards is not an array", "ERROR")
+        return False
+    
+    # Verify explorer_url
+    explorer_url = data.get("explorer_url")
+    if not explorer_url or not explorer_url.startswith("https://etherscan.io/tx/0xabc123def456789"):
+        log(f"❌ FAIL: explorer_url incorrect: {explorer_url}", "ERROR")
+        return False
+    
+    log(f"✅ PASS: Admin card detail working correctly")
+    log(f"  - Card ID: {card.get('id')}")
+    log(f"  - Activation TX: {card.get('activation_tx_hash')}")
+    log(f"  - User email: {user.get('email')}")
+    log(f"  - USDT balance: {usdt_wallet.get('balance')}")
+    log(f"  - Other cards: {len(other_cards)}")
+    log(f"  - Explorer URL: {explorer_url}")
+    return True
+
+def test_card_not_found():
+    """Test 4: GET /api/admin/cards/does-not-exist -> 404"""
+    log("\n=== TEST 4: GET /api/admin/cards/does-not-exist ===")
+    
+    result = test_request("GET", "/admin/cards/does-not-exist", token=admin_token, expected_status=404)
+    
+    if result.get("status") != 404:
+        log(f"❌ FAIL: Expected 404, got {result.get('status')}", "ERROR")
+        return False
+    
+    log(f"✅ PASS: Non-existent card returns 404")
+    return True
+
+def test_card_approve_regression():
+    """Test 5: Regression - POST /api/admin/cards/<card_id>/approve with activate_now"""
+    log("\n=== TEST 5: Regression - Card Approve ===")
+    
+    # Approve with activate_now
+    result = test_request("POST", f"/admin/cards/{test_card_id}/approve", 
+                         token=admin_token, 
+                         data={"activate_now": True})
+    
+    if "error" in result:
+        log("❌ FAIL: Card approve failed", "ERROR")
+        return False
+    
+    # Verify card is active
+    time.sleep(1)  # Give it a moment
+    result = test_request("GET", "/cards", token=test_user_token)
+    
+    if "error" in result:
+        log("❌ FAIL: Failed to get user cards", "ERROR")
+        return False
+    
+    cards = result["data"].get("cards", [])
+    approved_card = None
+    for card in cards:
+        if card.get("id") == test_card_id:
+            approved_card = card
+            break
+    
+    if not approved_card:
+        log("❌ FAIL: Approved card not found", "ERROR")
+        return False
+    
+    if approved_card.get("status") != "active":
+        log(f"❌ FAIL: Card status is {approved_card.get('status')}, expected 'active'", "ERROR")
+        return False
+    
+    log(f"✅ PASS: Card approve with activate_now working correctly")
+    log(f"  - Card status: {approved_card.get('status')}")
+    return True
+
+def test_card_delete_regression():
+    """Test 5b: Regression - DELETE /api/admin/cards/<card_id>"""
+    log("\n=== TEST 5b: Regression - Card Delete ===")
+    
+    # Create another card to delete
+    log("Creating another card for delete test...")
+    result = test_request("POST", "/cards/request", 
+                         token=test_user_token, 
+                         data={"tier": "premium"})
+    
+    if "error" in result:
+        log(f"Failed to create premium card: {result}", "ERROR")
+        return False
+    
+    premium_card_id = result["data"].get("card", {}).get("id")
+    
+    # Activate it
+    result = test_request("POST", f"/cards/{premium_card_id}/activate", 
+                         token=test_user_token, 
+                         data={
+                             "tx_hash": "0xdef456789abc123",
+                             "network": "ERC20"
+                         })
+    
+    if "error" in result:
+        log(f"Failed to activate premium card: {result}", "ERROR")
+        return False
+    
+    # Delete it as admin
+    result = test_request("DELETE", f"/admin/cards/{premium_card_id}", token=admin_token)
+    
+    if "error" in result:
+        log("❌ FAIL: Card delete failed", "ERROR")
+        return False
+    
+    # Verify it's deleted
+    result = test_request("GET", f"/admin/cards/{premium_card_id}", token=admin_token, expected_status=404)
+    
+    if result.get("status") != 404:
+        log(f"❌ FAIL: Deleted card still exists", "ERROR")
+        return False
+    
+    log(f"✅ PASS: Card delete working correctly")
+    return True
+
+def test_authorization():
+    """Test 6: Authorization tests (403/401)"""
+    log("\n=== TEST 6: Authorization Tests ===")
+    
+    # Non-admin user trying to access admin cards list
+    result = test_request("GET", "/admin/cards", token=test_user_token, expected_status=403)
+    
+    if result.get("status") != 403:
+        log(f"❌ FAIL: Non-admin should get 403, got {result.get('status')}", "ERROR")
+        return False
+    
+    log("✅ Non-admin user blocked from GET /admin/cards (403)")
+    
+    # Non-admin user trying to access admin card detail
+    result = test_request("GET", f"/admin/cards/{test_card_id}", token=test_user_token, expected_status=403)
+    
+    if result.get("status") != 403:
+        log(f"❌ FAIL: Non-admin should get 403, got {result.get('status')}", "ERROR")
+        return False
+    
+    log("✅ Non-admin user blocked from GET /admin/cards/<id> (403)")
+    
+    # Unauthenticated request
+    result = test_request("GET", "/admin/cards", expected_status=401)
+    
+    if result.get("status") != 401:
+        log(f"❌ FAIL: Unauthenticated should get 401, got {result.get('status')}", "ERROR")
+        return False
+    
+    log("✅ Unauthenticated request blocked (401)")
+    
+    log(f"✅ PASS: All authorization tests passed")
+    return True
+
+def test_quick_regression():
+    """Test 7: Quick regression on other endpoints"""
+    log("\n=== TEST 7: Quick Regression ===")
+    
+    # GET /api/admin/kyc
+    result = test_request("GET", "/admin/kyc", token=admin_token)
+    if "error" in result:
+        log("❌ FAIL: GET /admin/kyc failed", "ERROR")
+        return False
+    
+    # Verify images are stripped
+    kyc_list = result["data"].get("kyc", [])
+    for kyc in kyc_list:
+        if "doc_front" in kyc or "doc_back" in kyc or "selfie" in kyc:
+            log("❌ FAIL: KYC list contains image fields", "ERROR")
+            return False
+    
+    log("✅ GET /admin/kyc working (images stripped)")
     
     # GET /api/rates
-    response = requests.get(f"{BASE_URL}/rates")
+    result = test_request("GET", "/rates")
+    if "error" in result:
+        log("❌ FAIL: GET /rates failed", "ERROR")
+        return False
     
-    log_test("Test 9: GET /rates", response.status_code == 200,
-            f"Status: {response.status_code}")
+    log("✅ GET /rates working")
     
-    # Non-admin user calling GET /api/admin/kyc should return 403 or 401
-    response = requests.get(
-        f"{BASE_URL}/admin/kyc",
-        headers={"Authorization": f"Bearer {user_token}"}
-    )
+    # GET /api/wallets
+    result = test_request("GET", "/wallets", token=test_user_token)
+    if "error" in result:
+        log("❌ FAIL: GET /wallets failed", "ERROR")
+        return False
     
-    log_test("Test 9: Non-admin /admin/kyc blocked", 
-            response.status_code in [401, 403],
-            f"Status: {response.status_code}")
+    log("✅ GET /wallets working")
+    
+    log(f"✅ PASS: All regression tests passed")
+    return True
 
 def main():
-    """Main test execution"""
-    print("=" * 80)
-    print("BACKEND TEST: KYC Admin Endpoints - Production Bug Fix")
-    print("=" * 80)
+    """Run all tests"""
+    global admin_token, test_card_id
+    
+    log("=" * 60)
+    log("AURELA BACKEND TEST SUITE - Card Approvals & Version")
+    log("=" * 60)
     
     # Login as admin
-    admin_token = admin_login()
+    log("\n=== Admin Login ===")
+    result = test_request("POST", "/auth/login", data={
+        "identifier": ADMIN_EMAIL,
+        "password": ADMIN_PASSWORD
+    })
     
-    # Register two test users and submit KYC with large images
-    test_user1 = register_test_user(admin_token)
-    kyc_id1 = submit_kyc_with_large_images(test_user1["token"], test_user1["user_id"])
-    test_user1["kyc_id"] = kyc_id1
+    if "error" in result:
+        log("❌ CRITICAL: Admin login failed", "ERROR")
+        sys.exit(1)
     
-    test_user2 = register_test_user(admin_token)
-    kyc_id2 = submit_kyc_with_large_images(test_user2["token"], test_user2["user_id"])
-    test_user2["kyc_id"] = kyc_id2
+    admin_token = result["data"].get("token")
+    log(f"✅ Admin logged in successfully")
     
-    # Run all tests
-    test_admin_kyc_list(admin_token, kyc_id1)
-    test_admin_kyc_filters(admin_token)
-    test_admin_kyc_detail(admin_token, kyc_id1)
-    test_admin_kyc_nonexistent(admin_token)
-    test_admin_kyc_approve_reject(admin_token, test_user1, test_user2)
-    test_admin_notifications(admin_token)
-    test_admin_user_detail(admin_token, test_user1["user_id"])
-    test_concurrency_regression(admin_token)
-    test_quick_regression(admin_token, test_user1["token"])
+    # Setup test user
+    if not setup_test_user():
+        log("❌ CRITICAL: Failed to setup test user", "ERROR")
+        sys.exit(1)
     
-    # Print summary
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
-    print(f"Total tests: {tests_passed + tests_failed}")
-    print(f"✅ Passed: {tests_passed}")
-    print(f"❌ Failed: {tests_failed}")
-    print(f"Success rate: {tests_passed / (tests_passed + tests_failed) * 100:.1f}%")
-    print("=" * 80)
+    # Create test card
+    log("\n=== Creating test card ===")
+    result = test_request("POST", "/cards/request", 
+                         token=test_user_token, 
+                         data={"tier": "basic"})
     
-    # Exit with appropriate code
-    sys.exit(0 if tests_failed == 0 else 1)
+    if "error" in result:
+        log(f"❌ CRITICAL: Failed to create card: {result}", "ERROR")
+        sys.exit(1)
+    
+    test_card_id = result["data"].get("card", {}).get("id")
+    log(f"✅ Card created: {test_card_id}")
+    
+    # Activate card
+    log("Activating card with tx_hash...")
+    result = test_request("POST", f"/cards/{test_card_id}/activate", 
+                         token=test_user_token, 
+                         data={
+                             "tx_hash": "0xabc123def456789",
+                             "network": "ERC20"
+                         })
+    
+    if "error" in result:
+        log(f"❌ CRITICAL: Failed to activate card: {result}", "ERROR")
+        sys.exit(1)
+    
+    log(f"✅ Card activated (status: pending_verification)")
+    
+    # Run tests
+    tests = [
+        ("Version Endpoint", test_version_endpoint),
+        ("Admin Cards List", test_admin_cards_list),
+        ("Admin Card Detail", test_admin_card_detail),
+        ("Card Not Found", test_card_not_found),
+        ("Card Approve Regression", test_card_approve_regression),
+        ("Card Delete Regression", test_card_delete_regression),
+        ("Authorization Tests", test_authorization),
+        ("Quick Regression", test_quick_regression),
+    ]
+    
+    passed = 0
+    failed = 0
+    
+    for test_name, test_func in tests:
+        try:
+            if test_func():
+                passed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            log(f"❌ FAIL: {test_name} - Exception: {str(e)}", "ERROR")
+            failed += 1
+    
+    # Summary
+    log("\n" + "=" * 60)
+    log("TEST SUMMARY")
+    log("=" * 60)
+    log(f"Total Tests: {passed + failed}")
+    log(f"Passed: {passed}")
+    log(f"Failed: {failed}")
+    
+    if failed == 0:
+        log("\n✅ ALL TESTS PASSED!")
+        sys.exit(0)
+    else:
+        log(f"\n❌ {failed} TEST(S) FAILED")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

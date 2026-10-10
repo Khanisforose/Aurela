@@ -164,6 +164,16 @@ function now() { return new Date() }
 // Mongo projection that excludes the heavy base64 KYC document images from list responses.
 // Each image can be several MB, so lists must only carry metadata (images are loaded per-record).
 const KYC_LIST_PROJECTION = { doc_front: 0, doc_back: 0, selfie: 0 }
+// Compact, safe owner summary attached to admin list rows (never includes secrets)
+const ADMIN_USER_SUMMARY_PROJECTION = { _id: 0, id: 1, username: 1, email: 1, full_name: 1, first_name: 1, last_name: 1, user_code: 1, kyc_status: 1, country: 1, phone: 1, status: 1, created_at: 1 }
+
+// "What's new" shown once per version to every signed-in user (Aurela Updated popup)
+const WHATS_NEW = [
+  'Wallets tab on mobile now shows fiat and crypto together, sorted by balance',
+  'Faster, more reliable KYC Review for administrators',
+  'Card approvals now show who requested each card with full details',
+  'Improved stability — graceful recovery instead of blank error screens',
+]
 
 function clean(doc) {
   if (!doc) return doc
@@ -655,6 +665,8 @@ async function handleRoute(request, { params }) {
         build_time: BUILD_TIME,
         min_supported_client: APP_VERSION,   // hard-cut version; clients older than this get force-refreshed
         changelog: 'Swap, Portfolio Chart, Push Notifications, Deep Links, Chain Scan, Partners.',
+        whats_new_title: 'Aurela Updated',
+        whats_new: WHATS_NEW,
       }))
     }
 
@@ -1818,8 +1830,36 @@ async function handleRoute(request, { params }) {
       }
       // Card activation admin approval
       if (route === '/admin/cards' && method === 'GET') {
-        const list = await db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation','activating'] } }).sort({ activation_submitted_at: -1 }).toArray()
-        return handleCORS(NextResponse.json({ cards: clean(list) }))
+        const list = await db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation','activating'] } }).sort({ activation_submitted_at: -1, created_at: -1 }).toArray()
+        // Enrich each card with a compact owner summary so admins can see WHO requested it
+        const userIds = [...new Set(list.map(c => c.user_id).filter(Boolean))]
+        const owners = userIds.length ? await db.collection('users').find({ id: { $in: userIds } }, { projection: ADMIN_USER_SUMMARY_PROJECTION }).toArray() : []
+        const byId = Object.fromEntries(owners.map(u => [u.id, u]))
+        const enriched = list.map(c => ({ ...c, user: byId[c.user_id] || null }))
+        return handleCORS(NextResponse.json({ cards: clean(enriched) }))
+      }
+      // Admin: single card detail for the review dialog (card + owner + payment context)
+      if (route.startsWith('/admin/cards/') && route.split('/').length === 4 && method === 'GET') {
+        const cardId = route.split('/')[3]
+        const card = await db.collection('cards').findOne({ id: cardId })
+        if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        const [owner, kycRec, usdtWallet, otherCards] = await Promise.all([
+          db.collection('users').findOne({ id: card.user_id }),
+          db.collection('kyc').find({ user_id: card.user_id }, { projection: KYC_LIST_PROJECTION }).sort({ submitted_at: -1 }).limit(1).toArray(),
+          db.collection('wallets').findOne({ user_id: card.user_id, currency: 'USDT' }),
+          db.collection('cards').find({ user_id: card.user_id, id: { $ne: cardId }, status: { $ne: 'deleted' } }, { projection: { id: 1, tier: 1, status: 1, created_at: 1 } }).toArray(),
+        ])
+        const net = String(card.activation_network_used || card.activation_network || '').toUpperCase()
+        const explorers = { ERC20: 'https://etherscan.io/tx/', TRC20: 'https://tronscan.org/#/transaction/', BEP20: 'https://bscscan.com/tx/', POLYGON: 'https://polygonscan.com/tx/', SOLANA: 'https://solscan.io/tx/' }
+        const explorer_url = card.activation_tx_hash && explorers[net] ? explorers[net] + card.activation_tx_hash : null
+        return handleCORS(NextResponse.json({
+          card: clean(card),
+          user: clean(owner),
+          kyc: kycRec[0] ? clean(kycRec[0]) : null,
+          usdt_wallet: usdtWallet ? { balance: usdtWallet.balance, balance_usd: usdtWallet.balance_usd } : null,
+          other_cards: clean(otherCards),
+          explorer_url,
+        }))
       }
       // Admin: withdrawal requests
       if (route === '/admin/withdrawals' && method === 'GET') {

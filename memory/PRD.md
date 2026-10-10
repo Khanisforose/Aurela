@@ -14,6 +14,8 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - 30-day portfolio chart (atomic snapshots)
 
 ## This session (DONE)
+- "Aurela Updated" one-time popup per app version (WhatsNew.jsx; content from GET /api/version → WHATS_NEW in route.js; version bumped to 1.4.0). To re-trigger on a future deploy: bump package.json version + edit WHATS_NEW bullets.
+- Admin Card Approvals: list shows requester (name / @username / email), "Open request" dialog with requester profile, KYC status, USDT balance, card + payment details, tx hash with explorer link, approve/activate/reject/delete inside. New GET /admin/cards/:id.
 - Mobile "Wallets" tab now shows fiat + crypto combined, All/Fiat/Crypto filter, sorted by balance (funded first, empty last).
 - Fixed production crash on admin KYC Review: list endpoints no longer return base64 doc images (projection); list supports `?status=&limit=`, returns `{kyc,total,pending}`. Detail endpoint still returns images on demand.
 - KycAdmin UI: loading / visible error + retry / status filter chips / pending count; silent background refresh paused while review dialog is open.

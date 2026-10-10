@@ -1097,40 +1097,166 @@ function DepositsAdmin() {
 function CardApprovalsAdmin() {
   const { api, tick } = useApp()
   const [list, setList] = useState([])
-  const load = async () => { try { const { cards } = await api.get('/admin/cards'); setList(cards) } catch(e) {} }
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [open, setOpen] = useState(null) // { card, user, kyc, usdt_wallet, other_cards, explorer_url }
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const res = await api.get('/admin/cards')
+      setList(Array.isArray(res?.cards) ? res.cards : [])
+      setError('')
+    } catch(e) { setError(e?.message || 'Failed to load card requests') }
+    finally { if (!silent) setLoading(false) }
+  }
   useEffect(() => { load() }, [])
-  useEffect(() => { load() }, [tick])
+  useEffect(() => { if (!open) load(true) }, [tick])
+  const openDetail = async (c) => {
+    setDetailLoading(true)
+    try {
+      const res = await api.get(`/admin/cards/${c.id}`)
+      if (!res?.card) throw new Error('Card not found')
+      setOpen(res)
+    } catch(e) { toast.error(e?.message || 'Could not open card request') }
+    finally { setDetailLoading(false) }
+  }
   const action = async (c, act, activate_now=false) => {
-    try { await api.post(`/admin/cards/${c.id}/${act}`, { activate_now }); toast.success(`Card ${act}d`); load() }
-    catch(e) { toast.error(e.message) }
+    setBusy(true)
+    try { await api.post(`/admin/cards/${c.id}/${act}`, { activate_now }); toast.success(`Card ${act}d`); setOpen(null); load() }
+    catch(e) { toast.error(e?.message || 'Action failed') }
+    finally { setBusy(false) }
   }
   const del = async (c) => {
     if (typeof window !== 'undefined' && !window.confirm('Permanently delete this card record?')) return
-    try { await api.del(`/admin/cards/${c.id}`); toast.success('Card deleted'); load() } catch(e) { toast.error(e.message) }
+    try { await api.del(`/admin/cards/${c.id}`); toast.success('Card deleted'); setOpen(null); load() } catch(e) { toast.error(e?.message || 'Delete failed') }
   }
+  const ownerName = (u) => u?.full_name || [u?.first_name, u?.last_name].filter(Boolean).join(' ') || u?.username || '—'
+  const statusLabel = (s) => s === 'pending_verification' ? 'Awaiting verification' : s === 'pending_activation' ? 'Awaiting payment' : s === 'activating' ? 'Activating (24h)' : s
+  const statusClass = (s) => s === 'pending_verification' ? 'border-gold-500/40 text-gold' : s === 'activating' ? 'border-emerald-500/40 text-emerald-400' : 'border-gold-500/20 text-muted-foreground'
+  const isActionable = (c) => c?.status === 'pending_verification' || c?.status === 'pending_activation'
+  const copy = (v, label) => { try { navigator.clipboard.writeText(String(v)); toast.success(`${label} copied`) } catch(e) {} }
+
   return (
     <div className="space-y-3">
-      {list.length === 0 && <div className="text-muted-foreground text-sm">No pending card activations.</div>}
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs text-muted-foreground">{list.length} open request{list.length === 1 ? '' : 's'}</div>
+        <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-7 px-2"><RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`}/></Button>
+      </div>
+      {error && (
+        <div className="card-luxury rounded-2xl p-5 border border-red-500/30 text-sm">
+          <div className="text-red-400">Could not load card requests: {error}</div>
+          <Button size="sm" variant="outline" onClick={() => load()} className="mt-3 border-gold-500/40">Retry</Button>
+        </div>
+      )}
+      {loading && !error && <div className="text-muted-foreground text-sm flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Loading card requests…</div>}
+      {!loading && !error && list.length === 0 && <div className="text-muted-foreground text-sm">No pending card activations.</div>}
       {list.map(c => (
-        <div key={c.id} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs flex-1 min-w-0">
-            <div><div className="text-muted-foreground uppercase text-[10px]">User</div><div className="truncate">{c.user_id}</div></div>
+        <div key={c.id} data-testid={`card-request-${c.id}`} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs flex-1 min-w-0">
+            <div className="col-span-2 md:col-span-2">
+              <div className="text-muted-foreground uppercase text-[10px]">Requested by</div>
+              <div className="truncate font-medium">{ownerName(c.user)}</div>
+              <div className="truncate text-muted-foreground">@{c.user?.username || '—'} · {c.user?.email || c.user_id}</div>
+            </div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Tier</div><div className="capitalize">{c.tier}</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Fee</div><div className="font-mono">{c.activation_fee_usdt} USDT</div></div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Network</div><div>{c.activation_network_used || c.activation_network}</div></div>
-            <div className="col-span-2 md:col-span-1"><div className="text-muted-foreground uppercase text-[10px]">Tx hash</div><div className="font-mono text-[10px] break-all">{c.activation_tx_hash || '—'}</div></div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className="border-gold-500/40 text-gold">{c.status}</Badge></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{(c.activation_submitted_at || c.created_at) ? new Date(c.activation_submitted_at || c.created_at).toLocaleString() : '—'}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusClass(c.status)}>{statusLabel(c.status)}</Badge></div>
           </div>
-          {(c.status === 'pending_verification' || c.status === 'pending_activation') && (
-            <div className="flex gap-2 shrink-0 flex-wrap justify-end">
-              <Button size="sm" onClick={()=>action(c,'approve')} className="gold-btn">Approve (24h)</Button>
-              <Button size="sm" onClick={()=>action(c,'approve', true)} variant="outline" className="border-gold-500/40">Activate now</Button>
-              <Button size="sm" variant="outline" onClick={()=>action(c,'reject')} className="border-red-500/40 text-red-400">Reject</Button>
-              <Button size="sm" variant="ghost" onClick={()=>del(c)} className="text-red-400 hover:bg-red-500/10">Delete</Button>
-            </div>
-          )}
+          <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+            <Button size="sm" variant="outline" onClick={()=>openDetail(c)} disabled={detailLoading} className="border-gold-500/40" data-testid={`card-open-${c.id}`}>{detailLoading ? <Loader2 className="h-3 w-3 animate-spin"/> : 'Open request'}</Button>
+            {isActionable(c) && <Button size="sm" onClick={()=>action(c,'approve')} disabled={busy} className="gold-btn">Approve (24h)</Button>}
+          </div>
         </div>
       ))}
+
+      <Dialog open={!!open} onOpenChange={v => !v && setOpen(null)}>
+        <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-3xl max-h-[90vh] overflow-y-auto" data-testid="card-request-dialog">
+          <DialogHeader><DialogTitle className="font-display">Card activation request</DialogTitle></DialogHeader>
+          {open && (
+            <div className="space-y-5">
+              {/* Requester */}
+              <div className="rounded-xl bg-secondary/60 p-4">
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Requested by</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                  {[
+                    ['Full name', ownerName(open.user)],
+                    ['Username', open.user?.username ? '@' + open.user.username : ''],
+                    ['Email', open.user?.email],
+                    ['Phone', open.user?.phone],
+                    ['Aurela ID', open.user?.user_code],
+                    ['Country', open.user?.country || open.kyc?.country],
+                    ['KYC status', open.user?.kyc_status || 'unverified'],
+                    ['Account status', open.user?.status || 'active'],
+                    ['Member since', open.user?.created_at ? new Date(open.user.created_at).toLocaleDateString() : ''],
+                    ['USDT wallet balance', open.usdt_wallet ? `${open.usdt_wallet.balance} USDT` : ''],
+                  ].map(([label, val]) => (
+                    <div key={label}>
+                      <div className="text-[10px] uppercase text-muted-foreground">{label}</div>
+                      <div className={`text-sm break-all ${label === 'KYC status' ? (val === 'approved' ? 'text-emerald-400' : 'text-gold') : ''}`}>{val || <span className="text-muted-foreground">—</span>}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Card + payment */}
+              <div className="rounded-xl bg-secondary/60 p-4">
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Card & payment</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                  {[
+                    ['Tier', `${open.card?.tier_name || open.card?.tier || ''}`],
+                    ['Card holder', open.card?.holder],
+                    ['Card number', open.card?.number ? '•••• •••• •••• ' + String(open.card.number).replace(/\s/g,'').slice(-4) : ''],
+                    ['Expiry', open.card?.expiry],
+                    ['Activation fee', open.card?.activation_fee_usdt != null ? `${open.card.activation_fee_usdt} USDT` : ''],
+                    ['Network used', open.card?.activation_network_used || open.card?.activation_network],
+                    ['Pay-to wallet', open.card?.activation_wallet],
+                    ['Requested at', open.card?.created_at ? new Date(open.card.created_at).toLocaleString() : ''],
+                    ['Tx submitted at', open.card?.activation_submitted_at ? new Date(open.card.activation_submitted_at).toLocaleString() : ''],
+                    ['Status', statusLabel(open.card?.status)],
+                  ].map(([label, val]) => (
+                    <div key={label}>
+                      <div className="text-[10px] uppercase text-muted-foreground">{label}</div>
+                      <div className="text-sm break-all">{val || <span className="text-muted-foreground">—</span>}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-4">
+                  <div className="text-[10px] uppercase text-muted-foreground">Transaction hash</div>
+                  {open.card?.activation_tx_hash ? (
+                    <div className="mt-1 p-3 rounded-lg bg-onyx-950 flex items-start justify-between gap-3">
+                      <div className="font-mono text-gold text-xs break-all">{open.card.activation_tx_hash}</div>
+                      <div className="flex gap-2 shrink-0">
+                        <button onClick={() => copy(open.card.activation_tx_hash, 'Tx hash')} className="text-muted-foreground hover:text-gold"><Copy className="h-3.5 w-3.5"/></button>
+                        {open.explorer_url && <a href={open.explorer_url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-gold underline whitespace-nowrap">View on explorer</a>}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground mt-1">User has not submitted a payment transaction yet.</div>
+                  )}
+                </div>
+              </div>
+
+              {Array.isArray(open.other_cards) && open.other_cards.length > 0 && (
+                <div className="text-xs text-muted-foreground">This user also holds {open.other_cards.length} other card{open.other_cards.length === 1 ? '' : 's'}: {open.other_cards.map(oc => `${oc.tier} (${oc.status})`).join(', ')}</div>
+              )}
+
+              {isActionable(open.card) ? (
+                <DialogFooter className="gap-2 flex-wrap">
+                  <Button variant="ghost" onClick={() => del(open.card)} disabled={busy} className="text-red-400 hover:bg-red-500/10 mr-auto">Delete</Button>
+                  <Button variant="outline" onClick={() => action(open.card, 'reject')} disabled={busy} className="border-red-500/40 text-red-400 hover:bg-red-500/10">Reject</Button>
+                  <Button variant="outline" onClick={() => action(open.card, 'approve', true)} disabled={busy} className="border-gold-500/40">Activate now</Button>
+                  <Button onClick={() => action(open.card, 'approve')} disabled={busy} className="gold-btn">Approve (24h)</Button>
+                </DialogFooter>
+              ) : (
+                <div className="text-center text-xs text-muted-foreground">This card is {statusLabel(open.card?.status)}{open.card?.usable_at ? ` · usable from ${new Date(open.card.usable_at).toLocaleString()}` : ''}.</div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
