@@ -35,7 +35,7 @@ export function LocationSummary({ location, history = [], compact = false }) {
           {(dev.user_agent || dev.platform) && (
             <div className="text-muted-foreground flex items-center gap-1"><Smartphone className="h-3 w-3"/> {dev.platform || ''}{dev.platform && shortUa(dev.user_agent) ? ' · ' : ''}{shortUa(dev.user_agent)}{dev.standalone ? ' · installed app' : ''}{dev.timezone ? ` · ${dev.timezone}` : ''}</div>
           )}
-          <div className="text-muted-foreground">{location.at ? new Date(location.at).toLocaleString() : ''}
+          <div className="text-muted-foreground">{location.at ? new Date(location.at).toLocaleString() : ''}{location.updates > 1 ? ` · ${location.updates} updates` : ''}
             {maps && <a href={maps} target="_blank" rel="noopener noreferrer" className="ml-2 text-gold underline inline-flex items-center gap-0.5">Open in Maps <ExternalLink className="h-3 w-3"/></a>}
           </div>
         </div>

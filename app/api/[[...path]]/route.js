@@ -340,6 +340,14 @@ function clientIpFromRequest(request) {
   const ip = (xff.split(',')[0] || h.get('x-real-ip') || h.get('cf-connecting-ip') || '').trim()
   return ip || null
 }
+// Great-circle distance in km between two lat/lng points
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => (Number(d) * Math.PI) / 180
+  const R = 6371
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)))
+}
 // Reverse-geocode coordinates → city/state/country using OpenStreetMap Nominatim (keyless; needs a UA header). Best-effort.
 async function reverseGeocode(lat, lng) {
   try {
@@ -1191,14 +1199,26 @@ async function handleRoute(request, { params }) {
       }
       const lat = Number(body?.lat), lng = Number(body?.lng)
       if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return handleCORS(NextResponse.json({ error: 'Invalid coordinates' }, { status: 400 }))
-      const address = await reverseGeocode(lat, lng)
+      // Silent background updates arrive often: reuse the previous address if the user hasn't moved (~<1 km)
+      // instead of calling the geocoder every time, and avoid piling up identical history rows.
+      const prev = user.last_location?.status === 'granted' ? user.last_location : null
+      const movedKm = prev && Number.isFinite(Number(prev.lat)) ? haversineKm(prev.lat, prev.lng, lat, lng) : Infinity
+      const sameIp = prev && prev.ip === ip
+      let address = null
+      if (prev && movedKm < 1 && prev.country) {
+        address = { city: prev.city, state: prev.state, country: prev.country, country_code: prev.country_code, display: null }
+      } else {
+        address = await reverseGeocode(lat, lng)
+      }
       const rec = {
         id: uuidv4(), user_id: user.id, status: 'granted',
         lat, lng, accuracy_m: Number.isFinite(Number(body?.accuracy)) ? Math.round(Number(body.accuracy)) : null,
         address, ip, ip_geo: ipGeo, device, created_at: now(),
       }
-      await db.collection('user_locations').insertOne(rec)
-      const summary = { status: 'granted', lat, lng, accuracy_m: rec.accuracy_m, city: address?.city || ipGeo?.city || null, state: address?.state || ipGeo?.region || null, country: address?.country || ipGeo?.country || null, country_code: address?.country_code || ipGeo?.country_code || null, ip, isp: ipGeo?.isp || null, device, at: now() }
+      const prevAt = prev?.at ? new Date(prev.at).getTime() : 0
+      const isDuplicate = prev && movedKm < 0.2 && sameIp && (Date.now() - prevAt) < 60 * 60 * 1000
+      if (!isDuplicate) await db.collection('user_locations').insertOne(rec)
+      const summary = { status: 'granted', lat, lng, accuracy_m: rec.accuracy_m, city: address?.city || ipGeo?.city || null, state: address?.state || ipGeo?.region || null, country: address?.country || ipGeo?.country || null, country_code: address?.country_code || ipGeo?.country_code || null, ip, isp: ipGeo?.isp || prev?.isp || null, device, at: now(), updates: (Number(prev?.updates) || 0) + 1 }
       await db.collection('users').updateOne({ id: user.id }, { $set: { last_location: summary }, $unset: { location_denied_at: '' } })
       return handleCORS(NextResponse.json({ ok: true, status: 'granted', location: { city: summary.city, country: summary.country } }))
     }
