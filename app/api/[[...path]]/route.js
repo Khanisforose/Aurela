@@ -168,13 +168,11 @@ const KYC_LIST_PROJECTION = { doc_front: 0, doc_back: 0, selfie: 0 }
 const ADMIN_USER_SUMMARY_PROJECTION = { _id: 0, id: 1, username: 1, email: 1, full_name: 1, first_name: 1, last_name: 1, user_code: 1, kyc_status: 1, country: 1, phone: 1, status: 1, created_at: 1 }
 
 // "What's new" shown once per version to every signed-in user (Aurela Updated popup)
+// Keep these generic and user-facing only — never mention admin-side features here.
 const WHATS_NEW = [
-  'Location verification on sign-in keeps your account and withdrawals protected',
-  'Card activation fees are now credited to your USDT balance the moment your card is approved',
-  'Wallets tab on mobile now shows fiat and crypto together, sorted by balance',
-  'Faster, more reliable KYC Review for administrators',
-  'Card approvals now show who requested each card with full details',
-  'Improved stability — graceful recovery instead of blank error screens',
+  'Improved stability for a smoother, more reliable experience',
+  'Performance optimizations — faster loading across the app',
+  'Security enhancements to keep your account and funds protected',
 ]
 
 function clean(doc) {

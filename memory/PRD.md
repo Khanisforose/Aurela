@@ -45,3 +45,7 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 
 ## Credentials
 - Super admin: admin@aurelawallet.com / Aurela@123# (see /app/memory/test_credentials.md)
+
+## v1.5.0 — "Aurela Updated" popup (generic notes)
+- package.json bumped 1.4.2 → 1.5.0; WHATS_NEW in route.js now lists only generic user-facing notes (stability, optimization, security).
+- Rule: never mention admin-side features in WHATS_NEW; keep bullets short and generic unless the user asks otherwise.
