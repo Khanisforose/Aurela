@@ -169,6 +169,7 @@ const ADMIN_USER_SUMMARY_PROJECTION = { _id: 0, id: 1, username: 1, email: 1, fu
 
 // "What's new" shown once per version to every signed-in user (Aurela Updated popup)
 const WHATS_NEW = [
+  'Card activation fees are now credited to your USDT balance the moment your card is approved',
   'Wallets tab on mobile now shows fiat and crypto together, sorted by balance',
   'Faster, more reliable KYC Review for administrators',
   'Card approvals now show who requested each card with full details',
