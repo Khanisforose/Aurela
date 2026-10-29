@@ -123,3 +123,25 @@ docker compose exec mongo mongodump --archive=/data/db/backup-$(date +%F).gz --g
   - Email: `admin@aurela.io`
   - Password: `Admin@123`
 - **Change this password immediately** from Profile after first login, and consider seeding your own credentials by editing `ensureSeed()` in `/app/app/api/[[...path]]/route.js`.
+
+## Nightly database backups (local, 30-day rotation)
+
+Install once on the VPS (also runs a first backup immediately):
+```bash
+cd /opt/aurela && bash deploy/install-backup-cron.sh
+```
+- Runs every night at **02:30** server time → `/opt/aurela/backups/aurela-YYYY-MM-DD_HHMM.archive.gz`
+- Keeps 30 days (change with `AURELA_BACKUP_KEEP_DAYS`)
+- Logs: `/opt/aurela/backups/backup.log`
+- Manual backup any time: `bash /opt/aurela/deploy/backup.sh`
+
+### Restore a backup
+```bash
+cd /opt/aurela
+docker compose exec -T mongo mongorestore --archive --gzip --drop < backups/aurela-2026-01-31_0230.archive.gz
+```
+(`--drop` replaces existing collections with the backup's contents.)
+
+### Add remote upload later
+Install [rclone](https://rclone.org/install/), run `rclone config` to add a remote (S3/B2/R2/Drive/SFTP…), then add
+`AURELA_RCLONE_REMOTE="myremote:aurela-backups"` to `/etc/environment`. The nightly script uploads automatically when set.

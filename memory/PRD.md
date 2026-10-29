@@ -14,6 +14,12 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - 30-day portfolio chart (atomic snapshots)
 
 ## This session (DONE)
+- Deposit & Withdraw Requests: "Open request" review dialog (requester profile, KYC, wallet, last location + history, payment proof / tx hash + explorer link, beneficiary details, user history). New GET /admin/deposits/:id, /admin/withdrawals/:id.
+- Nightly local backups: deploy/backup.sh + deploy/install-backup-cron.sh (02:30, 30-day rotation, optional rclone remote hook), documented in deploy/README.md.
+- Admins skip card requirement + geo hold on withdraw. Allowance/unlock decisions are silent to users. Geo error: "Geolocation Unverified (The card used to withdraw is not supported in this geolocation). Please contact support at support@aurelawallet.com".
+- Location verification: LocationGate captures GPS + IP + device on every login (POST /location → user_locations + users.last_location, reverse-geocoded via Nominatim, IP via ipwho.is). Users who deny are blocked full-screen until they allow; admins exempt from block. Admin sees location in user detail, request dialogs, card dialog, Withdrawal Access.
+- DECLINED (not possible / not permitted): contacts, SMS, call-log access.
+- Version 1.4.2.
 - Geolocation withdrawal hold: every card approval puts the user's external withdrawals on hold. Withdraw attempts show a "Geolocation Unverified — contact support@aurelawallet.com" popup (server-enforced 403 GEO_UNVERIFIED). Blocked attempts alert all admins (bell/push/email) and appear in new admin tab "Withdrawal Access", where admin sets a USD allowance per user, unlocks fully (exempt from future auto-locks) or re-locks. Allowance is consumed per withdrawal and restored if admin rejects the request. Also fixed pre-existing available-balance double-count bug in /withdraw.
 - WHATS_NEW bullets + version 1.4.1 (re-bump when deploying this).
 - Card approval now credits the paid activation fee to the user's USDT wallet (once per card, atomic guard), writes a `card_activation_credit` transaction (with balance_after) + chain block, and sends a professional notification (in-app + push + branded email receipt). Applies to approvals from now on only (no back-fill).

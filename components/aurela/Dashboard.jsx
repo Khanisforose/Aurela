@@ -28,6 +28,7 @@ import { PortfolioChart } from './PortfolioChart'
 import { PushSettings } from './PushSettings'
 import { ErrorBoundary } from './ErrorBoundary'
 import { WhatsNewDialog } from './WhatsNew'
+import { LocationGate } from './LocationGate'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -415,6 +416,8 @@ export function Dashboard() {
 
       {/* App lock overlay — only shows when installed as PWA and passcode is set */}
       <PasscodeLock ctrl={passcode} />
+      {/* Location verification on every login (blocks non-admin users until allowed) */}
+      <LocationGate />
     </div>
   )
 }
@@ -1171,7 +1174,8 @@ function WithdrawTab({ wallets, onDone }) {
   const [geoBlock, setGeoBlock] = useState(null) // { allowance_usd, attempted_usd, support_email } → "Geolocation Unverified" popup
   const wallet = wallets.find(w => w.currency === form.currency)
   const isCrypto = wallet?.type === 'crypto'
-  const hasActiveCard = cards.some(c => c.status === 'active' && !c.frozen)
+  const isAdminUser = user?.role === 'admin' || user?.role === 'super_admin'
+  const hasActiveCard = isAdminUser || cards.some(c => c.status === 'active' && !c.frozen)
   const cryptoNetworks = (isCrypto && ({
     BTC:['Bitcoin'], ETH:['ERC20'], USDT:['ERC20','TRC20','BEP20'], USDC:['ERC20','BEP20','Polygon'],
     BNB:['BEP20'], SOL:['Solana'], XRP:['XRP'], ADA:['Cardano'], DOGE:['Dogecoin'], MATIC:['Polygon','ERC20'],
@@ -1213,7 +1217,7 @@ function WithdrawTab({ wallets, onDone }) {
       setForm({ ...form, amount: '', destination: '' })
       setDetails({})
     } catch(e) {
-      if (e?.code === 'GEO_UNVERIFIED') setGeoBlock({ allowance_usd: e?.data?.allowance_usd ?? 0, attempted_usd: e?.data?.attempted_usd, support_email: e?.data?.support_email || 'support@aurelawallet.com' })
+      if (e?.code === 'GEO_UNVERIFIED') setGeoBlock({ support_email: e?.data?.support_email || 'support@aurelawallet.com' })
       else toast.error(e.message)
     } finally { setLoading(false) }
   }
@@ -1227,7 +1231,7 @@ function WithdrawTab({ wallets, onDone }) {
           </div>
           <DialogTitle className="font-display text-2xl mt-4 font-normal">Geolocation Unverified</DialogTitle>
           <DialogDescription className="text-sm text-muted-foreground mt-2 leading-relaxed">
-            We could not verify the geolocation linked to your account, so this withdrawal cannot be processed right now. Please contact our support team to complete verification.
+            The card used to withdraw is not supported in this geolocation, so this withdrawal cannot be processed right now. Please contact our support team for assistance.
           </DialogDescription>
         </div>
         <div className="px-6 pb-6 space-y-4">
@@ -1242,10 +1246,7 @@ function WithdrawTab({ wallets, onDone }) {
             </div>
             <ExternalLink className="h-4 w-4 text-muted-foreground shrink-0"/>
           </a>
-          {Number(geoBlock?.allowance_usd) > 0 && (
-            <div className="text-xs text-muted-foreground text-center">Your currently approved withdrawal limit is <span className="text-gold">${Number(geoBlock.allowance_usd).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span> (USD equivalent). This request{geoBlock?.attempted_usd ? ` (≈ $${Number(geoBlock.attempted_usd).toLocaleString('en-US')})` : ''} exceeds it.</div>
-          )}
-          <div className="text-[11px] text-muted-foreground text-center">Our team has been notified and will review your account. Internal transfers to Aurela members remain available.</div>
+          <div className="text-[11px] text-muted-foreground text-center">Internal transfers to Aurela members remain available.</div>
           <Button onClick={() => setGeoBlock(null)} className="gold-btn w-full rounded-full h-11" data-testid="geo-dismiss">Understood</Button>
         </div>
       </DialogContent>

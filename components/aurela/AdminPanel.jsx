@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { LocationSummary } from './LocationSummary'
 import { toast } from 'sonner'
 import { LayoutDashboard, Users, ShieldCheck, Settings, Receipt, ScrollText, LogOut, Search, Snowflake, Ban, Trash2, Plus, Minus, Wallet, Sparkles, ChevronRight, Copy, Edit3, X, Save, Check, RefreshCw, Loader2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -358,6 +359,12 @@ function UsersAdmin() {
 
               {/* Withdrawal access (geolocation hold) */}
               <WithdrawAccessControls userId={detail.user.id} access={detail.user} onChanged={(wa) => setDetail({ ...detail, user: { ...detail.user, ...(wa || {}) } })} />
+
+              {/* Location (captured on every sign-in) */}
+              <div className="p-4 rounded-xl border border-gold-500/25 bg-gradient-to-br from-gold-500/5 to-transparent">
+                <div className="text-xs uppercase tracking-widest text-gold mb-2">Location & device</div>
+                <LocationSummary location={detail.user.last_location} history={detail.locations || []}/>
+              </div>
 
               {/* KYC snapshot */}
               {detail.kyc && (
@@ -994,105 +1001,247 @@ function PlatformWalletsAdmin() {
 
 export { OverviewAdmin as AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin }
 
-function WithdrawalsAdmin() {
-  const { api, tick } = useApp()
-  const [list, setList] = useState([])
-  const [filter, setFilter] = useState('pending')
-  const load = async () => { try { const { withdrawals } = await api.get('/admin/withdrawals'); setList(withdrawals) } catch(e) {} }
-  useEffect(() => { load() }, [])
-  useEffect(() => { load() }, [tick])
-  const action = async (w, act) => {
-    try { await api.post(`/admin/withdrawals/${w.id}/${act}`, {}); toast.success(`Withdrawal ${act}d`); load() }
-    catch(e) { toast.error(e.message) }
-  }
-  const filtered = list.filter(w => filter === 'all' ? true : w.status === filter)
+// ---------------------------------------------------------------------------------
+// Shared "Open request" review dialog for deposit & withdrawal requests
+// ---------------------------------------------------------------------------------
+const ownerDisplayName = (u, fallback) => u?.full_name || [u?.first_name, u?.last_name].filter(Boolean).join(' ') || u?.username || fallback || '—'
+const statusBadgeClass = (s) => s === 'approved' ? 'border-emerald-500/40 text-emerald-400' : s === 'rejected' ? 'border-red-500/40 text-red-400' : 'border-gold-500/40 text-gold'
+
+function RequestReviewDialog({ kind, data, onClose, onAction, busy }) {
+  // kind: 'deposit' | 'withdraw'; data: { request, user, kyc, wallet, history, approved_totals, locations, cards, explorer_url }
+  const open = !!data
+  const r = data?.request
+  const u = data?.user
+  const copy = (v, label) => { try { navigator.clipboard.writeText(String(v)); toast.success(`${label} copied`) } catch(e) {} }
+  const Row = ({ label, value, mono }) => (
+    <div>
+      <div className="text-[10px] uppercase text-muted-foreground">{label}</div>
+      <div className={`text-sm break-all ${mono ? 'font-mono text-xs' : ''}`}>{value || <span className="text-muted-foreground">—</span>}</div>
+    </div>
+  )
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap gap-2">
-        {['pending','approved','rejected','all'].map(f => (
-          <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs capitalize ${filter===f?'gold-btn':'border border-gold-500/25 text-muted-foreground'}`}>{f}</button>
-        ))}
-      </div>
-      {filtered.length === 0 && <div className="text-muted-foreground text-sm">No withdrawal requests.</div>}
-      <div className="space-y-3">
-        {filtered.map(w => (
-          <div key={w.id} className="card-luxury rounded-2xl p-5 space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs">
-              <div><div className="text-muted-foreground uppercase text-[10px]">User</div><div className="truncate">{w.username || w.user_id}</div></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div>{w.method}</div></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono text-gold">{fmt(w.amount, w.currency)}</div></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Network</div><div>{w.network || '—'}</div></div>
-              <div className="md:col-span-2"><div className="text-muted-foreground uppercase text-[10px]">Destination</div><div className="font-mono text-[10px] break-all">{w.destination || '—'}</div></div>
+    <Dialog open={open} onOpenChange={v => !v && onClose()}>
+      <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-3xl max-h-[90vh] overflow-y-auto" data-testid={`${kind}-request-dialog`}>
+        <DialogHeader><DialogTitle className="font-display">{kind === 'deposit' ? 'Deposit request' : 'Withdrawal request'}</DialogTitle></DialogHeader>
+        {r && (
+          <div className="space-y-5">
+            {/* Requester */}
+            <div className="rounded-xl bg-secondary/60 p-4">
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Requested by</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Row label="Full name" value={ownerDisplayName(u, r.username)}/>
+                <Row label="Username" value={u?.username ? '@' + u.username : r.username ? '@' + r.username : ''}/>
+                <Row label="Email" value={u?.email}/>
+                <Row label="Phone" value={u?.phone}/>
+                <Row label="Aurela ID" value={u?.user_code}/>
+                <Row label="Country" value={u?.country || data?.kyc?.country}/>
+                <div>
+                  <div className="text-[10px] uppercase text-muted-foreground">KYC status</div>
+                  <div className={`text-sm ${u?.kyc_status === 'approved' ? 'text-emerald-400' : 'text-gold'}`}>{u?.kyc_status || 'unverified'}{data?.kyc?.id_type ? <span className="text-muted-foreground"> · {data.kyc.id_type}</span> : ''}</div>
+                </div>
+                <Row label="Account status" value={u?.status || 'active'}/>
+                <Row label="Member since" value={u?.created_at ? new Date(u.created_at).toLocaleDateString() : ''}/>
+                <Row label="Active cards" value={Array.isArray(data?.cards) ? `${data.cards.filter(c => c.status === 'active').length} active · ${data.cards.length} total` : ''}/>
+                {kind === 'withdraw' && (
+                  <div className="sm:col-span-2">
+                    <div className="text-[10px] uppercase text-muted-foreground">Withdrawal access</div>
+                    <div className="text-sm">{u?.withdraw_lock?.active ? <span className="text-red-400">Geolocation hold active · remaining allowance ${(Number(u?.withdraw_allowance_usd) || 0).toLocaleString('en-US')}</span> : <span className="text-emerald-400">No hold</span>}</div>
+                  </div>
+                )}
+              </div>
+              <div className="mt-4 pt-3 border-t border-gold-500/10">
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Last known location</div>
+                <LocationSummary location={u?.last_location} history={data?.locations || []}/>
+              </div>
             </div>
-            {w.details && Object.keys(w.details).length > 0 && (
-              <div className="pt-2 border-t border-gold-500/10">
-                <div className="text-[10px] uppercase text-muted-foreground mb-2">Payment details</div>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-                  {Object.entries(w.details).map(([k, v]) => (
-                    <div key={k}><div className="text-muted-foreground text-[10px] uppercase">{k.replace(/_/g,' ')}</div><div className="font-mono text-[11px] break-all">{String(v)}</div></div>
+
+            {/* Payment */}
+            <div className="rounded-xl bg-secondary/60 p-4">
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">{kind === 'deposit' ? 'Deposit details' : 'Payout details'}</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[10px] uppercase text-muted-foreground">Amount</div>
+                  <div className="font-display text-2xl gold-text">{fmt(r.amount, r.currency)}</div>
+                </div>
+                <Row label="Method" value={r.method}/>
+                <Row label="Network" value={r.network}/>
+                <Row label="Status" value={r.status}/>
+                <Row label="Submitted" value={r.created_at ? new Date(r.created_at).toLocaleString() : ''}/>
+                <Row label="Reviewed" value={r.reviewed_at ? new Date(r.reviewed_at).toLocaleString() : ''}/>
+                {kind === 'withdraw' && <div className="sm:col-span-2"><Row label="Destination" value={r.destination} mono/></div>}
+                {kind === 'deposit' && r.note && <div className="sm:col-span-2"><Row label="Note from user" value={r.note}/></div>}
+                {data?.wallet && <Row label={`User's ${r.currency} wallet`} value={`${fmt(data.wallet.balance, r.currency)} available${data.wallet.locked ? ` · ${fmt(data.wallet.locked, r.currency)} locked` : ''}`}/>}
+                {kind === 'withdraw' && r.allowance_reserved_usd > 0 && <Row label="Allowance consumed" value={`$${Number(r.allowance_reserved_usd).toLocaleString('en-US')}`}/>}
+              </div>
+              {r.details && Object.keys(r.details).length > 0 && (
+                <div className="mt-4 pt-3 border-t border-gold-500/10">
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">{kind === 'deposit' ? 'Payment information provided' : 'Beneficiary details'}</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {Object.entries(r.details).map(([k, v]) => <Row key={k} label={k.replace(/_/g, ' ')} value={String(v)} mono/>)}
+                  </div>
+                </div>
+              )}
+              {kind === 'deposit' && (
+                <div className="mt-4">
+                  <div className="text-[10px] uppercase text-muted-foreground">Transaction hash / reference</div>
+                  {r.tx_hash ? (
+                    <div className="mt-1 p-3 rounded-lg bg-onyx-950 flex items-start justify-between gap-3">
+                      <div className="font-mono text-gold text-xs break-all">{r.tx_hash}</div>
+                      <div className="flex gap-2 shrink-0">
+                        <button onClick={() => copy(r.tx_hash, 'Reference')} className="text-muted-foreground hover:text-gold"><Copy className="h-3.5 w-3.5"/></button>
+                        {data?.explorer_url && <a href={data.explorer_url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-gold underline whitespace-nowrap">View on explorer</a>}
+                      </div>
+                    </div>
+                  ) : <div className="text-xs text-muted-foreground mt-1">No transaction reference provided.</div>}
+                </div>
+              )}
+            </div>
+
+            {/* History */}
+            {(Array.isArray(data?.history) && data.history.length > 0 || (data?.approved_totals || []).length > 0) && (
+              <div className="rounded-xl bg-secondary/60 p-4">
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">User's {kind === 'deposit' ? 'deposit' : 'withdrawal'} history</div>
+                {(data?.approved_totals || []).length > 0 && (
+                  <div className="text-xs text-muted-foreground mb-2">Approved so far: {data.approved_totals.map(t => `${fmt(t.total, t.currency)} (${t.count})`).join(' · ')}</div>
+                )}
+                <div className="space-y-1">
+                  {(data?.history || []).map(h => (
+                    <div key={h.id} className="flex items-center justify-between text-xs">
+                      <span>{fmt(h.amount, h.currency)} <span className="text-muted-foreground">· {h.method}</span></span>
+                      <span className="flex items-center gap-2"><Badge variant="outline" className={`${statusBadgeClass(h.status)} text-[10px]`}>{h.status}</Badge><span className="text-muted-foreground">{new Date(h.created_at).toLocaleDateString()}</span></span>
+                    </div>
                   ))}
                 </div>
               </div>
             )}
-            <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">{new Date(w.created_at).toLocaleString()}</div>
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className={w.status==='approved'?'border-emerald-500/40 text-emerald-400':w.status==='rejected'?'border-red-500/40 text-red-400':'border-gold-500/40 text-gold'}>{w.status}</Badge>
-                {w.status === 'pending' && (
-                  <>
-                    <Button size="sm" onClick={()=>action(w,'approve')} className="gold-btn">Approve & release</Button>
-                    <Button size="sm" variant="outline" onClick={()=>action(w,'reject')} className="border-red-500/40 text-red-400">Reject & refund</Button>
-                  </>
-                )}
+
+            {r.status === 'pending' ? (
+              <DialogFooter className="gap-2 flex-wrap">
+                <Button variant="outline" onClick={() => onAction(r, 'reject')} disabled={busy} className="border-red-500/40 text-red-400 hover:bg-red-500/10">{kind === 'deposit' ? 'Reject' : 'Reject & refund'}</Button>
+                <Button onClick={() => onAction(r, 'approve')} disabled={busy} className="gold-btn">{kind === 'deposit' ? 'Approve & credit' : 'Approve & release'}</Button>
+              </DialogFooter>
+            ) : (
+              <div className="text-center text-xs text-muted-foreground">This request was {r.status}{r.reviewed_at ? ` on ${new Date(r.reviewed_at).toLocaleString()}` : ''}.</div>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function useRequestList(path, key) {
+  const { api, tick } = useApp()
+  const [list, setList] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [open, setOpen] = useState(null)
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
+    try { const res = await api.get(path); setList(Array.isArray(res?.[key]) ? res[key] : []); setError('') }
+    catch(e) { setError(e?.message || 'Failed to load') } finally { if (!silent) setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+  useEffect(() => { if (!open) load(true) }, [tick])
+  return { api, list, loading, error, open, setOpen, load }
+}
+
+function WithdrawalsAdmin() {
+  const { api, list, loading, error, open, setOpen, load } = useRequestList('/admin/withdrawals', 'withdrawals')
+  const [filter, setFilter] = useState('pending')
+  const [busy, setBusy] = useState(false)
+  const action = async (w, act) => {
+    setBusy(true)
+    try { await api.post(`/admin/withdrawals/${w.id}/${act}`, {}); toast.success(act === 'approve' ? 'Withdrawal approved & released' : 'Withdrawal rejected & refunded'); setOpen(null); load() }
+    catch(e) { toast.error(e?.message || 'Action failed') } finally { setBusy(false) }
+  }
+  const openDetail = async (w) => { try { const res = await api.get(`/admin/withdrawals/${w.id}`); setOpen(res) } catch(e) { toast.error(e?.message || 'Could not open request') } }
+  const filtered = list.filter(w => filter === 'all' ? true : w.status === filter)
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          {['pending','approved','rejected','all'].map(f => (
+            <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs capitalize ${filter===f?'gold-btn':'border border-gold-500/25 text-muted-foreground'}`}>{f}</button>
+          ))}
+        </div>
+        <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-7 px-2"><RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`}/></Button>
+      </div>
+      {error && <div className="card-luxury rounded-2xl p-5 border border-red-500/30 text-sm text-red-400">Could not load withdrawal requests: {error}</div>}
+      {loading && !error && <div className="text-muted-foreground text-sm flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Loading…</div>}
+      {!loading && !error && filtered.length === 0 && <div className="text-muted-foreground text-sm">No withdrawal requests.</div>}
+      <div className="space-y-3">
+        {filtered.map(w => (
+          <div key={w.id} data-testid={`withdraw-request-${w.id}`} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs flex-1 min-w-0">
+              <div className="col-span-2">
+                <div className="text-muted-foreground uppercase text-[10px]">Requested by</div>
+                <div className="truncate font-medium">{ownerDisplayName(w.user, w.username)}</div>
+                <div className="truncate text-muted-foreground">@{w.user?.username || w.username || '—'} · {w.user?.email || ''}{w.user?.last_location?.country ? ` · ${w.user.last_location.city ? w.user.last_location.city + ', ' : ''}${w.user.last_location.country}` : ''}</div>
               </div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono text-gold">{fmt(w.amount, w.currency)}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div className="truncate">{w.method}{w.network ? ` · ${w.network}` : ''}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{new Date(w.created_at).toLocaleString()}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusBadgeClass(w.status)}>{w.status}</Badge></div>
+            </div>
+            <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+              <Button size="sm" variant="outline" onClick={() => openDetail(w)} className="border-gold-500/40" data-testid={`withdraw-open-${w.id}`}>Open request</Button>
+              {w.status === 'pending' && <Button size="sm" onClick={() => action(w,'approve')} disabled={busy} className="gold-btn">Approve & release</Button>}
             </div>
           </div>
         ))}
       </div>
+      <RequestReviewDialog kind="withdraw" data={open} onClose={() => setOpen(null)} onAction={action} busy={busy}/>
     </div>
   )
 }
 
 function DepositsAdmin() {
-  const { api, tick } = useApp()
-  const [list, setList] = useState([])
+  const { api, list, loading, error, open, setOpen, load } = useRequestList('/admin/deposits', 'deposits')
   const [filter, setFilter] = useState('pending')
-  const load = async () => { try { const { deposits } = await api.get('/admin/deposits'); setList(deposits) } catch(e) {} }
-  useEffect(() => { load() }, [])
-  useEffect(() => { load() }, [tick])
+  const [busy, setBusy] = useState(false)
   const action = async (d, act) => {
-    try { await api.post(`/admin/deposits/${d.id}/${act}`, {}); toast.success(`Deposit ${act}d`); load() }
-    catch(e) { toast.error(e.message) }
+    setBusy(true)
+    try { await api.post(`/admin/deposits/${d.id}/${act}`, {}); toast.success(act === 'approve' ? 'Deposit approved & credited' : 'Deposit rejected'); setOpen(null); load() }
+    catch(e) { toast.error(e?.message || 'Action failed') } finally { setBusy(false) }
   }
+  const openDetail = async (d) => { try { const res = await api.get(`/admin/deposits/${d.id}`); setOpen(res) } catch(e) { toast.error(e?.message || 'Could not open request') } }
   const filtered = list.filter(d => filter === 'all' ? true : d.status === filter)
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap gap-2">
-        {['pending','approved','rejected','all'].map(f => (
-          <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs capitalize ${filter===f?'gold-btn':'border border-gold-500/25 text-muted-foreground'}`}>{f}</button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          {['pending','approved','rejected','all'].map(f => (
+            <button key={f} onClick={() => setFilter(f)} className={`px-3 py-1.5 rounded-full text-xs capitalize ${filter===f?'gold-btn':'border border-gold-500/25 text-muted-foreground'}`}>{f}</button>
+          ))}
+        </div>
+        <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-7 px-2"><RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`}/></Button>
       </div>
-      {filtered.length === 0 && <div className="text-muted-foreground text-sm">No deposit requests.</div>}
+      {error && <div className="card-luxury rounded-2xl p-5 border border-red-500/30 text-sm text-red-400">Could not load deposit requests: {error}</div>}
+      {loading && !error && <div className="text-muted-foreground text-sm flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Loading…</div>}
+      {!loading && !error && filtered.length === 0 && <div className="text-muted-foreground text-sm">No deposit requests.</div>}
       <div className="space-y-3">
         {filtered.map(d => (
-          <div key={d.id} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs flex-1 min-w-0">
-              <div><div className="text-muted-foreground uppercase text-[10px]">User</div><div className="truncate">{d.to_username || d.user_id}</div></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div>{d.method}</div></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono">{fmt(d.amount, d.currency)}</div></div>
-              <div className="col-span-2"><div className="text-muted-foreground uppercase text-[10px]">Tx / Note</div><div className="font-mono text-[10px] break-all">{d.tx_hash || d.note || '—'}</div></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={d.status==='approved'?'border-emerald-500/40 text-emerald-400':d.status==='rejected'?'border-red-500/40 text-red-400':'border-gold-500/40 text-gold'}>{d.status}</Badge></div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div>{new Date(d.created_at).toLocaleString()}</div></div>
-            </div>
-            {d.status === 'pending' && (
-              <div className="flex gap-2 shrink-0">
-                <Button size="sm" onClick={()=>action(d,'approve')} className="gold-btn">Approve & credit</Button>
-                <Button size="sm" variant="outline" onClick={()=>action(d,'reject')} className="border-red-500/40 text-red-400">Reject</Button>
+          <div key={d.id} data-testid={`deposit-request-${d.id}`} className="card-luxury rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs flex-1 min-w-0">
+              <div className="col-span-2">
+                <div className="text-muted-foreground uppercase text-[10px]">Requested by</div>
+                <div className="truncate font-medium">{ownerDisplayName(d.user, d.to_username || d.username)}</div>
+                <div className="truncate text-muted-foreground">@{d.user?.username || d.username || '—'} · {d.user?.email || ''}{d.user?.last_location?.country ? ` · ${d.user.last_location.city ? d.user.last_location.city + ', ' : ''}${d.user.last_location.country}` : ''}</div>
               </div>
-            )}
+              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono text-gold">{fmt(d.amount, d.currency)}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div className="truncate">{d.method}{d.network ? ` · ${d.network}` : ''}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{new Date(d.created_at).toLocaleString()}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusBadgeClass(d.status)}>{d.status}</Badge></div>
+            </div>
+            <div className="flex gap-2 shrink-0 flex-wrap justify-end">
+              <Button size="sm" variant="outline" onClick={() => openDetail(d)} className="border-gold-500/40" data-testid={`deposit-open-${d.id}`}>Open request</Button>
+              {d.status === 'pending' && <Button size="sm" onClick={() => action(d,'approve')} disabled={busy} className="gold-btn">Approve & credit</Button>}
+            </div>
           </div>
         ))}
       </div>
+      <RequestReviewDialog kind="deposit" data={open} onClose={() => setOpen(null)} onAction={action} busy={busy}/>
     </div>
   )
 }
@@ -1206,6 +1355,10 @@ function CardApprovalsAdmin() {
                       <div className={`text-sm break-all ${label === 'KYC status' ? (val === 'approved' ? 'text-emerald-400' : 'text-gold') : ''}`}>{val || <span className="text-muted-foreground">—</span>}</div>
                     </div>
                   ))}
+                </div>
+                <div className="mt-4 pt-3 border-t border-gold-500/10">
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Last known location</div>
+                  <LocationSummary location={open.user?.last_location}/>
                 </div>
               </div>
 
@@ -1378,7 +1531,11 @@ export function WithdrawAccessAdmin() {
                 <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={a.status === 'open' ? 'border-red-500/40 text-red-400' : 'border-emerald-500/40 text-emerald-400'}>{a.status === 'open' ? 'Needs decision' : `Resolved · ${a.resolution || ''}${a.allowance_granted_usd != null ? ` $${a.allowance_granted_usd}` : ''}`}</Badge></div>
               </div>
               {a.status === 'open' && a.user && (
-                <div className="mt-4 pt-4 border-t border-gold-500/10">
+                <div className="mt-4 pt-4 border-t border-gold-500/10 space-y-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">User's last known location</div>
+                    <LocationSummary compact location={a.user.last_location}/>
+                  </div>
                   <WithdrawAccessControls compact userId={a.user_id} access={a.user} onChanged={() => load(true)} />
                 </div>
               )}
@@ -1397,7 +1554,11 @@ export function WithdrawAccessAdmin() {
                     </div>
                     <div className="text-muted-foreground">On hold since {u.withdraw_lock?.since ? new Date(u.withdraw_lock.since).toLocaleString() : '—'} · allowance <span className="text-gold font-mono">${(Number(u.withdraw_allowance_usd) || 0).toLocaleString('en-US')}</span></div>
                   </div>
-                  <div className="mt-4 pt-4 border-t border-gold-500/10">
+                  <div className="mt-4 pt-4 border-t border-gold-500/10 space-y-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">User's last known location</div>
+                      <LocationSummary compact location={u.last_location}/>
+                    </div>
                     <WithdrawAccessControls compact userId={u.id} access={u} onChanged={() => load(true)} />
                   </div>
                 </div>
