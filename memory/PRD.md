@@ -14,6 +14,7 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - 30-day portfolio chart (atomic snapshots)
 
 ## This session (DONE)
+- Admin "Users Map" tab: Leaflet (CDN, no key) + Esri dark basemap; gold markers = verified GPS, red = denied (IP position), amber ring = on hold; country hotspot circles + sidebar ranking (click → zoom); popups with user/KYC/hold/KYC-country-mismatch; filters; GET /admin/locations/map.
 - Deposit & Withdraw Requests: "Open request" review dialog (requester profile, KYC, wallet, last location + history, payment proof / tx hash + explorer link, beneficiary details, user history). New GET /admin/deposits/:id, /admin/withdrawals/:id.
 - Nightly local backups: deploy/backup.sh + deploy/install-backup-cron.sh (02:30, 30-day rotation, optional rclone remote hook), documented in deploy/README.md.
 - Admins skip card requirement + geo hold on withdraw. Allowance/unlock decisions are silent to users. Geo error: "Geolocation Unverified (The card used to withdraw is not supported in this geolocation). Please contact support at support@aurelawallet.com".

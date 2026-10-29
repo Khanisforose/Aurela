@@ -17,7 +17,7 @@ import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
-  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail
+  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2
 } from 'lucide-react'
 import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin, WithdrawAccessAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -29,6 +29,7 @@ import { PushSettings } from './PushSettings'
 import { ErrorBoundary } from './ErrorBoundary'
 import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
+import { UsersMapAdmin } from './UsersMap'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -49,6 +50,7 @@ const ADMIN_NAV = [
   { id: 'admin_deposits', label: 'Deposit Requests', icon: ArrowDownToLine },
   { id: 'admin_withdrawals', label: 'Withdraw Requests', icon: ArrowUpFromLine },
   { id: 'admin_withdraw_access', label: 'Withdrawal Access', icon: ShieldAlert },
+  { id: 'admin_map', label: 'Users Map', icon: Globe2 },
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
@@ -369,6 +371,7 @@ export function Dashboard() {
               {tab === 'admin_deposits' && isAdmin && <DepositsAdmin/>}
               {tab === 'admin_withdrawals' && isAdmin && <WithdrawalsAdmin/>}
               {tab === 'admin_withdraw_access' && isAdmin && <WithdrawAccessAdmin/>}
+              {tab === 'admin_map' && isAdmin && <UsersMapAdmin/>}
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}

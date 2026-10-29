@@ -2197,6 +2197,46 @@ async function handleRoute(request, { params }) {
           items: items.slice(0, 20)
         }))
       }
+      // Admin: map data — every user's last known location + country hotspots
+      if (route === '/admin/locations/map' && method === 'GET') {
+        const users = await db.collection('users').find(
+          { role: { $nin: ['admin', 'super_admin'] } },
+          { projection: { _id: 0, id: 1, username: 1, full_name: 1, first_name: 1, last_name: 1, email: 1, kyc_status: 1, status: 1, country: 1, last_location: 1, withdraw_lock: 1, created_at: 1 } }
+        ).toArray()
+        const points = []
+        const byCountry = {}
+        let located = 0, denied = 0, never = 0
+        for (const u of users) {
+          const L = u.last_location
+          if (!L) { never++; continue }
+          const name = u.full_name || [u.first_name, u.last_name].filter(Boolean).join(' ') || u.username
+          // Denied users are placed at their IP-derived position (if known) so admins still see them on the map
+          const lat = L.status === 'granted' ? L.lat : L.ip_geo?.lat
+          const lng = L.status === 'granted' ? L.lng : L.ip_geo?.lng
+          const country = L.country || L.ip_geo?.country || null
+          const cc = L.country_code || L.ip_geo?.country_code || null
+          const city = L.city || L.ip_geo?.city || null
+          if (L.status === 'denied') denied++; else located++
+          if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))) {
+            points.push({ user_id: u.id, username: u.username, name, email: u.email, kyc_status: u.kyc_status, account_status: u.status, lat: Number(lat), lng: Number(lng), accuracy_m: L.accuracy_m || null, city, country, country_code: cc, ip: L.ip || null, at: L.at, status: L.status, hold: !!u.withdraw_lock?.active, kyc_country: u.country || null, device: L.device?.platform || null, standalone: !!L.device?.standalone, updates: L.updates || 1 })
+          }
+          const key = country || 'Unknown'
+          if (!byCountry[key]) byCountry[key] = { country: key, country_code: cc, users: 0, denied: 0, on_hold: 0, kyc_approved: 0, lat_sum: 0, lng_sum: 0, n: 0, cities: {} }
+          const c = byCountry[key]
+          c.users++
+          if (L.status === 'denied') c.denied++
+          if (u.withdraw_lock?.active) c.on_hold++
+          if (u.kyc_status === 'approved') c.kyc_approved++
+          if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))) { c.lat_sum += Number(lat); c.lng_sum += Number(lng); c.n++ }
+          if (city) c.cities[city] = (c.cities[city] || 0) + 1
+        }
+        const countries = Object.values(byCountry).map(c => ({
+          country: c.country, country_code: c.country_code, users: c.users, denied: c.denied, on_hold: c.on_hold, kyc_approved: c.kyc_approved,
+          center: c.n ? { lat: c.lat_sum / c.n, lng: c.lng_sum / c.n } : null,
+          top_cities: Object.entries(c.cities).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([city, n]) => ({ city, n })),
+        })).sort((a, b) => b.users - a.users)
+        return handleCORS(NextResponse.json({ points, countries, totals: { users: users.length, located, denied, never } }))
+      }
       // Admin: blocked withdrawal attempts (geolocation hold) with owner summary + current access state
       if (route === '/admin/withdraw-attempts' && method === 'GET') {
         const url = new URL(request.url)
