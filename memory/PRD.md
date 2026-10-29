@@ -14,6 +14,7 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - 30-day portfolio chart (atomic snapshots)
 
 ## This session (DONE)
+- Card approval now credits the paid activation fee to the user's USDT wallet (once per card, atomic guard), writes a `card_activation_credit` transaction (with balance_after) + chain block, and sends a professional notification (in-app + push + branded email receipt). Applies to approvals from now on only (no back-fill).
 - "Aurela Updated" one-time popup per app version (WhatsNew.jsx; content from GET /api/version → WHATS_NEW in route.js; version bumped to 1.4.0). To re-trigger on a future deploy: bump package.json version + edit WHATS_NEW bullets.
 - Admin Card Approvals: list shows requester (name / @username / email), "Open request" dialog with requester profile, KYC status, USDT balance, card + payment details, tx hash with explorer link, approve/activate/reject/delete inside. New GET /admin/cards/:id.
 - Mobile "Wallets" tab now shows fiat + crypto combined, All/Fiat/Crypto filter, sorted by balance (funded first, empty last).

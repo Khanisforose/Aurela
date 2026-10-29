@@ -1124,7 +1124,12 @@ function CardApprovalsAdmin() {
   }
   const action = async (c, act, activate_now=false) => {
     setBusy(true)
-    try { await api.post(`/admin/cards/${c.id}/${act}`, { activate_now }); toast.success(`Card ${act}d`); setOpen(null); load() }
+    try {
+      const res = await api.post(`/admin/cards/${c.id}/${act}`, { activate_now })
+      if (act === 'approve' && res?.credit) toast.success(`Card approved · ${res.credit.amount} ${res.credit.currency} credited to the user's balance`)
+      else toast.success(`Card ${act}d`)
+      setOpen(null); load()
+    }
     catch(e) { toast.error(e?.message || 'Action failed') }
     finally { setBusy(false) }
   }
@@ -1216,6 +1221,7 @@ function CardApprovalsAdmin() {
                     ['Requested at', open.card?.created_at ? new Date(open.card.created_at).toLocaleString() : ''],
                     ['Tx submitted at', open.card?.activation_submitted_at ? new Date(open.card.activation_submitted_at).toLocaleString() : ''],
                     ['Status', statusLabel(open.card?.status)],
+                    ['Fee credited to balance', open.card?.fee_credited_at ? `+${open.card.fee_credited_amount ?? open.card.activation_fee_usdt} USDT · ${new Date(open.card.fee_credited_at).toLocaleString()}` : 'Will be credited to the user\'s USDT balance on approval'],
                   ].map(([label, val]) => (
                     <div key={label}>
                       <div className="text-[10px] uppercase text-muted-foreground">{label}</div>

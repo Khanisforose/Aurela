@@ -312,7 +312,7 @@ async function sendEmail(email, subject, bodyHtml) {
 }
 
 // Push a notification row into user_notifications AND fire an email (best effort, fire-and-forget)
-async function notifyUser(db, userId, { kind, title, body, meta = {} }) {
+async function notifyUser(db, userId, { kind, title, body, meta = {}, emailHtml = null, url = '/' }) {
   await db.collection('user_notifications').insertOne({
     id: uuidv4(), user_id: userId, kind, title, body,
     meta, read: false, created_at: now()
@@ -320,12 +320,23 @@ async function notifyUser(db, userId, { kind, title, body, meta = {} }) {
   try {
     const u = await db.collection('users').findOne({ id: userId }, { projection: { email: 1, full_name: 1 } })
     if (u?.email) {
-      const emailBody = `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 12px">${title}</h1><p style="color:#a8a8a0;font-size:14px;line-height:1.6;margin:0 0 20px">${body}</p><p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0">Sign in at <a href="https://www.aurelawallet.com" style="color:#d4af37">aurelawallet.com</a> to see the details.</p>`
+      const emailBody = emailHtml || `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 12px">${title}</h1><p style="color:#a8a8a0;font-size:14px;line-height:1.6;margin:0 0 20px">${body}</p><p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0">Sign in at <a href="https://www.aurelawallet.com" style="color:#d4af37">aurelawallet.com</a> to see the details.</p>`
       sendEmail(u.email, `[Aurela] ${title}`, emailBody).catch(()=>{})
     }
     // Fire-and-forget web push
-    sendPushToUser(db, userId, { title, body, kind, tag: kind, url: '/' }).catch(()=>{})
+    sendPushToUser(db, userId, { title, body, kind, tag: kind, url }).catch(()=>{})
   } catch (e) { /* non-fatal */ }
+}
+
+// Builds a branded HTML receipt (rows = [[label, value], ...]) for transactional emails
+function receiptEmailHtml({ title, intro, rows, footnote }) {
+  const tr = rows.filter(r => r && r[1] !== undefined && r[1] !== null && r[1] !== '').map(([k, v]) =>
+    `<tr><td style="padding:9px 0;color:#7a7a72;font-size:12px;border-bottom:1px solid rgba(212,175,55,0.1)">${k}</td><td style="padding:9px 0;color:#f5f5f0;font-size:13px;text-align:right;border-bottom:1px solid rgba(212,175,55,0.1);font-family:ui-monospace,Menlo,monospace;word-break:break-all">${v}</td></tr>`).join('')
+  return `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 12px">${title}</h1>
+<p style="color:#a8a8a0;font-size:14px;line-height:1.6;margin:0 0 20px">${intro}</p>
+<table style="width:100%;border-collapse:collapse;margin:0 0 20px">${tr}</table>
+${footnote ? `<p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0 0 16px">${footnote}</p>` : ''}
+<p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0">Sign in at <a href="https://www.aurelawallet.com" style="color:#d4af37">aurelawallet.com</a> to view your balance and activity.</p>`
 }
 
 async function sendEmailOTP(email, code, purpose = 'signup') {  const apiKey = process.env.RESEND_API_KEY
@@ -1989,7 +2000,75 @@ async function handleRoute(request, { params }) {
           const finalUsable = immediate ? now() : new Date(Date.now() + 24*60*60*1000)
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), usable_at: finalUsable, activated_at: immediate ? now() : null } })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
-          await notifyUser(db, card.user_id, { kind: 'card_activated', title: 'Card approved', body: immediate ? `Your Aurela ${card.tier} card is now active and ready to use.` : `Your Aurela ${card.tier} card has been approved. It will unlock for use in 24 hours.` })
+
+          // ---- Credit the paid activation fee to the user's USDT balance (exactly once per card) ----
+          const fee = Number(card.activation_fee_usdt) || 0
+          let credit = null
+          if (fee > 0 && !card.fee_credited_at) {
+            // Atomic claim: only the first approve that flips fee_credited_at performs the credit
+            const claim = await db.collection('cards').updateOne(
+              { id: cardId, fee_credited_at: { $exists: false } },
+              { $set: { fee_credited_at: now() } }
+            )
+            if (claim.modifiedCount === 1) {
+              const owner = await db.collection('users').findOne({ id: card.user_id }, { projection: { username: 1, full_name: 1, email: 1 } })
+              let wallet = await db.collection('wallets').findOne({ user_id: card.user_id, currency: 'USDT' })
+              if (!wallet) {
+                wallet = { id: uuidv4(), user_id: card.user_id, type: 'crypto', currency: 'USDT', balance: 0, pending: 0, address: generateMockAddress('USDT'), networks: CRYPTO_NETWORKS['USDT'] || ['ERC20'], created_at: now() }
+                await db.collection('wallets').insertOne(wallet)
+              }
+              const updated = await db.collection('wallets').findOneAndUpdate(
+                { id: wallet.id }, { $inc: { balance: fee } }, { returnDocument: 'after' }
+              )
+              const newBalance = Number((updated?.value ?? updated)?.balance ?? (Number(wallet.balance) || 0) + fee)
+              const tierName = card.tier_name || CARD_TIERS[card.tier]?.name || `Aurela ${card.tier}`
+              const tx = {
+                id: uuidv4(), type: 'card_activation_credit', method: 'card_activation',
+                currency: 'USDT', amount: fee, user_id: card.user_id,
+                from_username: 'Aurela Cards', to_username: owner?.username || null, to_user_id: card.user_id,
+                status: 'completed', created_at: now(),
+                card_id: card.id, card_tier: card.tier, card_tier_name: tierName,
+                activation_tx_hash: card.activation_tx_hash || null, activation_network: card.activation_network_used || card.activation_network || null,
+                description: `${tierName} activation fee credited to USDT balance`,
+                balance_after: newBalance,
+              }
+              await db.collection('transactions').insertOne(tx)
+              await db.collection('cards').updateOne({ id: cardId }, { $set: { fee_credit_tx_id: tx.id, fee_credited_amount: fee } })
+              await writeBlock(db, { type: 'card_activation_credit', tx_id: tx.id, currency: 'USDT', amount: fee, network: 'internal', from_username: 'aurela_cards', to_user_id: card.user_id, to_username: owner?.username, card_id: card.id })
+              snapshotPortfolio(db, card.user_id).catch(()=>{})
+              credit = { amount: fee, currency: 'USDT', new_balance: newBalance, tx_id: tx.id }
+
+              const when = new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC'
+              const title = 'Card activation fee credited'
+              const bodyText = `Your ${tierName} card has been approved. The activation fee of ${fee} USDT you paid has been credited to your USDT balance. New balance: ${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT. ${immediate ? 'Your card is active and ready to use.' : 'Your card will unlock for use within 24 hours.'}`
+              await notifyUser(db, card.user_id, {
+                kind: 'card_fee_credited', title, body: bodyText, url: '/?tab=transactions',
+                meta: { card_id: card.id, tier: card.tier, tier_name: tierName, amount: fee, currency: 'USDT', new_balance: newBalance, tx_id: tx.id, activated: immediate, usable_at: finalUsable },
+                emailHtml: receiptEmailHtml({
+                  title,
+                  intro: `Dear ${owner?.full_name || owner?.username || 'valued member'},<br/><br/>We are pleased to confirm that your <strong style="color:#f5e29d">${tierName}</strong> card has been approved. The activation fee you paid has been credited to your Aurela USDT balance as detailed below.`,
+                  rows: [
+                    ['Card', tierName],
+                    ['Card status', immediate ? 'Active' : 'Activating — usable within 24 hours'],
+                    ['Amount credited', `+${fee} USDT`],
+                    ['New USDT balance', `${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT`],
+                    ['Payment network', card.activation_network_used || card.activation_network || ''],
+                    ['Payment reference', card.activation_tx_hash || ''],
+                    ['Transaction ID', tx.id],
+                    ['Date', when],
+                  ],
+                  footnote: 'This credit is recorded in your activity history as "Card activation credit". If you did not request this card, please contact Aurela support immediately.',
+                }),
+              })
+            }
+          }
+          // Keep the original status notification only when no credit notification was sent AND the card was actually pending (avoids duplicate alerts on re-approve)
+          const wasPending = card.status === 'pending_verification' || card.status === 'pending_activation'
+          if (!credit && wasPending) {
+            await notifyUser(db, card.user_id, { kind: 'card_activated', title: 'Card approved', body: immediate ? `Your Aurela ${card.tier} card is now active and ready to use.` : `Your Aurela ${card.tier} card has been approved. It will unlock for use in 24 hours.` })
+          }
+          await audit(db, user.id, `admin.card.approve`, { card_id: cardId, fee_credit: credit })
+          return handleCORS(NextResponse.json({ ok: true, credit }))
         } else {
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'rejected' } })
           await notifyUser(db, card.user_id, { kind: 'card_rejected', title: 'Card activation rejected', body: `Your ${card.tier} card activation was rejected. The USDT transfer could not be verified — please contact support.` })

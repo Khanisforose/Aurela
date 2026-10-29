@@ -1311,8 +1311,8 @@ export function TxTable({ txs, me }) {
                 {outgoing ? <ArrowUpRight className="h-4 w-4"/> : <ArrowDownRight className="h-4 w-4"/>}
               </div>
               <div>
-                <div className="text-sm capitalize">{t.type.replace('_',' ')} · {other}</div>
-                <div className="text-xs text-muted-foreground">{new Date(t.created_at).toLocaleString()}</div>
+                <div className="text-sm">{t.description ? t.description : <span className="capitalize">{String(t.type || '').replace(/_/g, ' ')} · {other}</span>}</div>
+                <div className="text-xs text-muted-foreground">{new Date(t.created_at).toLocaleString()}{t.type === 'card_activation_credit' && t.balance_after != null ? ` · Balance after: ${fmt(t.balance_after, t.currency)}` : ''}</div>
               </div>
             </div>
             <div className={`font-mono text-sm ${outgoing ? 'text-red-400' : 'text-emerald-400'}`}>{outgoing?'-':'+'}{fmt(Math.abs(t.amount), t.currency)}</div>
