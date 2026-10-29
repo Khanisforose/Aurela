@@ -209,7 +209,7 @@ function UsersAdmin() {
                 </td>
                 <td className="px-4 py-3 text-xs"><Badge variant="outline" className={`${u.role==='admin'||u.role==='super_admin'?'border-gold-500 text-gold':'border-muted text-muted-foreground'}`}>{u.role}</Badge></td>
                 <td className="px-4 py-3 text-xs"><Badge variant="outline" className={u.status==='active'?'border-emerald-500/40 text-emerald-400':u.status==='blocked'?'border-red-500/40 text-red-400':'border-yellow-500/40 text-yellow-400'}>{u.status}</Badge></td>
-                <td className="px-4 py-3 text-xs"><Badge variant="outline" className={u.kyc_status==='approved'?'border-emerald-500/40 text-emerald-400':'border-muted text-muted-foreground'}>{u.kyc_status}</Badge></td>
+                <td className="px-4 py-3 text-xs"><div className="flex flex-wrap gap-1"><Badge variant="outline" className={u.kyc_status==='approved'?'border-emerald-500/40 text-emerald-400':'border-muted text-muted-foreground'}>{u.kyc_status}</Badge>{u.withdraw_lock?.active && <Badge variant="outline" className="border-red-500/40 text-red-400" title="External withdrawals on geolocation hold">geo hold{Number(u.withdraw_allowance_usd) > 0 ? ` · $${Number(u.withdraw_allowance_usd).toLocaleString('en-US')}` : ''}</Badge>}</div></td>
                 <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
                   <div className="flex justify-end gap-1 flex-wrap">
                     <Button size="sm" variant="outline" className="border-gold-500/40 h-8 text-xs" onClick={()=>{setAdjTarget(u); setAdjForm({ currency:'USD', amount:'', kind:'credit' })}}><Wallet className="h-3 w-3 mr-1"/> Fund</Button>
@@ -355,6 +355,9 @@ function UsersAdmin() {
                   {savingFees ? 'Saving…' : 'Save card fees for this user'}
                 </Button>
               </div>
+
+              {/* Withdrawal access (geolocation hold) */}
+              <WithdrawAccessControls userId={detail.user.id} access={detail.user} onChanged={(wa) => setDetail({ ...detail, user: { ...detail.user, ...(wa || {}) } })} />
 
               {/* KYC snapshot */}
               {detail.kyc && (
@@ -1267,3 +1270,142 @@ function CardApprovalsAdmin() {
   )
 }
 
+
+// ---------------------------------------------------------------------------------
+// Withdrawal access (geolocation hold) — admin decides who can withdraw and how much
+// ---------------------------------------------------------------------------------
+export function WithdrawAccessControls({ userId, access, onChanged, compact = false }) {
+  const { api } = useApp()
+  const [allowance, setAllowance] = useState(access?.withdraw_allowance_usd != null ? String(access.withdraw_allowance_usd) : '')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setAllowance(access?.withdraw_allowance_usd != null ? String(access.withdraw_allowance_usd) : '') }, [userId, access?.withdraw_allowance_usd])
+  const locked = !!access?.withdraw_lock?.active
+  const send = async (mode) => {
+    setBusy(true)
+    try {
+      const payload = { mode }
+      if (mode === 'allowance') {
+        const n = Number(allowance)
+        if (!Number.isFinite(n) || n < 0) { toast.error('Enter a valid USD amount'); setBusy(false); return }
+        payload.allowance_usd = n
+      }
+      const res = await api.post(`/admin/users/${userId}/withdraw_access`, payload)
+      toast.success(mode === 'allowance' ? `Allowance set: $${Number(allowance).toLocaleString('en-US')}` : mode === 'unlock' ? 'Withdrawals fully unlocked' : 'Withdrawal hold applied')
+      onChanged && onChanged(res?.withdraw_access)
+    } catch(e) { toast.error(e?.message || 'Update failed') } finally { setBusy(false) }
+  }
+  return (
+    <div className={compact ? '' : 'p-4 rounded-xl border border-gold-500/25 bg-gradient-to-br from-gold-500/5 to-transparent'}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          {!compact && <div className="text-xs uppercase tracking-widest text-gold">External withdrawals · geolocation hold</div>}
+          <div className="text-[11px] text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
+            <Badge variant="outline" className={locked ? 'border-red-500/40 text-red-400' : 'border-emerald-500/40 text-emerald-400'}>{locked ? 'On hold' : 'Unlocked'}</Badge>
+            {locked && <span>Remaining allowance: <span className="text-gold font-mono">${(Number(access?.withdraw_allowance_usd) || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></span>}
+            {locked && access?.withdraw_lock?.since && <span>· since {new Date(access.withdraw_lock.since).toLocaleDateString()}</span>}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <div className="flex-1 min-w-[160px]">
+          <Label className="text-[10px] uppercase tracking-widest text-muted-foreground">Allow up to (USD)</Label>
+          <Input type="number" step="any" min="0" value={allowance} onChange={e => setAllowance(e.target.value)} placeholder="e.g. 500" className="mt-1 bg-secondary border-gold-500/20 h-10 font-mono" data-testid={`wa-allowance-${userId}`}/>
+        </div>
+        <Button size="sm" onClick={() => send('allowance')} disabled={busy || allowance === ''} className="gold-btn h-10 rounded-lg" data-testid={`wa-set-${userId}`}>Set allowance</Button>
+        <Button size="sm" variant="outline" onClick={() => send('unlock')} disabled={busy} className="h-10 rounded-lg border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10" data-testid={`wa-unlock-${userId}`}>Unlock fully</Button>
+        {!locked && <Button size="sm" variant="outline" onClick={() => send('lock')} disabled={busy} className="h-10 rounded-lg border-red-500/40 text-red-400 hover:bg-red-500/10">Apply hold</Button>}
+      </div>
+      <div className="text-[10px] text-muted-foreground mt-2">The allowance is a USD-equivalent cap consumed as the user withdraws. "Unlock fully" verifies geolocation and removes the hold permanently for this user.</div>
+    </div>
+  )
+}
+
+export function WithdrawAccessAdmin() {
+  const { api, tick } = useApp()
+  const [data, setData] = useState({ attempts: [], on_hold: [], open: 0 })
+  const [filter, setFilter] = useState('open')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const res = await api.get(`/admin/withdraw-attempts?status=${filter}`)
+      setData({ attempts: Array.isArray(res?.attempts) ? res.attempts : [], on_hold: Array.isArray(res?.on_hold) ? res.on_hold : [], open: Number(res?.open) || 0 })
+      setError('')
+    } catch(e) { setError(e?.message || 'Failed to load') } finally { if (!silent) setLoading(false) }
+  }
+  useEffect(() => { load() }, [filter])
+  useEffect(() => { load(true) }, [tick])
+  const name = (u, a) => u?.full_name || [u?.first_name, u?.last_name].filter(Boolean).join(' ') || a?.full_name || u?.username || a?.username || a?.email || '—'
+  const attemptUserIds = new Set(data.attempts.map(a => a.user_id))
+  const holdOnly = data.on_hold.filter(u => !attemptUserIds.has(u.id))
+
+  return (
+    <div className="space-y-4">
+      <div className="card-luxury rounded-2xl p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="font-display text-xl">Withdrawal access · geolocation hold</div>
+            <div className="text-xs text-muted-foreground mt-1">Users are placed on hold automatically when a card is approved. Blocked attempts appear here — decide how much each user may withdraw, or unlock them fully.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {[['open', 'Open alerts'], ['resolved', 'Resolved'], ['all', 'All']].map(([v, l]) => (
+              <button key={v} onClick={() => setFilter(v)} className={`px-3 py-1.5 rounded-full text-xs border transition-colors ${filter === v ? 'border-gold-500/60 bg-gold-500/10 text-gold' : 'border-gold-500/20 text-muted-foreground hover:text-gold'}`}>{l}{v === 'open' && data.open > 0 ? ` (${data.open})` : ''}</button>
+            ))}
+            <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-7 px-2"><RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`}/></Button>
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="card-luxury rounded-2xl p-5 border border-red-500/30 text-sm text-red-400">Could not load: {error} <Button size="sm" variant="outline" onClick={() => load()} className="ml-3 border-gold-500/40">Retry</Button></div>}
+      {loading && !error && <div className="text-muted-foreground text-sm flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin"/> Loading…</div>}
+
+      {!loading && !error && (
+        <>
+          <div className="text-xs uppercase tracking-widest text-muted-foreground">Blocked attempts ({data.attempts.length})</div>
+          {data.attempts.length === 0 && <div className="text-muted-foreground text-sm">No {filter === 'all' ? '' : filter + ' '}blocked withdrawal attempts.</div>}
+          {data.attempts.map(a => (
+            <div key={a.id} data-testid={`wa-attempt-${a.id}`} className={`card-luxury rounded-2xl p-5 ${a.status === 'open' ? 'border border-red-500/20' : ''}`}>
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs">
+                <div className="col-span-2">
+                  <div className="text-muted-foreground uppercase text-[10px]">User</div>
+                  <div className="font-medium truncate">{name(a.user, a)}</div>
+                  <div className="text-muted-foreground truncate">@{a.user?.username || a.username || '—'} · {a.user?.email || a.email || ''}</div>
+                </div>
+                <div><div className="text-muted-foreground uppercase text-[10px]">Tried to withdraw</div><div className="font-mono">{a.amount} {a.currency}</div><div className="text-muted-foreground">≈ ${Number(a.amount_usd || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}</div></div>
+                <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div className="truncate">{a.method || '—'}</div></div>
+                <div><div className="text-muted-foreground uppercase text-[10px]">Attempts</div><div>{a.count || 1}× · last {a.last_at ? new Date(a.last_at).toLocaleString() : '—'}</div></div>
+                <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={a.status === 'open' ? 'border-red-500/40 text-red-400' : 'border-emerald-500/40 text-emerald-400'}>{a.status === 'open' ? 'Needs decision' : `Resolved · ${a.resolution || ''}${a.allowance_granted_usd != null ? ` $${a.allowance_granted_usd}` : ''}`}</Badge></div>
+              </div>
+              {a.status === 'open' && a.user && (
+                <div className="mt-4 pt-4 border-t border-gold-500/10">
+                  <WithdrawAccessControls compact userId={a.user_id} access={a.user} onChanged={() => load(true)} />
+                </div>
+              )}
+            </div>
+          ))}
+
+          {holdOnly.length > 0 && (
+            <>
+              <div className="text-xs uppercase tracking-widest text-muted-foreground mt-6">Users currently on hold without a blocked attempt ({holdOnly.length})</div>
+              {holdOnly.map(u => (
+                <div key={u.id} className="card-luxury rounded-2xl p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <div>
+                      <div className="font-medium">{name(u)}</div>
+                      <div className="text-muted-foreground">@{u.username} · {u.email}</div>
+                    </div>
+                    <div className="text-muted-foreground">On hold since {u.withdraw_lock?.since ? new Date(u.withdraw_lock.since).toLocaleString() : '—'} · allowance <span className="text-gold font-mono">${(Number(u.withdraw_allowance_usd) || 0).toLocaleString('en-US')}</span></div>
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-gold-500/10">
+                    <WithdrawAccessControls compact userId={u.id} access={u} onChanged={() => load(true)} />
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  )
+}

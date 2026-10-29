@@ -13,7 +13,13 @@ const api = {
     const res = await fetch(this.base + path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined })
     let json = null
     try { json = await res.json() } catch(e) {}
-    if (!res.ok) throw new Error(json?.error || 'Request failed')
+    if (!res.ok) {
+      const err = new Error(json?.error || 'Request failed')
+      err.status = res.status
+      err.code = json?.code || null
+      err.data = json || null
+      throw err
+    }
     return json
   },
   get(p) { return this.request(p) },

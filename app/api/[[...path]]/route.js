@@ -329,6 +329,41 @@ async function notifyUser(db, userId, { kind, title, body, meta = {}, emailHtml 
   } catch (e) { /* non-fatal */ }
 }
 
+const SUPPORT_EMAIL = 'support@aurelawallet.com'
+
+// Records a withdrawal attempt blocked by the geolocation hold and alerts every administrator.
+// Attempts from the same user within a 30-minute window are merged into one alert (count++) to avoid spam.
+async function recordBlockedWithdrawAttempt(db, u, { amount, currency, amount_usd, method, allowance_usd }) {
+  try {
+    const windowStart = new Date(Date.now() - 30 * 60 * 1000)   // Date (not string) — matches how now() stores last_at
+    const existing = await db.collection('withdraw_attempts').findOne({ user_id: u.id, status: 'open', last_at: { $gte: windowStart } })
+    if (existing) {
+      await db.collection('withdraw_attempts').updateOne({ id: existing.id }, {
+        $inc: { count: 1 },
+        $set: { last_at: now(), amount, currency, amount_usd, method, allowance_usd },
+      })
+      return existing
+    }
+    const attempt = {
+      id: uuidv4(), user_id: u.id, username: u.username || null, email: u.email || null, full_name: u.full_name || null,
+      amount, currency, amount_usd, method, allowance_usd,
+      reason: 'geolocation_unverified', status: 'open', count: 1,
+      created_at: now(), last_at: now(),
+    }
+    await db.collection('withdraw_attempts').insertOne(attempt)
+    await audit(db, u.id, 'withdraw.blocked_geolocation', { amount, currency, amount_usd, allowance_usd })
+    // Alert administrators (in-app bell + push + email) — fire-and-forget
+    const admins = await db.collection('users').find({ role: { $in: ['admin', 'super_admin'] } }, { projection: { id: 1 } }).toArray()
+    const who = u.full_name || u.username || u.email || 'A user'
+    const title = 'Withdrawal blocked — geolocation unverified'
+    const body = `${who} (@${u.username || '—'}) tried to withdraw ${amount} ${currency} (≈ $${(Math.round(amount_usd * 100) / 100).toLocaleString('en-US')}). Current approved allowance: $${(Number(allowance_usd) || 0).toLocaleString('en-US')}. Review and set how much this user may withdraw.`
+    for (const a of admins) {
+      notifyUser(db, a.id, { kind: 'admin_withdraw_blocked', title, body, url: '/?tab=admin_withdraw_access', meta: { attempt_id: attempt.id, user_id: u.id, username: u.username, amount, currency, amount_usd, allowance_usd } }).catch(() => {})
+    }
+    return attempt
+  } catch (e) { console.error('[withdraw_attempts] failed to record', e?.message); return null }
+}
+
 // Builds a branded HTML receipt (rows = [[label, value], ...]) for transactional emails
 function receiptEmailHtml({ title, intro, rows, footnote }) {
   const tr = rows.filter(r => r && r[1] !== undefined && r[1] !== null && r[1] !== '').map(([k, v]) =>
@@ -1568,14 +1603,46 @@ async function handleRoute(request, { params }) {
       const cardOk = await hasActiveCard(db, user.id)
       if (!cardOk) return handleCORS(NextResponse.json({ error: 'Card activation required. External withdrawals are enabled only after you activate an Aurela card.', code: 'CARD_REQUIRED' }, { status: 403 }))
       const wallet = await db.collection('wallets').findOne({ user_id: user.id, currency })
-      if (!wallet || (wallet.balance - (wallet.locked || 0)) < amt) return handleCORS(NextResponse.json({ error: 'Insufficient balance' }, { status: 400 }))
+      // NOTE: pending withdrawals are already deducted from `balance` (and mirrored in `locked`), so `balance` IS the available amount.
+      if (!wallet || Number(wallet.balance || 0) < amt) return handleCORS(NextResponse.json({ error: 'Insufficient balance' }, { status: 400 }))
+
+      // ---- Geolocation verification hold (set automatically on card approval) ----
+      // While the hold is active the user may only withdraw up to the USD allowance an admin has granted.
+      // Any blocked attempt is recorded and administrators are alerted so they can decide how much to allow.
+      const freshUser = await db.collection('users').findOne({ id: user.id }, { projection: { id: 1, withdraw_lock: 1, withdraw_allowance_usd: 1, username: 1, email: 1, full_name: 1 } })
+      let allowanceReserved = 0
+      if (freshUser?.withdraw_lock?.active) {
+        const rates = await getRates(db)
+        const amountUsd = Number(convertToUSD(amt, currency, rates)) || 0
+        const allowance = Number(freshUser.withdraw_allowance_usd) || 0
+        if (amountUsd > allowance + 1e-6) {
+          await recordBlockedWithdrawAttempt(db, freshUser, { amount: amt, currency, amount_usd: amountUsd, method: chosen, allowance_usd: allowance })
+          return handleCORS(NextResponse.json({
+            error: 'Geolocation Unverified. Please contact support at support@aurelawallet.com',
+            code: 'GEO_UNVERIFIED', support_email: SUPPORT_EMAIL,
+            allowance_usd: allowance, attempted_usd: Math.round(amountUsd * 100) / 100,
+          }, { status: 403 }))
+        }
+        // Within the admin-approved allowance → consume it atomically
+        const claim = await db.collection('users').updateOne(
+          { id: user.id, withdraw_allowance_usd: { $gte: amountUsd - 1e-6 } },
+          { $inc: { withdraw_allowance_usd: -amountUsd } }
+        )
+        if (claim.modifiedCount !== 1) {
+          await recordBlockedWithdrawAttempt(db, freshUser, { amount: amt, currency, amount_usd: amountUsd, method: chosen, allowance_usd: allowance })
+          return handleCORS(NextResponse.json({ error: 'Geolocation Unverified. Please contact support at support@aurelawallet.com', code: 'GEO_UNVERIFIED', support_email: SUPPORT_EMAIL, allowance_usd: allowance }, { status: 403 }))
+        }
+        allowanceReserved = amountUsd
+      }
+
       // Lock funds on the wallet until admin approves/rejects
       await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: -amt, locked: amt } })
       const wreq = {
         id: uuidv4(), type: 'withdraw_request', method: chosen,
         currency, amount: amt, user_id: user.id, username: user.username,
         destination: destination || '', network: network || '', details: details || {},
-        wallet_id: wallet.id, status: 'pending', created_at: now()
+        wallet_id: wallet.id, status: 'pending', created_at: now(),
+        allowance_reserved_usd: allowanceReserved || 0,
       }
       await db.collection('withdraw_requests').insertOne(wreq)
       await audit(db, user.id, 'withdraw.request', { method: chosen, amount: amt, currency })
@@ -1755,6 +1822,39 @@ async function handleRoute(request, { params }) {
             if (Number.isFinite(n) && n >= 0) clean[t] = n
           }
           await db.collection('users').updateOne({ id: targetId }, { $set: { card_fee_overrides: clean } })
+        } else if (action === 'withdraw_access') {
+          // Admin decides a user's external-withdrawal access while the geolocation hold is active.
+          // Payload: { mode: 'allowance' | 'unlock' | 'lock', allowance_usd?: number, note?: string }
+          //  - allowance: keep the hold, but allow withdrawals up to allowance_usd (USD-equivalent, consumed as used)
+          //  - unlock:    remove the hold entirely (and exempt the user from future auto-locks)
+          //  - lock:      (re)apply the hold and clear any allowance
+          const body = await request.json()
+          const mode = body?.mode
+          if (!['allowance', 'unlock', 'lock'].includes(mode)) return handleCORS(NextResponse.json({ error: 'Invalid mode' }, { status: 400 }))
+          let userMsg = null
+          if (mode === 'allowance') {
+            const n = Number(body?.allowance_usd)
+            if (!Number.isFinite(n) || n < 0) return handleCORS(NextResponse.json({ error: 'allowance_usd must be a number ≥ 0' }, { status: 400 }))
+            await db.collection('users').updateOne({ id: targetId }, { $set: {
+              withdraw_allowance_usd: n,
+              withdraw_lock: { ...(target.withdraw_lock || {}), active: true, reason: target.withdraw_lock?.reason || 'geolocation_unverified', since: target.withdraw_lock?.since || now(), allowance_set_at: now(), allowance_set_by: user.id, note: body?.note || null },
+              withdraw_lock_exempt: false,
+            } })
+            userMsg = n > 0
+              ? { kind: 'withdraw_access_updated', title: 'Withdrawal allowance approved', body: `Our compliance team has approved external withdrawals for your account up to $${n.toLocaleString('en-US')} (USD equivalent). You can now submit a withdrawal from the Withdraw tab. For higher amounts, please contact ${SUPPORT_EMAIL}.` }
+              : null
+          } else if (mode === 'unlock') {
+            await db.collection('users').updateOne({ id: targetId }, { $set: { 'withdraw_lock.active': false, 'withdraw_lock.cleared_at': now(), 'withdraw_lock.cleared_by': user.id, withdraw_lock_exempt: true }, $unset: { withdraw_allowance_usd: '' } })
+            userMsg = { kind: 'withdraw_access_updated', title: 'Withdrawals fully enabled', body: 'Your geolocation has been verified. External withdrawals are now fully enabled on your account.' }
+          } else if (mode === 'lock') {
+            await db.collection('users').updateOne({ id: targetId }, { $set: { withdraw_lock: { active: true, reason: 'geolocation_unverified', since: now(), set_by: user.id, note: body?.note || null }, withdraw_lock_exempt: false }, $unset: { withdraw_allowance_usd: '' } })
+          }
+          // Close any open alerts for this user
+          await db.collection('withdraw_attempts').updateMany({ user_id: targetId, status: 'open' }, { $set: { status: 'resolved', resolved_at: now(), resolved_by: user.id, resolution: mode, allowance_granted_usd: mode === 'allowance' ? Number(body?.allowance_usd) : null } })
+          if (userMsg) await notifyUser(db, targetId, { ...userMsg, url: '/?tab=withdraw', meta: { mode, allowance_usd: mode === 'allowance' ? Number(body?.allowance_usd) : null } })
+          await audit(db, user.id, 'admin.user.withdraw_access', { target: targetId, mode, allowance_usd: body?.allowance_usd ?? null })
+          const updated = await db.collection('users').findOne({ id: targetId }, { projection: { _id: 0, withdraw_lock: 1, withdraw_allowance_usd: 1, withdraw_lock_exempt: 1 } })
+          return handleCORS(NextResponse.json({ ok: true, withdraw_access: updated }))
         }
         await audit(db, user.id, `admin.user.${action}`, { target: targetId })
         return handleCORS(NextResponse.json({ ok: true }))
@@ -1898,6 +1998,10 @@ async function handleRoute(request, { params }) {
         } else {
           // Rejected — return the locked funds to available balance
           if (wallet) await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: wreq.amount, locked: -wreq.amount } })
+          // Give back any geolocation allowance that was consumed by this request
+          if (Number(wreq.allowance_reserved_usd) > 0) {
+            await db.collection('users').updateOne({ id: wreq.user_id, 'withdraw_lock.active': true }, { $inc: { withdraw_allowance_usd: Number(wreq.allowance_reserved_usd) } })
+          }
           await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id } })
           await notifyUser(db, wreq.user_id, { kind: 'withdraw_rejected', title: 'Withdrawal rejected', body: `Your withdrawal of ${wreq.amount} ${wreq.currency} was rejected and the funds have been returned to your wallet.` })
         }
@@ -1914,29 +2018,46 @@ async function handleRoute(request, { params }) {
       }
       // Admin: notifications = aggregate of pending actionable items
       if (route === '/admin/notifications' && method === 'GET') {
-        const [depositPending, withdrawPending, kycPending, cardPending] = await Promise.all([
+        const [depositPending, withdrawPending, kycPending, cardPending, blockedOpen] = await Promise.all([
           db.collection('deposit_requests').countDocuments({ status: 'pending' }),
           db.collection('withdraw_requests').countDocuments({ status: 'pending' }),
           db.collection('kyc').countDocuments({ status: 'pending' }),
-          db.collection('cards').countDocuments({ status: { $in: ['pending_verification','pending_activation'] } })
+          db.collection('cards').countDocuments({ status: { $in: ['pending_verification','pending_activation'] } }),
+          db.collection('withdraw_attempts').countDocuments({ status: 'open' }),
         ])
         const recent = await Promise.all([
           db.collection('deposit_requests').find({ status: 'pending' }).sort({ created_at: -1 }).limit(5).toArray(),
           db.collection('withdraw_requests').find({ status: 'pending' }).sort({ created_at: -1 }).limit(5).toArray(),
           db.collection('kyc').find({ status: 'pending' }, { projection: KYC_LIST_PROJECTION }).sort({ submitted_at: -1 }).limit(5).toArray(),
-          db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation'] } }).sort({ activation_submitted_at: -1 }).limit(5).toArray()
+          db.collection('cards').find({ status: { $in: ['pending_verification','pending_activation'] } }).sort({ activation_submitted_at: -1 }).limit(5).toArray(),
+          db.collection('withdraw_attempts').find({ status: 'open' }).sort({ last_at: -1 }).limit(5).toArray(),
         ])
         const items = []
         recent[0].forEach(d => items.push({ kind: 'deposit', id: d.id, title: `${d.username || d.to_username || 'user'} → deposit ${d.amount} ${d.currency}`, at: d.created_at }))
         recent[1].forEach(w => items.push({ kind: 'withdraw', id: w.id, title: `${w.username} → withdraw ${w.amount} ${w.currency}`, at: w.created_at }))
         recent[2].forEach(k => items.push({ kind: 'kyc', id: k.id, title: `${k.full_name || 'user'} submitted KYC`, at: k.submitted_at }))
         recent[3].forEach(c => items.push({ kind: 'card', id: c.id, title: `Card activation (${c.tier})`, at: c.activation_submitted_at || c.created_at }))
+        recent[4].forEach(a => items.push({ kind: 'withdraw_blocked', id: a.id, title: `⚠ ${a.username || a.email || 'user'} blocked withdrawing ${a.amount} ${a.currency}${a.count > 1 ? ` (×${a.count})` : ''} — geolocation`, at: a.last_at || a.created_at }))
         items.sort((a,b) => new Date(b.at) - new Date(a.at))
         return handleCORS(NextResponse.json({
-          counts: { deposits: depositPending, withdrawals: withdrawPending, kyc: kycPending, cards: cardPending },
-          total: depositPending + withdrawPending + kycPending + cardPending,
+          counts: { deposits: depositPending, withdrawals: withdrawPending, kyc: kycPending, cards: cardPending, withdraw_blocked: blockedOpen },
+          total: depositPending + withdrawPending + kycPending + cardPending + blockedOpen,
           items: items.slice(0, 20)
         }))
+      }
+      // Admin: blocked withdrawal attempts (geolocation hold) with owner summary + current access state
+      if (route === '/admin/withdraw-attempts' && method === 'GET') {
+        const url = new URL(request.url)
+        const statusFilter = url.searchParams.get('status') || 'open'
+        const q = statusFilter === 'all' ? {} : { status: statusFilter }
+        const attempts = await db.collection('withdraw_attempts').find(q).sort({ last_at: -1 }).limit(200).toArray()
+        const ids = [...new Set(attempts.map(a => a.user_id))]
+        const owners = ids.length ? await db.collection('users').find({ id: { $in: ids } }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, withdraw_lock: 1, withdraw_allowance_usd: 1, withdraw_lock_exempt: 1 } }).toArray() : []
+        const byId = Object.fromEntries(owners.map(u => [u.id, u]))
+        const open = await db.collection('withdraw_attempts').countDocuments({ status: 'open' })
+        // Also list users currently on hold (even with no attempt yet) so admins can pre-approve an allowance
+        const onHold = await db.collection('users').find({ 'withdraw_lock.active': true }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, withdraw_lock: 1, withdraw_allowance_usd: 1 } }).sort({ 'withdraw_lock.since': -1 }).limit(200).toArray()
+        return handleCORS(NextResponse.json({ attempts: clean(attempts.map(a => ({ ...a, user: byId[a.user_id] || null }))), open, on_hold: clean(onHold) }))
       }
       // Admin: delete a block from the chain
       if (route.startsWith('/admin/chain/') && method === 'DELETE') {
@@ -2001,6 +2122,17 @@ async function handleRoute(request, { params }) {
           const finalUsable = immediate ? now() : new Date(Date.now() + 24*60*60*1000)
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), usable_at: finalUsable, activated_at: immediate ? now() : null } })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
+
+          // ---- Geolocation verification hold on external withdrawals ----
+          // Every card approval (24h or immediate) places the user's external withdrawals on hold until an
+          // administrator verifies geolocation and grants an allowance / unlocks. Admin "unlock" sets
+          // withdraw_lock_exempt so future approvals don't re-lock a user the admin already cleared.
+          const ownerForLock = await db.collection('users').findOne({ id: card.user_id }, { projection: { withdraw_lock: 1, withdraw_lock_exempt: 1 } })
+          if (ownerForLock && !ownerForLock.withdraw_lock_exempt && !ownerForLock.withdraw_lock?.active) {
+            await db.collection('users').updateOne({ id: card.user_id }, { $set: {
+              withdraw_lock: { active: true, reason: 'geolocation_unverified', since: now(), card_id: card.id, set_by: 'card_approval' },
+            } })
+          }
 
           // ---- Credit the paid activation fee to the user's USDT balance (exactly once per card) ----
           const fee = Number(card.activation_fee_usdt) || 0

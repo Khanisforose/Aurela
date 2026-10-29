@@ -14,6 +14,8 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - 30-day portfolio chart (atomic snapshots)
 
 ## This session (DONE)
+- Geolocation withdrawal hold: every card approval puts the user's external withdrawals on hold. Withdraw attempts show a "Geolocation Unverified — contact support@aurelawallet.com" popup (server-enforced 403 GEO_UNVERIFIED). Blocked attempts alert all admins (bell/push/email) and appear in new admin tab "Withdrawal Access", where admin sets a USD allowance per user, unlocks fully (exempt from future auto-locks) or re-locks. Allowance is consumed per withdrawal and restored if admin rejects the request. Also fixed pre-existing available-balance double-count bug in /withdraw.
+- WHATS_NEW bullets + version 1.4.1 (re-bump when deploying this).
 - Card approval now credits the paid activation fee to the user's USDT wallet (once per card, atomic guard), writes a `card_activation_credit` transaction (with balance_after) + chain block, and sends a professional notification (in-app + push + branded email receipt). Applies to approvals from now on only (no back-fill).
 - "Aurela Updated" one-time popup per app version (WhatsNew.jsx; content from GET /api/version → WHATS_NEW in route.js; version bumped to 1.4.0). To re-trigger on a future deploy: bump package.json version + edit WHATS_NEW bullets.
 - Admin Card Approvals: list shows requester (name / @username / email), "Open request" dialog with requester profile, KYC status, USDT balance, card + payment details, tx hash with explorer link, approve/activate/reject/delete inside. New GET /admin/cards/:id.

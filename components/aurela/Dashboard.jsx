@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -17,9 +17,9 @@ import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
-  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink
+  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail
 } from 'lucide-react'
-import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin } from './AdminPanel'
+import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin, WithdrawAccessAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { SwapTab } from './SwapTab'
 import { BottomNav, MOBILE_TABS } from './BottomNav'
@@ -47,6 +47,7 @@ const ADMIN_NAV = [
   { id: 'admin_kyc', label: 'KYC Review', icon: ShieldCheck },
   { id: 'admin_deposits', label: 'Deposit Requests', icon: ArrowDownToLine },
   { id: 'admin_withdrawals', label: 'Withdraw Requests', icon: ArrowUpFromLine },
+  { id: 'admin_withdraw_access', label: 'Withdrawal Access', icon: ShieldAlert },
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
@@ -224,12 +225,13 @@ export function Dashboard() {
                       <span className="text-[10px] text-gold uppercase tracking-widest">{notif.total} open</span>
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator className="bg-gold-500/15"/>
-                    <div className="grid grid-cols-4 gap-1 p-2">
+                    <div className="grid grid-cols-5 gap-1 p-2">
                       {[
                         { k: 'deposits', tab: 'admin_deposits', label: 'Deposits' },
                         { k: 'withdrawals', tab: 'admin_withdrawals', label: 'Withdraw' },
                         { k: 'cards', tab: 'admin_card_approvals', label: 'Cards' },
                         { k: 'kyc', tab: 'admin_kyc', label: 'KYC' },
+                        { k: 'withdraw_blocked', tab: 'admin_withdraw_access', label: 'Geo hold' },
                       ].map(x => (
                         <button key={x.k} onClick={() => setTab(x.tab)} className="rounded-lg bg-secondary/60 hover:bg-gold-500/10 p-2 text-center border border-gold-500/10">
                           <div className="text-lg font-display text-gold">{notif.counts?.[x.k] ?? 0}</div>
@@ -241,7 +243,7 @@ export function Dashboard() {
                     <div className="max-h-64 overflow-y-auto">
                       {notif.items?.length === 0 && <div className="p-4 text-xs text-muted-foreground text-center">No pending requests 🎉</div>}
                       {notif.items?.map(it => {
-                        const targetTab = it.kind === 'deposit' ? 'admin_deposits' : it.kind === 'withdraw' ? 'admin_withdrawals' : it.kind === 'card' ? 'admin_card_approvals' : 'admin_kyc'
+                        const targetTab = it.kind === 'deposit' ? 'admin_deposits' : it.kind === 'withdraw' ? 'admin_withdrawals' : it.kind === 'card' ? 'admin_card_approvals' : it.kind === 'withdraw_blocked' ? 'admin_withdraw_access' : 'admin_kyc'
                         return (
                           <DropdownMenuItem key={it.kind + it.id} onClick={() => setTab(targetTab)} className="cursor-pointer focus:bg-gold-500/10 focus:text-gold">
                             <div className="flex-1 min-w-0">
@@ -365,6 +367,7 @@ export function Dashboard() {
               {tab === 'admin_kyc' && isAdmin && <KycAdmin/>}
               {tab === 'admin_deposits' && isAdmin && <DepositsAdmin/>}
               {tab === 'admin_withdrawals' && isAdmin && <WithdrawalsAdmin/>}
+              {tab === 'admin_withdraw_access' && isAdmin && <WithdrawAccessAdmin/>}
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
@@ -1165,6 +1168,7 @@ function WithdrawTab({ wallets, onDone }) {
   const [details, setDetails] = useState({})
   const [loading, setLoading] = useState(false)
   const [cards, setCards] = useState([])
+  const [geoBlock, setGeoBlock] = useState(null) // { allowance_usd, attempted_usd, support_email } → "Geolocation Unverified" popup
   const wallet = wallets.find(w => w.currency === form.currency)
   const isCrypto = wallet?.type === 'crypto'
   const hasActiveCard = cards.some(c => c.status === 'active' && !c.frozen)
@@ -1208,8 +1212,45 @@ function WithdrawTab({ wallets, onDone }) {
       onDone && onDone()
       setForm({ ...form, amount: '', destination: '' })
       setDetails({})
-    } catch(e) { toast.error(e.message) } finally { setLoading(false) }
+    } catch(e) {
+      if (e?.code === 'GEO_UNVERIFIED') setGeoBlock({ allowance_usd: e?.data?.allowance_usd ?? 0, attempted_usd: e?.data?.attempted_usd, support_email: e?.data?.support_email || 'support@aurelawallet.com' })
+      else toast.error(e.message)
+    } finally { setLoading(false) }
   }
+
+  const geoDialog = (
+    <Dialog open={!!geoBlock} onOpenChange={v => !v && setGeoBlock(null)}>
+      <DialogContent className="bg-onyx-900 border-red-500/30 max-w-md p-0 overflow-hidden" data-testid="geo-unverified-dialog">
+        <div className="px-6 pt-8 pb-5 text-center bg-gradient-to-b from-red-500/10 to-transparent">
+          <div className="mx-auto h-14 w-14 rounded-full bg-red-500/10 border border-red-500/40 flex items-center justify-center">
+            <MapPinOff className="h-7 w-7 text-red-400"/>
+          </div>
+          <DialogTitle className="font-display text-2xl mt-4 font-normal">Geolocation Unverified</DialogTitle>
+          <DialogDescription className="text-sm text-muted-foreground mt-2 leading-relaxed">
+            We could not verify the geolocation linked to your account, so this withdrawal cannot be processed right now. Please contact our support team to complete verification.
+          </DialogDescription>
+        </div>
+        <div className="px-6 pb-6 space-y-4">
+          <a href={`mailto:${geoBlock?.support_email || 'support@aurelawallet.com'}?subject=Geolocation%20verification%20-%20${encodeURIComponent(user?.username || '')}`}
+             className="flex items-center justify-between gap-3 rounded-xl border border-gold-500/30 bg-secondary/60 px-4 py-3 hover:bg-gold-500/10 transition-colors" data-testid="geo-support-email">
+            <div className="flex items-center gap-3 min-w-0">
+              <Mail className="h-4 w-4 text-gold shrink-0"/>
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Contact support</div>
+                <div className="text-sm text-gold truncate">{geoBlock?.support_email || 'support@aurelawallet.com'}</div>
+              </div>
+            </div>
+            <ExternalLink className="h-4 w-4 text-muted-foreground shrink-0"/>
+          </a>
+          {Number(geoBlock?.allowance_usd) > 0 && (
+            <div className="text-xs text-muted-foreground text-center">Your currently approved withdrawal limit is <span className="text-gold">${Number(geoBlock.allowance_usd).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span> (USD equivalent). This request{geoBlock?.attempted_usd ? ` (≈ $${Number(geoBlock.attempted_usd).toLocaleString('en-US')})` : ''} exceeds it.</div>
+          )}
+          <div className="text-[11px] text-muted-foreground text-center">Our team has been notified and will review your account. Internal transfers to Aurela members remain available.</div>
+          <Button onClick={() => setGeoBlock(null)} className="gold-btn w-full rounded-full h-11" data-testid="geo-dismiss">Understood</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
 
   if (user?.kyc_status !== 'approved') return <KycGate action="withdraw funds"/>
 
@@ -1236,6 +1277,7 @@ function WithdrawTab({ wallets, onDone }) {
 
   return (
     <div className="card-luxury rounded-2xl p-6 max-w-3xl">
+      {geoDialog}
       <div className="font-display text-2xl">Withdraw funds</div>
       <div className="text-sm text-muted-foreground">Send fiat to bank/UPI or crypto to an external wallet. Every withdrawal is reviewed by admin before it is released.</div>
       <div className="mt-6 space-y-4">
