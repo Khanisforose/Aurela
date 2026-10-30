@@ -49,3 +49,8 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 ## v1.5.0 — "Aurela Updated" popup (generic notes)
 - package.json bumped 1.4.2 → 1.5.0; WHATS_NEW in route.js now lists only generic user-facing notes (stability, optimization, security).
 - Rule: never mention admin-side features in WHATS_NEW; keep bullets short and generic unless the user asks otherwise.
+
+## KYC hardening + rejection reasons (ships in v1.5.0)
+- Registration: all fields mandatory; whitespace-only values rejected; email format + phone (>=6 digits) validated server-side (register/init) and client-side (Auth.jsx).
+- KYC form (KycTab in Dashboard.jsx): ALL 15 fields mandatory incl. dob, state, city, postal, address, occupation, doc_back and selfie. Missing fields highlighted red + summary. Server (POST /kyc) enforces the same list; blocks resubmit while pending/approved.
+- Admin reject (KycAdmin in AdminPanel.jsx): "Reject…" opens a dialog with 6 quick-pick reasons + free-text (5–500 chars, required). POST /admin/kyc/:id/reject {reason}. Reason stored on kyc.rejection_reason + users.kyc_rejection_reason, included in the user's notification, shown in admin list/detail and in the user's KYC tab banner. Cleared on resubmit/approve.

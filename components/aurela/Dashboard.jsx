@@ -1387,6 +1387,7 @@ function KycTab({ user, onDone }) {
     id_type: '', id_number: '', doc_front: '', doc_back: '', selfie: ''
   })
   const [loading, setLoading] = useState(false)
+  const [showMissing, setShowMissing] = useState(false)
   const status = user?.kyc_status || 'unverified'
   const availableDocs = form.country ? (KYC_DOCS_BY_COUNTRY[form.country] || KYC_DOCS_BY_COUNTRY.DEFAULT) : []
 
@@ -1405,13 +1406,20 @@ function KycTab({ user, onDone }) {
     r.readAsDataURL(file)
   }
 
+  const REQUIRED = [
+    ['first_name', 'First name'], ['last_name', 'Last name'], ['dob', 'Date of birth'], ['mobile', 'Mobile number'],
+    ['country', 'Country'], ['state', 'State / Province'], ['city', 'City'], ['postal_code', 'Postal / ZIP code'],
+    ['address', 'Full address'], ['occupation', 'Occupation'], ['id_type', 'Document type'], ['id_number', 'Document number'],
+    ['doc_front', 'Document front image'], ['doc_back', 'Document back image'], ['selfie', 'Selfie holding document'],
+  ]
+  const missing = REQUIRED.filter(([k]) => !String(form[k] || '').trim())
   const submit = async () => {
-    if (!form.first_name || !form.last_name) return toast.error('First and last name are required')
-    if (!form.country) return toast.error('Please select your country')
-    if (!form.mobile) return toast.error('Mobile number is required')
-    if (!form.id_type) return toast.error('Please select an identity document')
-    if (!form.id_number) return toast.error('Document number is required')
-    if (!form.doc_front) return toast.error('Please upload the front of your document')
+    if (missing.length) {
+      setShowMissing(true)
+      return toast.error(`All fields are required. Missing: ${missing.map(([, l]) => l).slice(0, 3).join(', ')}${missing.length > 3 ? ` +${missing.length - 3} more` : ''}`)
+    }
+    const dob = new Date(form.dob)
+    if (Number.isNaN(dob.getTime()) || dob > new Date()) return toast.error('Please enter a valid date of birth')
     setLoading(true)
     try {
       await api.post('/kyc', form)
@@ -1419,6 +1427,8 @@ function KycTab({ user, onDone }) {
       onDone && onDone()
     } catch(e) { toast.error(e.message) } finally { setLoading(false) }
   }
+  const isMissing = (k) => showMissing && !String(form[k] || '').trim()
+  const fieldCls = (k) => `mt-2 bg-secondary h-11 ${isMissing(k) ? 'border-red-500/60' : 'border-gold-500/20'}`
 
   const statusBadge = {
     unverified: <Badge variant="outline" className="border-muted text-muted-foreground">Unverified</Badge>,
@@ -1453,74 +1463,89 @@ function KycTab({ user, onDone }) {
         {statusBadge}
       </div>
 
-      <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {status === 'rejected' && (
+        <div className="mt-5 rounded-xl border border-red-500/40 bg-red-500/10 p-4" data-testid="kyc-rejection-banner">
+          <div className="text-sm font-medium text-red-400">Your previous submission was rejected</div>
+          {user?.kyc_rejection_reason ? (
+            <div className="text-sm text-foreground/90 mt-1"><span className="text-muted-foreground">Reason: </span>{user.kyc_rejection_reason}</div>
+          ) : (
+            <div className="text-sm text-muted-foreground mt-1">Please review your details and documents, then submit again.</div>
+          )}
+          {user?.kyc_rejected_at && <div className="text-[11px] text-muted-foreground mt-2">Reviewed {new Date(user.kyc_rejected_at).toLocaleString()}</div>}
+          <div className="text-xs text-muted-foreground mt-2">Correct the issue above and resubmit — all fields are required.</div>
+        </div>
+      )}
+
+      <div className="mt-4 text-xs text-muted-foreground">All fields marked <span className="text-gold">*</span> are mandatory.</div>
+
+      <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">First name *</Label>
-          <Input value={form.first_name} onChange={e => setForm({ ...form, first_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">First name <span className="text-gold">*</span></Label>
+          <Input required value={form.first_name} onChange={e => setForm({ ...form, first_name: e.target.value })} className={fieldCls('first_name')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Last name *</Label>
-          <Input value={form.last_name} onChange={e => setForm({ ...form, last_name: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Last name <span className="text-gold">*</span></Label>
+          <Input required value={form.last_name} onChange={e => setForm({ ...form, last_name: e.target.value })} className={fieldCls('last_name')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Date of birth</Label>
-          <Input type="date" value={form.dob} onChange={e => setForm({ ...form, dob: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Date of birth <span className="text-gold">*</span></Label>
+          <Input required type="date" max={new Date().toISOString().slice(0, 10)} value={form.dob} onChange={e => setForm({ ...form, dob: e.target.value })} className={fieldCls('dob')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Mobile number *</Label>
-          <Input value={form.mobile} onChange={e => setForm({ ...form, mobile: e.target.value })} placeholder="+1 555 000 0000" className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Mobile number <span className="text-gold">*</span></Label>
+          <Input required value={form.mobile} onChange={e => setForm({ ...form, mobile: e.target.value })} placeholder="+1 555 000 0000" className={fieldCls('mobile')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Country *</Label>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Country <span className="text-gold">*</span></Label>
           <Select value={form.country} onValueChange={v => setForm({ ...form, country: v })}>
-            <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue placeholder="Choose your country"/></SelectTrigger>
+            <SelectTrigger className={fieldCls('country')}><SelectValue placeholder="Choose your country"/></SelectTrigger>
             <SelectContent className="max-h-64">
               {KYC_COUNTRIES.map(([code, label]) => <SelectItem key={code} value={code}>{label}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">State / Province</Label>
-          <Input value={form.state} onChange={e => setForm({ ...form, state: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">State / Province <span className="text-gold">*</span></Label>
+          <Input required value={form.state} onChange={e => setForm({ ...form, state: e.target.value })} className={fieldCls('state')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">City</Label>
-          <Input value={form.city} onChange={e => setForm({ ...form, city: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">City <span className="text-gold">*</span></Label>
+          <Input required value={form.city} onChange={e => setForm({ ...form, city: e.target.value })} className={fieldCls('city')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Postal / ZIP code</Label>
-          <Input value={form.postal_code} onChange={e => setForm({ ...form, postal_code: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Postal / ZIP code <span className="text-gold">*</span></Label>
+          <Input required value={form.postal_code} onChange={e => setForm({ ...form, postal_code: e.target.value })} className={fieldCls('postal_code')}/>
         </div>
         <div className="sm:col-span-2">
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Full address</Label>
-          <Input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Full address <span className="text-gold">*</span></Label>
+          <Input required value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className={fieldCls('address')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Occupation</Label>
-          <Input value={form.occupation} onChange={e => setForm({ ...form, occupation: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Occupation <span className="text-gold">*</span></Label>
+          <Input required value={form.occupation} onChange={e => setForm({ ...form, occupation: e.target.value })} className={fieldCls('occupation')}/>
         </div>
         <div>
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Document type *</Label>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Document type <span className="text-gold">*</span></Label>
           <Select value={form.id_type} onValueChange={v => setForm({ ...form, id_type: v })} disabled={!form.country}>
-            <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue placeholder={form.country ? 'Choose a document' : 'Select country first'}/></SelectTrigger>
+            <SelectTrigger className={fieldCls('id_type')}><SelectValue placeholder={form.country ? 'Choose a document' : 'Select country first'}/></SelectTrigger>
             <SelectContent>
               {availableDocs.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <div className="sm:col-span-2">
-          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Document number *</Label>
-          <Input value={form.id_number} onChange={e => setForm({ ...form, id_number: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono"/>
+          <Label className="text-xs uppercase tracking-widest text-muted-foreground">Document number <span className="text-gold">*</span></Label>
+          <Input required value={form.id_number} onChange={e => setForm({ ...form, id_number: e.target.value })} className={`${fieldCls('id_number')} font-mono`}/>
         </div>
       </div>
 
       <div className="mt-6 grid sm:grid-cols-3 gap-3">
         {[
           { key: 'doc_front', label: 'Document front *' },
-          { key: 'doc_back', label: 'Document back (if applicable)' },
-          { key: 'selfie', label: 'Selfie holding document (optional)' },
+          { key: 'doc_back', label: 'Document back *' },
+          { key: 'selfie', label: 'Selfie holding document *' },
         ].map(f => (
-          <label key={f.key} className="relative block border border-dashed border-gold-500/30 rounded-xl p-4 bg-secondary/40 cursor-pointer hover:border-gold-500/60 transition min-h-[140px]">
+          <label key={f.key} className={`relative block border border-dashed rounded-xl p-4 bg-secondary/40 cursor-pointer transition min-h-[140px] ${isMissing(f.key) ? 'border-red-500/60 hover:border-red-500/80' : 'border-gold-500/30 hover:border-gold-500/60'}`}>
             <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{f.label}</div>
             {form[f.key] ? (
               <>
@@ -1528,14 +1553,20 @@ function KycTab({ user, onDone }) {
                 <div className="text-xs text-gold mt-2">Click to replace</div>
               </>
             ) : (
-              <div className="mt-4 text-sm text-muted-foreground">📎 Click to upload (JPG/PNG, ≤ 2.5MB)</div>
+              <div className="mt-4 text-sm text-muted-foreground">📎 Click to upload (JPG/PNG, ≤ 2.5MB){isMissing(f.key) && <div className="text-xs text-red-400 mt-1">Required</div>}</div>
             )}
             <input type="file" accept="image/*" className="hidden" onChange={e => readFile(e.target.files?.[0], data => setForm(fx => ({ ...fx, [f.key]: data })))}/>
           </label>
         ))}
       </div>
 
-      <Button onClick={submit} disabled={loading} className="gold-btn mt-6 h-12 rounded-xl px-8">
+      {showMissing && missing.length > 0 && (
+        <div className="mt-4 text-xs text-red-400" data-testid="kyc-missing-summary">
+          {missing.length} required field{missing.length === 1 ? '' : 's'} still missing: {missing.map(([, l]) => l).join(', ')}
+        </div>
+      )}
+
+      <Button onClick={submit} disabled={loading} className="gold-btn mt-6 h-12 rounded-xl px-8" data-testid="kyc-submit">
         {loading ? 'Submitting…' : 'Submit for review'}
       </Button>
     </div>

@@ -6,6 +6,7 @@ import { AurelaWordmark } from './Logo'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -443,7 +444,31 @@ function KycAdmin() {
     } catch(e) { toast.error(e?.message || 'Could not open KYC review') }
     finally { setDetailLoading(false) }
   }
-  const action = async (k, act) => { try { await api.post(`/admin/kyc/${k.id}/${act}`, {}); toast.success(`KYC ${act}d`); setOpen(null); load() } catch(e) { toast.error(e?.message || 'Action failed') } }
+  const [rejecting, setRejecting] = useState(null) // kyc record awaiting a rejection reason
+  const [reason, setReason] = useState('')
+  const [acting, setActing] = useState(false)
+  const REJECT_PRESETS = [
+    'Document image is blurry or unreadable',
+    'Document has expired',
+    'Name on document does not match the details entered',
+    'Selfie does not match the document photo',
+    'Document back / second page is missing or incomplete',
+    'Address details are incomplete or incorrect',
+  ]
+  const action = async (k, act, body = {}) => {
+    setActing(true)
+    try {
+      await api.post(`/admin/kyc/${k.id}/${act}`, body)
+      toast.success(act === 'approve' ? 'KYC approved' : 'KYC rejected — user has been notified with the reason')
+      setRejecting(null); setReason(''); setOpen(null); load()
+    } catch(e) { toast.error(e?.message || 'Action failed') }
+    finally { setActing(false) }
+  }
+  const confirmReject = () => {
+    const r = reason.trim()
+    if (r.length < 5) return toast.error('Please enter a rejection reason (at least 5 characters)')
+    action(rejecting, 'reject', { reason: r })
+  }
 
   const FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['all', 'All']]
 
@@ -481,6 +506,9 @@ function KycAdmin() {
             <div><div className="text-muted-foreground uppercase text-[10px]">Document</div><div className="truncate">{k.id_type || '—'}</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{k.submitted_at ? new Date(k.submitted_at).toLocaleString() : '—'}</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={k.status==='approved'?'border-emerald-500/40 text-emerald-400':k.status==='rejected'?'border-red-500/40 text-red-400':'border-gold-500/40 text-gold'}>{k.status || 'pending'}</Badge></div>
+            {k.status === 'rejected' && k.rejection_reason && (
+              <div className="col-span-2 md:col-span-6"><div className="text-muted-foreground uppercase text-[10px]">Rejection reason</div><div className="text-red-300/90 truncate">{k.rejection_reason}</div></div>
+            )}
           </div>
           <div className="flex gap-2 shrink-0">
             <Button size="sm" variant="outline" onClick={()=>openDetail(k)} disabled={detailLoading} className="border-gold-500/40">{detailLoading ? <Loader2 className="h-3 w-3 animate-spin"/> : 'Open review'}</Button>
@@ -536,14 +564,58 @@ function KycAdmin() {
                   </div>
                 ))}
               </div>
+              {open.kyc?.status === 'rejected' && (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm" data-testid="kyc-review-rejection-reason">
+                  <div className="text-[10px] uppercase text-red-400">Rejection reason</div>
+                  <div className="mt-1 text-foreground/90">{open.kyc?.rejection_reason || <span className="text-muted-foreground">No reason recorded (rejected before reasons were introduced)</span>}</div>
+                  {open.kyc?.reviewed_at && <div className="text-[10px] text-muted-foreground mt-1">Reviewed {new Date(open.kyc.reviewed_at).toLocaleString()}</div>}
+                </div>
+              )}
               {open.kyc?.status === 'pending' ? (
                 <DialogFooter className="gap-2">
-                  <Button variant="outline" onClick={() => action(open.kyc, 'reject')} className="border-red-500/40 text-red-400 hover:bg-red-500/10">Reject</Button>
-                  <Button onClick={() => action(open.kyc, 'approve')} className="gold-btn">Approve KYC</Button>
+                  <Button variant="outline" onClick={() => { setReason(''); setRejecting(open.kyc) }} disabled={acting} className="border-red-500/40 text-red-400 hover:bg-red-500/10" data-testid="kyc-reject-btn">Reject…</Button>
+                  <Button onClick={() => action(open.kyc, 'approve')} disabled={acting} className="gold-btn" data-testid="kyc-approve-btn">{acting ? <Loader2 className="h-4 w-4 animate-spin"/> : 'Approve KYC'}</Button>
                 </DialogFooter>
               ) : (
                 <div className="text-center text-xs text-muted-foreground">This KYC has already been {open.kyc?.status}.</div>
               )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!rejecting} onOpenChange={v => { if (!v && !acting) { setRejecting(null); setReason('') } }}>
+        <DialogContent className="bg-onyx-900 border-red-500/30 max-w-lg" data-testid="kyc-reject-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-display">Reject identity verification</DialogTitle>
+          </DialogHeader>
+          {rejecting && (
+            <div className="space-y-4">
+              <div className="text-sm text-muted-foreground">
+                Rejecting <span className="text-foreground">{rejecting.full_name || `${rejecting.first_name || ''} ${rejecting.last_name || ''}`.trim() || 'this user'}</span>. The reason below is sent to the user so they know exactly what to fix before resubmitting.
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-widest text-muted-foreground">Quick reasons</Label>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {REJECT_PRESETS.map(p => (
+                    <button key={p} type="button" onClick={() => setReason(p)}
+                      className={`px-3 py-1.5 rounded-full text-xs border transition-colors text-left ${reason === p ? 'border-red-500/60 bg-red-500/10 text-red-300' : 'border-gold-500/20 text-muted-foreground hover:text-foreground hover:border-gold-500/40'}`}>
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-widest text-muted-foreground">Reason <span className="text-red-400">*</span></Label>
+                <Textarea value={reason} onChange={e => setReason(e.target.value.slice(0, 500))} rows={4} placeholder="Explain clearly what was wrong and what the user should do to fix it…" className="mt-2 bg-secondary border-gold-500/20 resize-none" data-testid="kyc-reject-reason"/>
+                <div className="text-[10px] text-muted-foreground mt-1 text-right">{reason.trim().length}/500</div>
+              </div>
+              <DialogFooter className="gap-2">
+                <Button variant="outline" onClick={() => { setRejecting(null); setReason('') }} disabled={acting} className="border-gold-500/40">Cancel</Button>
+                <Button onClick={confirmReject} disabled={acting || reason.trim().length < 5} className="bg-red-600 hover:bg-red-700 text-white" data-testid="kyc-reject-confirm">
+                  {acting ? <Loader2 className="h-4 w-4 animate-spin"/> : 'Reject & notify user'}
+                </Button>
+              </DialogFooter>
             </div>
           )}
         </DialogContent>

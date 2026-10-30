@@ -936,8 +936,17 @@ async function handleRoute(request, { params }) {
     // ---------- Auth ----------
     if (route === '/auth/register/init' && method === 'POST') {
       const body = await request.json()
-      const { email, password, first_name, last_name, full_name, phone, country } = body || {}
-      if (!email || !password || !first_name || !last_name || !phone || !country) return handleCORS(NextResponse.json({ error: 'All fields are required — first name, last name, email, country, mobile, and password.' }, { status: 400 }))
+      // All fields are mandatory — trim so whitespace-only values are rejected too
+      const email = String(body?.email || '').trim()
+      const password = String(body?.password || '')
+      const first_name = String(body?.first_name || '').trim()
+      const last_name = String(body?.last_name || '').trim()
+      const phone = String(body?.phone || '').trim()
+      const country = String(body?.country || '').trim()
+      const full_name = String(body?.full_name || '').trim()
+      if (!email || !password.trim() || !first_name || !last_name || !phone || !country) return handleCORS(NextResponse.json({ error: 'All fields are required — first name, last name, email, country, mobile, and password.' }, { status: 400 }))
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return handleCORS(NextResponse.json({ error: 'Please enter a valid email address' }, { status: 400 }))
+      if (phone.replace(/\D/g, '').length < 6) return handleCORS(NextResponse.json({ error: 'Please enter a valid mobile number' }, { status: 400 }))
       if (password.length < 8) return handleCORS(NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 }))
       const exists = await db.collection('users').findOne({ email: email.toLowerCase() })
       if (exists) return handleCORS(NextResponse.json({ error: 'Email already registered' }, { status: 400 }))
@@ -1447,33 +1456,50 @@ async function handleRoute(request, { params }) {
     // KYC — accepts extended fields (first_name, last_name, mobile, country, doc_type, doc_data base64)
     if (route === '/kyc' && method === 'POST') {
       const body = await request.json()
-      const fullName = body.full_name || [body.first_name, body.last_name].filter(Boolean).join(' ').trim() || user.full_name
+      if (user.kyc_status === 'pending') return handleCORS(NextResponse.json({ error: 'Your previous submission is still under review' }, { status: 400 }))
+      if (user.kyc_status === 'approved') return handleCORS(NextResponse.json({ error: 'Your identity is already verified' }, { status: 400 }))
+      const s = (k) => String(body?.[k] ?? '').trim()
+      // Every KYC field is mandatory (text fields + all three document images)
+      const REQUIRED_KYC_FIELDS = [
+        ['first_name', 'First name'], ['last_name', 'Last name'], ['dob', 'Date of birth'], ['country', 'Country'],
+        ['state', 'State / Province'], ['city', 'City'], ['address', 'Full address'], ['postal_code', 'Postal / ZIP code'],
+        ['mobile', 'Mobile number'], ['occupation', 'Occupation'], ['id_type', 'Document type'], ['id_number', 'Document number'],
+        ['doc_front', 'Document front image'], ['doc_back', 'Document back image'], ['selfie', 'Selfie holding document'],
+      ]
+      const missing = REQUIRED_KYC_FIELDS.filter(([k]) => !(k === 'mobile' ? (s('mobile') || s('phone')) : s(k))).map(([, label]) => label)
+      if (missing.length) return handleCORS(NextResponse.json({ error: `All fields are required. Missing: ${missing.join(', ')}`, missing }, { status: 400 }))
+      const dobDate = new Date(s('dob'))
+      if (Number.isNaN(dobDate.getTime()) || dobDate > new Date()) return handleCORS(NextResponse.json({ error: 'Please enter a valid date of birth' }, { status: 400 }))
+      for (const k of ['doc_front', 'doc_back', 'selfie']) {
+        if (!/^data:image\//.test(s(k))) return handleCORS(NextResponse.json({ error: `${k === 'selfie' ? 'Selfie' : k === 'doc_front' ? 'Document front' : 'Document back'} must be an image upload` }, { status: 400 }))
+      }
+      const fullName = [s('first_name'), s('last_name')].join(' ').trim()
       const doc = {
         id: uuidv4(), user_id: user.id,
-        first_name: body.first_name || '',
-        last_name: body.last_name || '',
+        first_name: s('first_name'),
+        last_name: s('last_name'),
         full_name: fullName,
-        dob: body.dob || '',
-        country: body.country || '',
-        state: body.state || '',
-        city: body.city || '',
-        address: body.address || '',
-        postal_code: body.postal_code || '',
-        mobile: body.mobile || body.phone || '',
-        occupation: body.occupation || '',
-        id_type: body.id_type || 'passport',
-        id_number: body.id_number || '',
-        doc_front: body.doc_front || '',   // base64 data URI
-        doc_back: body.doc_back || '',     // base64 data URI
-        selfie: body.selfie || '',         // base64 data URI (optional)
+        dob: s('dob'),
+        country: s('country'),
+        state: s('state'),
+        city: s('city'),
+        address: s('address'),
+        postal_code: s('postal_code'),
+        mobile: s('mobile') || s('phone'),
+        occupation: s('occupation'),
+        id_type: s('id_type'),
+        id_number: s('id_number'),
+        doc_front: s('doc_front'),   // base64 data URI
+        doc_back: s('doc_back'),     // base64 data URI
+        selfie: s('selfie'),         // base64 data URI
         status: 'pending',
         submitted_at: now()
       }
       await db.collection('kyc').insertOne(doc)
-      const userUpd = { kyc_status: 'pending' }
-      if (body.mobile || body.phone) userUpd.phone = body.mobile || body.phone
+      const userUpd = { kyc_status: 'pending', phone: doc.mobile }
       if (fullName && fullName !== user.full_name) userUpd.full_name = fullName
-      await db.collection('users').updateOne({ id: user.id }, { $set: userUpd })
+      // A fresh submission clears any previous rejection reason
+      await db.collection('users').updateOne({ id: user.id }, { $set: userUpd, $unset: { kyc_rejection_reason: '', kyc_rejected_at: '' } })
       await audit(db, user.id, 'kyc.submit', { id_type: doc.id_type, country: doc.country })
       return handleCORS(NextResponse.json({ ok: true, kyc: clean(doc) }))
     }
@@ -2011,18 +2037,37 @@ async function handleRoute(request, { params }) {
         const parts = route.split('/')
         const kycId = parts[3]
         const action = parts[4] // approve | reject
+        if (action !== 'approve' && action !== 'reject') return handleCORS(NextResponse.json({ error: 'Invalid action' }, { status: 400 }))
+        const body = await request.json().catch(() => ({}))
         const rec = await db.collection('kyc').findOne({ id: kycId })
         if (!rec) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (rec.status !== 'pending') return handleCORS(NextResponse.json({ error: `This KYC has already been ${rec.status}` }, { status: 400 }))
         const status = action === 'approve' ? 'approved' : 'rejected'
-        await db.collection('kyc').updateOne({ id: kycId }, { $set: { status, reviewed_at: now() } })
-        await db.collection('users').updateOne({ id: rec.user_id }, { $set: { kyc_status: status } })
+        // Rejection requires a reason so the user knows exactly what to fix
+        const reason = String(body?.reason || '').trim().slice(0, 500)
+        if (status === 'rejected' && reason.length < 5) return handleCORS(NextResponse.json({ error: 'Please provide a rejection reason (at least 5 characters)' }, { status: 400 }))
+        const kycUpd = { status, reviewed_at: now(), reviewed_by: user.id }
+        const userSet = { kyc_status: status }
+        const userUnset = {}
+        if (status === 'rejected') {
+          kycUpd.rejection_reason = reason
+          userSet.kyc_rejection_reason = reason
+          userSet.kyc_rejected_at = now()
+        } else {
+          userUnset.kyc_rejection_reason = ''
+          userUnset.kyc_rejected_at = ''
+        }
+        await db.collection('kyc').updateOne({ id: kycId }, { $set: kycUpd })
+        const userUpdate = { $set: userSet }
+        if (Object.keys(userUnset).length) userUpdate.$unset = userUnset
+        await db.collection('users').updateOne({ id: rec.user_id }, userUpdate)
         if (status === 'approved') {
           await notifyUser(db, rec.user_id, { kind: 'kyc_approved', title: 'Identity verified 🎉', body: 'Your identity verification has been approved. All features are now unlocked — including your 5 AUR welcome reward. Head to the dashboard to claim it.' })
         } else {
-          await notifyUser(db, rec.user_id, { kind: 'kyc_rejected', title: 'Identity verification rejected', body: 'Your KYC submission was rejected. Please review your documents and try again.' })
+          await notifyUser(db, rec.user_id, { kind: 'kyc_rejected', title: 'Identity verification rejected', body: `Your KYC submission was rejected. Reason: ${reason}. Please review the reason, correct your details or documents, and submit again.` })
         }
-        await audit(db, user.id, `admin.kyc.${action}`, { kyc_id: kycId, user_id: rec.user_id })
-        return handleCORS(NextResponse.json({ ok: true }))
+        await audit(db, user.id, `admin.kyc.${action}`, { kyc_id: kycId, user_id: rec.user_id, ...(status === 'rejected' ? { reason } : {}) })
+        return handleCORS(NextResponse.json({ ok: true, status, reason: status === 'rejected' ? reason : undefined }))
       }
       if (route === '/admin/settings' && method === 'GET') {
         const s = await db.collection('settings').findOne({ id: 'platform' })

@@ -38,11 +38,16 @@ export function Auth() {
           throw err
         }
       } else {
-        // Two-step signup: init -> verify OTP. Send full profile
+        // Two-step signup: init -> verify OTP. Send full profile — every field is mandatory
+        const missing = [
+          [form.first_name, 'First name'], [form.last_name, 'Last name'], [form.email, 'Email'],
+          [form.country, 'Country'], [form.phone, 'Mobile number'], [form.password, 'Password'],
+        ].filter(([v]) => !String(v || '').trim()).map(([, l]) => l)
+        if (missing.length) throw new Error(`All fields are required. Missing: ${missing.join(', ')}`)
         const full_name = `${form.first_name.trim()} ${form.last_name.trim()}`.trim()
         const res = await api.post('/auth/register/init', {
-          email: form.email, first_name: form.first_name, last_name: form.last_name, full_name,
-          country: form.country, phone: form.phone, password: form.password
+          email: form.email.trim(), first_name: form.first_name.trim(), last_name: form.last_name.trim(), full_name,
+          country: form.country, phone: form.phone.trim(), password: form.password
         })
         setSignupId(res.signup_id)
         setDevOtp(res.dev_otp || null)
