@@ -17,7 +17,7 @@ import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
-  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2
+  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2, MapPinned
 } from 'lucide-react'
 import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin, WithdrawAccessAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -30,6 +30,8 @@ import { ErrorBoundary } from './ErrorBoundary'
 import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
 import { UsersMapAdmin } from './UsersMap'
+import { ZonalCardsAdmin } from './ZonalCardsAdmin'
+import { ZonalCardVisual } from './ZonalCard'
 
 const USER_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -52,6 +54,7 @@ const ADMIN_NAV = [
   { id: 'admin_withdraw_access', label: 'Withdrawal Access', icon: ShieldAlert },
   { id: 'admin_map', label: 'Users Map', icon: Globe2 },
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
+  { id: 'admin_zonal_cards', label: 'Zonal Cards', icon: MapPinned },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
   { id: 'admin_settings', label: 'Platform Settings', icon: Settings },
@@ -373,6 +376,7 @@ export function Dashboard() {
               {tab === 'admin_withdraw_access' && isAdmin && <WithdrawAccessAdmin/>}
               {tab === 'admin_map' && isAdmin && <UsersMapAdmin/>}
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
+              {tab === 'admin_zonal_cards' && isAdmin && <ZonalCardsAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
               {tab === 'admin_settings' && isAdmin && <SettingsAdmin/>}
@@ -837,6 +841,9 @@ function CardsTab({ cards, onChange, onWalletChange }) {
         )}
         {cards.map(c => (
           <div key={c.id} className="card-luxury rounded-2xl p-6">
+            {c.type === 'zonal' ? (
+              <ZonalCardVisual card={c} showCvvToggle/>
+            ) : (
             <div className={`credit-card ${c.tier} rounded-2xl p-5 aspect-[16/10] relative overflow-hidden`}>
               <div className="flex items-center justify-between">
                 <AurelaLogo size={24} glow={false}/>
@@ -866,14 +873,16 @@ function CardsTab({ cards, onChange, onWalletChange }) {
               </div>
               {c.frozen && <div className="absolute inset-0 bg-onyx-900/60 backdrop-blur-sm flex items-center justify-center"><Snowflake className="h-10 w-10 text-gold"/></div>}
             </div>
+            )}
             <div className="mt-4 flex items-center gap-2 flex-wrap">
+              {c.type === 'zonal' && <Badge variant="outline" className="border-gold-500/40 text-gold text-[10px]"><MapPinned className="h-3 w-3 mr-1"/>{c.zone} · {c.zone_name}</Badge>}
               <Badge variant="outline" className={`${c.status==='active'?'border-gold-500 text-gold':c.status==='activating'?'border-blue-500/50 text-blue-400':c.status==='pending_verification'?'border-gold-500/40 text-gold':c.status==='rejected'?'border-red-500/40 text-red-400':'border-muted text-muted-foreground'}`}>{c.status.replace('_',' ')}</Badge>
-              <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Monthly spend ${c.monthly_spend_limit.toLocaleString()}</Badge>
+              <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Monthly spend ${(c.monthly_spend_limit || 0).toLocaleString()}</Badge>
               {c.status === 'activating' && c.usable_at && <ActivationCountdown usable_at={c.usable_at}/>}
             </div>
             <div className="mt-4 flex gap-2 flex-wrap">
               {c.status === 'pending_activation' && (
-                <Button onClick={() => setOpenAct(c)} className="gold-btn flex-1 rounded-full"><Sparkles className="h-4 w-4 mr-2"/> Activate</Button>
+                <Button onClick={() => setOpenAct(c)} className="gold-btn flex-1 rounded-full"><Sparkles className="h-4 w-4 mr-2"/> Activate{c.type === 'zonal' ? ` · ${c.activation_fee_usdt} USDT` : ''}</Button>
               )}
               {c.status === 'pending_verification' && (
                 <div className="flex-1 text-xs text-muted-foreground">⏳ Waiting for admin to verify your USDT transfer…</div>

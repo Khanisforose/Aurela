@@ -1362,7 +1362,9 @@ function CardApprovalsAdmin() {
     try { await api.del(`/admin/cards/${c.id}`); toast.success('Card deleted'); setOpen(null); load() } catch(e) { toast.error(e?.message || 'Delete failed') }
   }
   const ownerName = (u) => u?.full_name || [u?.first_name, u?.last_name].filter(Boolean).join(' ') || u?.username || '—'
-  const statusLabel = (s) => s === 'pending_verification' ? 'Awaiting verification' : s === 'pending_activation' ? 'Awaiting payment' : s === 'activating' ? 'Activating (24h)' : s
+  const statusLabel = (s) => s === 'pending_verification' ? 'Awaiting verification' : s === 'pending_activation' ? 'Awaiting payment' : s === 'activating' ? 'Activating' : s
+  // Zonal cards carry their own admin-defined activation window (hours); tier cards use the 24h default
+  const windowLabel = (c) => c?.type === 'zonal' ? (Number(c.activation_hours) === 0 ? 'instant' : `${c.activation_hours}h`) : '24h'
   const statusClass = (s) => s === 'pending_verification' ? 'border-gold-500/40 text-gold' : s === 'activating' ? 'border-emerald-500/40 text-emerald-400' : 'border-gold-500/20 text-muted-foreground'
   const isActionable = (c) => c?.status === 'pending_verification' || c?.status === 'pending_activation'
   const copy = (v, label) => { try { navigator.clipboard.writeText(String(v)); toast.success(`${label} copied`) } catch(e) {} }
@@ -1389,14 +1391,14 @@ function CardApprovalsAdmin() {
               <div className="truncate font-medium">{ownerName(c.user)}</div>
               <div className="truncate text-muted-foreground">@{c.user?.username || '—'} · {c.user?.email || c.user_id}</div>
             </div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Tier</div><div className="capitalize">{c.tier}</div></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Tier</div><div className="capitalize">{c.type === 'zonal' ? <span className="text-gold">Zonal · {c.zone}</span> : c.tier}</div>{c.type === 'zonal' && <div className="text-[10px] text-muted-foreground">{c.zone_name} · unlocks {windowLabel(c)}</div>}</div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Fee</div><div className="font-mono">{c.activation_fee_usdt} USDT</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{(c.activation_submitted_at || c.created_at) ? new Date(c.activation_submitted_at || c.created_at).toLocaleString() : '—'}</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusClass(c.status)}>{statusLabel(c.status)}</Badge></div>
           </div>
           <div className="flex gap-2 shrink-0 flex-wrap justify-end">
             <Button size="sm" variant="outline" onClick={()=>openDetail(c)} disabled={detailLoading} className="border-gold-500/40" data-testid={`card-open-${c.id}`}>{detailLoading ? <Loader2 className="h-3 w-3 animate-spin"/> : 'Open request'}</Button>
-            {isActionable(c) && <Button size="sm" onClick={()=>action(c,'approve')} disabled={busy} className="gold-btn">Approve (24h)</Button>}
+            {isActionable(c) && <Button size="sm" onClick={()=>action(c,'approve')} disabled={busy} className="gold-btn">Approve ({windowLabel(c)})</Button>}
           </div>
         </div>
       ))}
@@ -1482,7 +1484,7 @@ function CardApprovalsAdmin() {
                   <Button variant="ghost" onClick={() => del(open.card)} disabled={busy} className="text-red-400 hover:bg-red-500/10 mr-auto">Delete</Button>
                   <Button variant="outline" onClick={() => action(open.card, 'reject')} disabled={busy} className="border-red-500/40 text-red-400 hover:bg-red-500/10">Reject</Button>
                   <Button variant="outline" onClick={() => action(open.card, 'approve', true)} disabled={busy} className="border-gold-500/40">Activate now</Button>
-                  <Button onClick={() => action(open.card, 'approve')} disabled={busy} className="gold-btn">Approve (24h)</Button>
+                  <Button onClick={() => action(open.card, 'approve')} disabled={busy} className="gold-btn">Approve ({windowLabel(open.card)})</Button>
                 </DialogFooter>
               ) : (
                 <div className="text-center text-xs text-muted-foreground">This card is {statusLabel(open.card?.status)}{open.card?.usable_at ? ` · usable from ${new Date(open.card.usable_at).toLocaleString()}` : ''}.</div>

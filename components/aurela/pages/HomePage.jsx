@@ -26,7 +26,7 @@ const stats = [
 const faqs = [
   { q: 'Is Aurela a bank?', a: 'Aurela is a global digital finance platform combining multi-currency accounts, crypto wallets and virtual card issuance. Regulated banking partnerships are actively being finalized in multiple jurisdictions.' },
   { q: 'Which cryptocurrencies are supported?', a: 'BTC, ETH, USDT, USDC, BNB, SOL, XRP, ADA, DOGE and MATIC across ERC20, TRC20, BEP20, Polygon and Solana networks.' },
-  { q: 'How are card activation fees paid?', a: 'Card activation is paid in USDT to Aurela’s treasury wallet on the network configured by our operations team, or directly from your Aurela USDT balance. Fee amounts are set dynamically by administration.' },
+  { q: 'How are card activation fees paid?', a: 'Card activation fees are paid in USDT from an external wallet to Aurela’s treasury address on the network configured by our operations team. Payments from your internal Aurela balance are not accepted. Fee amounts are set dynamically by administration.' },
   { q: 'What about KYC and AML?', a: 'All withdrawals and card issuance require completed KYC. Our compliance stack supports document review, sanctions screening and immutable audit trails.' },
   { q: 'How fast are transfers?', a: 'Internal fiat and crypto transfers settle instantly with zero fees inside the Aurela network. External settlements follow network confirmation times.' },
 ]

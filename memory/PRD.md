@@ -54,3 +54,9 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - Registration: all fields mandatory; whitespace-only values rejected; email format + phone (>=6 digits) validated server-side (register/init) and client-side (Auth.jsx).
 - KYC form (KycTab in Dashboard.jsx): ALL 15 fields mandatory incl. dob, state, city, postal, address, occupation, doc_back and selfie. Missing fields highlighted red + summary. Server (POST /kyc) enforces the same list; blocks resubmit while pending/approved.
 - Admin reject (KycAdmin in AdminPanel.jsx): "Reject…" opens a dialog with 6 quick-pick reasons + free-text (5–500 chars, required). POST /admin/kyc/:id/reject {reason}. Reason stored on kyc.rejection_reason + users.kyc_rejection_reason, included in the user's notification, shown in admin list/detail and in the user's KYC tab banner. Cleared on resubmit/approve.
+
+## Zonal (geolocation) cards — admin-only product
+- 11 zones (NA,SA,EU,UK,ME,AF,CIS,SAS,SEA,EA,OCE) seeded into `card_zones`, each with landmark photo (Unsplash), metallic theme, ISO country list, fee (USDT), activation time (plain number = HOURS), enabled flag. Admin edits everything in the "Zonal Cards" tab (ZonalCardsAdmin.jsx) with live card preview.
+- Admin issues directly: user search → location/zone auto-detected from last GPS/IP fix → override zone/fee/hours per card → issue. Paid cards follow the existing tx-hash → Card Approvals flow; fee credited to USDT; usable_at = approval + hours. Fee 0 → straight to activating/active.
+- Zonal cards SKIP the geolocation withdraw hold and don't count toward the 3-tier-card cap.
+- Users see their metallic landmark card (ZonalCard.jsx) on the Cards tab; zone config/fees stay admin-only.

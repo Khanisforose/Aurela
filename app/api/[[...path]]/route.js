@@ -142,6 +142,80 @@ const CARD_TIERS = {
   premium: { name: 'Aurela Premium', activation_fee_usdt: 50,  daily_spend: 50000,  daily_withdraw: 25000,  monthly_spend: 1000000,  color: 'premium' },
   elite:   { name: 'Aurela Elite',   activation_fee_usdt: 200, daily_spend: 200000, daily_withdraw: 100000, monthly_spend: 5000000,  color: 'elite' },
 }
+
+// ---------- Zonal (geolocation) cards ----------
+// Admin-only product: a card issued per geographic zone (like game-server regions). Each zone has its own
+// fee (USDT), activation time (plain number = HOURS) and enable flag, all editable by admins. Visual theme
+// (landmark + metallic colour) is copied onto the card so the user's Cards tab can render it without
+// exposing the zone configuration. Country → zone mapping uses ISO alpha-2 codes from the user's last GPS/IP fix.
+const CARD_ZONE_DEFAULTS = [
+  { code: 'NA',  name: 'North America',   landmark: 'Statue of Liberty',     city: 'New York',  theme: 'steel',    image_url: 'https://images.unsplash.com/photo-1780295469930-199e3f0a2cd9?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['US','CA','MX','GL','BM','PM','GT','BZ','HN','SV','NI','CR','PA','CU','DO','HT','JM','BS','BB','TT','PR','AG','DM','GD','KN','LC','VC','KY','TC','VG','VI','AW','CW','SX','BQ','MQ','GP','MS','AI','MF','BL'] },
+  { code: 'SA',  name: 'South America',   landmark: 'Christ the Redeemer',   city: 'Rio de Janeiro', theme: 'emerald', image_url: 'https://images.unsplash.com/photo-1564659907532-6b5f98c8e70f?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['BR','AR','CL','CO','PE','VE','EC','BO','PY','UY','GY','SR','GF','FK'] },
+  { code: 'EU',  name: 'Europe',          landmark: 'Eiffel Tower',          city: 'Paris',     theme: 'sapphire', image_url: 'https://images.unsplash.com/photo-1439393161192-32360eb753f1?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['FR','DE','IT','ES','PT','NL','BE','LU','AT','CH','LI','DK','SE','NO','FI','IS','PL','CZ','SK','HU','RO','BG','GR','HR','SI','RS','BA','ME','MK','AL','XK','EE','LV','LT','MT','CY','MC','SM','VA','AD','FO','GI','AX','SJ'] },
+  { code: 'UK',  name: 'United Kingdom',  landmark: 'Big Ben',               city: 'London',    theme: 'crimson',  image_url: 'https://images.unsplash.com/photo-1520986606214-8b456906c813?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['GB','IE','IM','JE','GG'] },
+  { code: 'ME',  name: 'Middle East',     landmark: 'Burj Khalifa',          city: 'Dubai',     theme: 'desert',   image_url: 'https://images.unsplash.com/photo-1512453979798-5ea266f8880c?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['AE','SA','QA','KW','BH','OM','YE','JO','LB','SY','IQ','IR','IL','PS','TR'] },
+  { code: 'AF',  name: 'Africa',          landmark: 'Pyramids of Giza',      city: 'Cairo',     theme: 'bronze',   image_url: 'https://images.unsplash.com/photo-1613757874090-456665221c00?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['EG','DZ','MA','TN','LY','SD','SS','MR','ML','NE','TD','NG','GH','CI','SN','GM','GN','GW','SL','LR','BF','TG','BJ','CM','CF','GA','CG','CD','GQ','ST','AO','ZM','ZW','MW','MZ','NA','BW','ZA','LS','SZ','MG','MU','SC','KM','RE','YT','KE','UG','TZ','RW','BI','ET','ER','DJ','SO','EH','CV'] },
+  { code: 'CIS', name: 'CIS & Eurasia',   landmark: "Saint Basil's Cathedral", city: 'Moscow',  theme: 'ruby',     image_url: 'https://images.unsplash.com/photo-1563166796-befbbd534d1b?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['RU','KZ','UZ','TM','KG','TJ','BY','AM','AZ','GE','MD','UA'] },
+  { code: 'SAS', name: 'South Asia',      landmark: 'Taj Mahal',             city: 'Agra',      theme: 'ivory',    image_url: 'https://images.unsplash.com/photo-1587135941948-670b381f08ce?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['IN','PK','BD','LK','NP','BT','MV','AF'] },
+  { code: 'SEA', name: 'Southeast Asia',  landmark: 'Marina Bay Sands',      city: 'Singapore', theme: 'teal',     image_url: 'https://images.unsplash.com/photo-1599594026550-97d9565ceda3?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['SG','MY','TH','ID','PH','VN','KH','LA','MM','BN','TL'] },
+  { code: 'EA',  name: 'East Asia',       landmark: 'Tokyo Tower',           city: 'Tokyo',     theme: 'obsidian', image_url: 'https://images.unsplash.com/photo-1513407030348-c983a97b98d8?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['CN','JP','KR','KP','TW','HK','MO','MN'] },
+  { code: 'OCE', name: 'Oceania',         landmark: 'Sydney Opera House',    city: 'Sydney',    theme: 'ocean',    image_url: 'https://images.unsplash.com/photo-1523059623039-a9ed027e7fad?crop=entropy&cs=srgb&fm=jpg&q=85&w=1200',
+    countries: ['AU','NZ','FJ','PG','SB','VU','NC','PF','WS','TO','TV','KI','NR','FM','MH','PW','GU','MP','AS','CK','NU','TK','WF'] },
+]
+const CARD_ZONE_DEFAULT_FEE_USDT = 25
+const CARD_ZONE_DEFAULT_HOURS = 24
+const CARD_ZONE_LIMITS = { daily_spend: 50000, daily_withdraw: 25000, monthly_spend: 1000000 }
+const CARD_ZONE_ORDER = CARD_ZONE_DEFAULTS.map(z => z.code)
+let cardZonesSeeded = false
+// Idempotent: inserts any missing zone with defaults, never overwrites admin edits.
+async function ensureCardZones(db) {
+  if (cardZonesSeeded) return
+  const existing = await db.collection('card_zones').find({}, { projection: { code: 1 } }).toArray()
+  const have = new Set(existing.map(z => z.code))
+  const missing = CARD_ZONE_DEFAULTS.filter(z => !have.has(z.code))
+  if (missing.length) {
+    await db.collection('card_zones').insertMany(missing.map(z => ({
+      id: uuidv4(), ...z, fee_usdt: CARD_ZONE_DEFAULT_FEE_USDT, activation_hours: CARD_ZONE_DEFAULT_HOURS, enabled: true,
+      ...CARD_ZONE_LIMITS, created_at: now(), updated_at: now(),
+    })))
+  }
+  cardZonesSeeded = true
+}
+async function getCardZones(db) {
+  await ensureCardZones(db)
+  const zones = await db.collection('card_zones').find({}).toArray()
+  zones.sort((a, b) => CARD_ZONE_ORDER.indexOf(a.code) - CARD_ZONE_ORDER.indexOf(b.code))
+  return zones
+}
+function zoneForCountry(zones, cc) {
+  const code = String(cc || '').toUpperCase()
+  if (!code) return null
+  return zones.find(z => Array.isArray(z.countries) && z.countries.includes(code)) || null
+}
+// Where do we think the user is? GPS reverse-geocode first, then IP geolocation, then KYC/profile country.
+function userCountryCode(u) {
+  const L = u?.last_location || {}
+  const cc = L.country_code || L.ip_geo?.country_code || u?.country || null
+  const source = L.country_code ? 'gps' : L.ip_geo?.country_code ? 'ip' : u?.country ? 'profile' : null
+  return { cc: cc ? String(cc).toUpperCase() : null, source, city: L.city || L.ip_geo?.city || null, country: L.country || L.ip_geo?.country || null, at: L.at || null, status: L.status || null }
+}
+function hoursLabel(h) {
+  const n = Number(h) || 0
+  if (n <= 0) return 'immediately'
+  if (n === 1) return '1 hour'
+  if (n < 48 || n % 24 !== 0) return `${n} hours`
+  return `${n / 24} days (${n} hours)`
+}
 // Fallback rates if API unreachable (USD-based)
 const FALLBACK_FX = { USD:1, EUR:0.92, GBP:0.79, INR:83.2, AED:3.67, JPY:157.1, CAD:1.36, AUD:1.51, SGD:1.35, CHF:0.90, NZD:1.64, HKD:7.82, KRW:1360, CNY:7.24, MXN:17.1, BRL:5.10, ZAR:18.5, TRY:32.4, RUB:88.5, SEK:10.4, NOK:10.6, DKK:6.87, PLN:3.98, THB:35.8, MYR:4.68, IDR:15900, PHP:56.8, VND:24800, EGP:47.5, SAR:3.75, NGN:1550, ARS:900, CLP:920, COP:3900, ILS:3.72, CZK:23.2, HUF:355, QAR:3.64, KWD:0.31, BHD:0.38, OMR:0.39, JOD:0.71, LKR:302, PKR:278, BDT:117, KES:129, GHS:14.5, TWD:32.3, UAH:39.5, RON:4.58 }
 const FALLBACK_CRYPTO_USD = { BTC:67000, ETH:3500, USDT:1, USDC:1, BNB:600, SOL:150, XRP:0.52, ADA:0.45, DOGE:0.15, MATIC:0.72, AVAX:35, DOT:7.2, TRX:0.12, LINK:14, ATOM:8, LTC:80, BCH:400, XLM:0.11, NEAR:5.5, APT:9, ARB:1.1, OP:2.4, SUI:1.3, TON:5.5, SHIB:0.00002, PEPE:0.000008, INJ:24, FIL:5, ICP:11, HBAR:0.09 }
@@ -170,9 +244,9 @@ const ADMIN_USER_SUMMARY_PROJECTION = { _id: 0, id: 1, username: 1, email: 1, fu
 // "What's new" shown once per version to every signed-in user (Aurela Updated popup)
 // Keep these generic and user-facing only — never mention admin-side features here.
 const WHATS_NEW = [
-  'Improved stability for a smoother, more reliable experience',
-  'Performance optimizations — faster loading across the app',
-  'Security enhancements to keep your account and funds protected',
+  'Performance optimizations — faster, smoother experience across the app',
+  'Security patches and hardening to keep your account and funds protected',
+  'Stability improvements and general bug fixes',
 ]
 
 function clean(doc) {
@@ -1826,8 +1900,8 @@ async function handleRoute(request, { params }) {
       const body = await request.json()
       const tier = (body?.tier || 'basic').toLowerCase()
       if (!CARD_TIERS[tier]) return handleCORS(NextResponse.json({ error: 'Invalid tier' }, { status: 400 }))
-      // Enforce: max 3 cards per user (one per tier), non-deleted only
-      const existingCards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' } }).toArray()
+      // Enforce: max 3 tier cards per user (one per tier), non-deleted only. Admin-issued zonal cards don't count.
+      const existingCards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' }, type: { $ne: 'zonal' } }).toArray()
       if (existingCards.length >= 3) return handleCORS(NextResponse.json({ error: 'You already hold the maximum of 3 Aurela cards. Delete one to request another.' }, { status: 400 }))
       if (existingCards.some(c => c.tier === tier)) return handleCORS(NextResponse.json({ error: `You already have an Aurela ${tier} card. Only one card per tier is permitted.` }, { status: 400 }))
       const settings = await db.collection('settings').findOne({ id: 'platform' })
@@ -2352,17 +2426,22 @@ async function handleRoute(request, { params }) {
         const card = await db.collection('cards').findOne({ id: cardId })
         if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
         if (action === 'approve') {
-          const immediate = !!body?.activate_now
+          const isZonal = card.type === 'zonal'
+          // Zonal cards carry their own admin-defined activation window (hours); tier cards use the 24h default
+          const windowHours = isZonal ? Math.max(0, Number(card.activation_hours) || 0) : 24
+          const immediate = !!body?.activate_now || (isZonal && windowHours === 0)
           const finalStatus = immediate ? 'active' : 'activating'
-          const finalUsable = immediate ? now() : new Date(Date.now() + 24*60*60*1000)
-          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), usable_at: finalUsable, activated_at: immediate ? now() : null } })
+          const finalUsable = immediate ? now() : new Date(Date.now() + windowHours*60*60*1000)
+          const windowText = isZonal ? hoursLabel(windowHours) : '24 hours'
+          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), approved_by: user.id, usable_at: finalUsable, activated_at: immediate ? now() : null } })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
 
           // ---- Geolocation verification hold on external withdrawals ----
-          // Every card approval (24h or immediate) places the user's external withdrawals on hold until an
+          // Every tier-card approval (24h or immediate) places the user's external withdrawals on hold until an
           // administrator verifies geolocation and grants an allowance / unlocks. Admin "unlock" sets
           // withdraw_lock_exempt so future approvals don't re-lock a user the admin already cleared.
-          const ownerForLock = await db.collection('users').findOne({ id: card.user_id }, { projection: { withdraw_lock: 1, withdraw_lock_exempt: 1 } })
+          // Zonal cards SKIP this hold: the admin already verified the user's zone/location when issuing it.
+          const ownerForLock = isZonal ? null : await db.collection('users').findOne({ id: card.user_id }, { projection: { withdraw_lock: 1, withdraw_lock_exempt: 1 } })
           if (ownerForLock && !ownerForLock.withdraw_lock_exempt && !ownerForLock.withdraw_lock?.active) {
             await db.collection('users').updateOne({ id: card.user_id }, { $set: {
               withdraw_lock: { active: true, reason: 'geolocation_unverified', since: now(), card_id: card.id, set_by: 'card_approval' },
@@ -2408,7 +2487,7 @@ async function handleRoute(request, { params }) {
 
               const when = new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC'
               const title = 'Card activation fee credited'
-              const bodyText = `Your ${tierName} card has been approved. The activation fee of ${fee} USDT you paid has been credited to your USDT balance. New balance: ${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT. ${immediate ? 'Your card is active and ready to use.' : 'Your card will unlock for use within 24 hours.'}`
+              const bodyText = `Your ${tierName} card has been approved. The activation fee of ${fee} USDT you paid has been credited to your USDT balance. New balance: ${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT. ${immediate ? 'Your card is active and ready to use.' : `Your card will unlock for use within ${windowText}.`}`
               await notifyUser(db, card.user_id, {
                 kind: 'card_fee_credited', title, body: bodyText, url: '/?tab=transactions',
                 meta: { card_id: card.id, tier: card.tier, tier_name: tierName, amount: fee, currency: 'USDT', new_balance: newBalance, tx_id: tx.id, activated: immediate, usable_at: finalUsable },
@@ -2417,7 +2496,7 @@ async function handleRoute(request, { params }) {
                   intro: `Dear ${owner?.full_name || owner?.username || 'valued member'},<br/><br/>We are pleased to confirm that your <strong style="color:#f5e29d">${tierName}</strong> card has been approved. The activation fee you paid has been credited to your Aurela USDT balance as detailed below.`,
                   rows: [
                     ['Card', tierName],
-                    ['Card status', immediate ? 'Active' : 'Activating — usable within 24 hours'],
+                    ['Card status', immediate ? 'Active' : `Activating — usable within ${windowText}`],
                     ['Amount credited', `+${fee} USDT`],
                     ['New USDT balance', `${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT`],
                     ['Payment network', card.activation_network_used || card.activation_network || ''],
@@ -2433,7 +2512,7 @@ async function handleRoute(request, { params }) {
           // Keep the original status notification only when no credit notification was sent AND the card was actually pending (avoids duplicate alerts on re-approve)
           const wasPending = card.status === 'pending_verification' || card.status === 'pending_activation'
           if (!credit && wasPending) {
-            await notifyUser(db, card.user_id, { kind: 'card_activated', title: 'Card approved', body: immediate ? `Your Aurela ${card.tier} card is now active and ready to use.` : `Your Aurela ${card.tier} card has been approved. It will unlock for use in 24 hours.` })
+            await notifyUser(db, card.user_id, { kind: 'card_activated', title: 'Card approved', body: immediate ? `Your ${card.tier_name || 'Aurela ' + card.tier} card is now active and ready to use.` : `Your ${card.tier_name || 'Aurela ' + card.tier} card has been approved. It will unlock for use in ${windowText}.` })
           }
           await audit(db, user.id, `admin.card.approve`, { card_id: cardId, fee_credit: credit })
           return handleCORS(NextResponse.json({ ok: true, credit }))
@@ -2443,6 +2522,153 @@ async function handleRoute(request, { params }) {
         }
         await audit(db, user.id, `admin.card.${action}`, { card_id: cardId })
         return handleCORS(NextResponse.json({ ok: true }))
+      }
+
+      // ---------- Zonal (geolocation) cards — admin only ----------
+      if (route === '/admin/zones' && method === 'GET') {
+        const zones = await getCardZones(db)
+        const counts = await db.collection('cards').aggregate([
+          { $match: { type: 'zonal', status: { $ne: 'deleted' } } },
+          { $group: { _id: { zone: '$zone', status: '$status' }, n: { $sum: 1 } } },
+        ]).toArray()
+        const stats = {}
+        for (const c of counts) {
+          const z = c._id.zone; if (!stats[z]) stats[z] = { total: 0, active: 0, activating: 0, pending: 0, rejected: 0 }
+          stats[z].total += c.n
+          if (c._id.status === 'active') stats[z].active += c.n
+          else if (c._id.status === 'activating') stats[z].activating += c.n
+          else if (c._id.status === 'rejected') stats[z].rejected += c.n
+          else stats[z].pending += c.n
+        }
+        return handleCORS(NextResponse.json({ zones: clean(zones).map(z => ({ ...z, stats: stats[z.code] || { total: 0, active: 0, activating: 0, pending: 0, rejected: 0 } })) }))
+      }
+      if (route.startsWith('/admin/zones/') && route.split('/').length === 4 && method === 'PUT') {
+        const code = route.split('/')[3].toUpperCase()
+        const zones = await getCardZones(db)
+        const zone = zones.find(z => z.code === code)
+        if (!zone) return handleCORS(NextResponse.json({ error: 'Zone not found' }, { status: 404 }))
+        const body = await request.json().catch(() => ({}))
+        const upd = {}
+        if ('fee_usdt' in body) {
+          const fee = Number(body.fee_usdt)
+          if (!Number.isFinite(fee) || fee < 0) return handleCORS(NextResponse.json({ error: 'Fee must be a number ≥ 0 (USDT)' }, { status: 400 }))
+          upd.fee_usdt = fee
+        }
+        if ('activation_hours' in body) {
+          const h = Number(body.activation_hours)
+          if (!Number.isFinite(h) || h < 0 || h > 8760) return handleCORS(NextResponse.json({ error: 'Activation time must be a number of hours between 0 and 8760' }, { status: 400 }))
+          upd.activation_hours = h
+        }
+        if ('enabled' in body) upd.enabled = !!body.enabled
+        for (const k of ['name', 'landmark', 'city', 'image_url', 'theme']) {
+          if (k in body) {
+            const v = String(body[k] ?? '').trim().slice(0, k === 'image_url' ? 600 : 80)
+            if (k === 'image_url' && v && !/^https?:\/\//i.test(v)) return handleCORS(NextResponse.json({ error: 'Image URL must start with http(s)://' }, { status: 400 }))
+            if ((k === 'name' || k === 'landmark') && !v) return handleCORS(NextResponse.json({ error: `${k} cannot be empty` }, { status: 400 }))
+            upd[k] = v
+          }
+        }
+        for (const k of ['daily_spend', 'daily_withdraw', 'monthly_spend']) {
+          if (k in body) { const n = Number(body[k]); if (!Number.isFinite(n) || n < 0) return handleCORS(NextResponse.json({ error: `${k} must be a number ≥ 0` }, { status: 400 })); upd[k] = n }
+        }
+        if (Array.isArray(body.countries)) upd.countries = [...new Set(body.countries.map(c => String(c).toUpperCase().trim()).filter(c => /^[A-Z]{2}$/.test(c)))]
+        if (!Object.keys(upd).length) return handleCORS(NextResponse.json({ error: 'Nothing to update' }, { status: 400 }))
+        upd.updated_at = now(); upd.updated_by = user.id
+        await db.collection('card_zones').updateOne({ code }, { $set: upd })
+        const fresh = await db.collection('card_zones').findOne({ code })
+        await audit(db, user.id, 'admin.zone.update', { zone: code, ...upd })
+        return handleCORS(NextResponse.json({ zone: clean(fresh) }))
+      }
+      // Preview: where is this user and which zone would they get?
+      if (route === '/admin/zones/resolve' && method === 'GET') {
+        const url = new URL(request.url)
+        const targetId = url.searchParams.get('user_id')
+        if (!targetId) return handleCORS(NextResponse.json({ error: 'user_id required' }, { status: 400 }))
+        const target = await db.collection('users').findOne({ id: targetId }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, last_location: 1, withdraw_lock: 1, withdraw_lock_exempt: 1, role: 1 } })
+        if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
+        const zones = await getCardZones(db)
+        const loc = userCountryCode(target)
+        const zone = zoneForCountry(zones, loc.cc)
+        const existing = await db.collection('cards').find({ user_id: targetId, type: 'zonal', status: { $ne: 'deleted' } }, { projection: { _id: 0, id: 1, zone: 1, zone_name: 1, status: 1, created_at: 1 } }).toArray()
+        return handleCORS(NextResponse.json({
+          user: clean(target),
+          location: loc,
+          detected_zone: zone ? zone.code : null,
+          zone: zone ? clean(zone) : null,
+          existing_zonal_cards: existing,
+          geo_hold: !!target.withdraw_lock?.active,
+        }))
+      }
+      // Admin issues a zonal card directly to a user. Body: { user_id, zone, fee_usdt?, activation_hours?, note?, override_kyc? }
+      if (route === '/admin/zones/issue' && method === 'POST') {
+        const body = await request.json().catch(() => ({}))
+        const targetId = String(body?.user_id || '').trim()
+        const code = String(body?.zone || '').toUpperCase().trim()
+        if (!targetId || !code) return handleCORS(NextResponse.json({ error: 'user_id and zone are required' }, { status: 400 }))
+        const target = await db.collection('users').findOne({ id: targetId })
+        if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
+        if (target.status === 'blocked') return handleCORS(NextResponse.json({ error: 'This account is blocked' }, { status: 400 }))
+        if (target.kyc_status !== 'approved' && !body?.override_kyc) return handleCORS(NextResponse.json({ error: 'User has not completed identity verification (KYC). Tick "issue anyway" to override.', code: 'KYC_REQUIRED' }, { status: 400 }))
+        const zones = await getCardZones(db)
+        const zone = zones.find(z => z.code === code)
+        if (!zone) return handleCORS(NextResponse.json({ error: 'Unknown zone' }, { status: 400 }))
+        if (!zone.enabled) return handleCORS(NextResponse.json({ error: `${zone.name} zone is currently disabled` }, { status: 400 }))
+        const dup = await db.collection('cards').findOne({ user_id: targetId, type: 'zonal', zone: code, status: { $ne: 'deleted' } })
+        if (dup) return handleCORS(NextResponse.json({ error: `User already holds a ${zone.name} zonal card (${dup.status.replace('_', ' ')})` }, { status: 400 }))
+        // Per-issuance overrides (admin may tweak fee/hours for this user only); default to the zone's settings
+        const fee = ('fee_usdt' in body && body.fee_usdt !== '' && body.fee_usdt !== null) ? Number(body.fee_usdt) : Number(zone.fee_usdt)
+        const hours = ('activation_hours' in body && body.activation_hours !== '' && body.activation_hours !== null) ? Number(body.activation_hours) : Number(zone.activation_hours)
+        if (!Number.isFinite(fee) || fee < 0) return handleCORS(NextResponse.json({ error: 'Fee must be a number ≥ 0 (USDT)' }, { status: 400 }))
+        if (!Number.isFinite(hours) || hours < 0 || hours > 8760) return handleCORS(NextResponse.json({ error: 'Activation time must be a number of hours between 0 and 8760' }, { status: 400 }))
+        const settings = await db.collection('settings').findOne({ id: 'platform' })
+        const loc = userCountryCode(target)
+        const detected = zoneForCountry(zones, loc.cc)
+        const free = fee === 0
+        const immediate = free && hours === 0
+        const card = {
+          id: uuidv4(), user_id: targetId, type: 'zonal', tier: 'zonal',
+          zone: zone.code, zone_name: zone.name, tier_name: `Aurela ${zone.name}`,
+          landmark: zone.landmark, landmark_city: zone.city, theme: zone.theme, image_url: zone.image_url,
+          number: fmtCardNumber(), expiry: cardExpiry(), cvv: randDigits(3),
+          holder: (target.full_name || target.username || '').toUpperCase(),
+          // Free cards need no payment: they go straight into the activation window (or active when hours = 0)
+          status: free ? (immediate ? 'active' : 'activating') : 'pending_activation', frozen: false,
+          daily_spend_limit: Number(zone.daily_spend) || CARD_ZONE_LIMITS.daily_spend,
+          daily_withdraw_limit: Number(zone.daily_withdraw) || CARD_ZONE_LIMITS.daily_withdraw,
+          monthly_spend_limit: Number(zone.monthly_spend) || CARD_ZONE_LIMITS.monthly_spend,
+          activation_fee_usdt: fee,
+          activation_hours: hours,
+          activation_wallet: settings?.card_activation_wallet,
+          activation_network: settings?.card_activation_network || 'ERC20',
+          skip_geo_hold: true,
+          issued_by: user.id, issued_at: now(), issue_note: body?.note ? String(body.note).slice(0, 300) : null,
+          detected_country_code: loc.cc, detected_zone: detected ? detected.code : null, location_source: loc.source,
+          zone_override: detected ? detected.code !== zone.code : true,
+          created_at: now(),
+        }
+        if (free) {
+          card.admin_approved_at = now(); card.approved_by = user.id
+          card.usable_at = immediate ? now() : new Date(Date.now() + hours*60*60*1000)
+          card.activated_at = immediate ? now() : null
+        }
+        await db.collection('cards').insertOne(card)
+        const title = `${card.tier_name} card issued`
+        const bodyText = free
+          ? (immediate ? `Your ${card.tier_name} card has been issued and is active now — no activation fee required.` : `Your ${card.tier_name} card has been issued with no activation fee. It will unlock for use in ${hoursLabel(hours)}.`)
+          : `An administrator has issued you an Aurela ${zone.name} zonal card. Pay the ${fee} USDT activation fee from your Cards tab to activate it — it unlocks ${hours === 0 ? 'immediately' : `within ${hoursLabel(hours)}`} after verification.`
+        await notifyUser(db, targetId, { kind: 'zonal_card_issued', title, body: bodyText, url: '/?tab=cards', meta: { card_id: card.id, zone: zone.code, zone_name: zone.name, fee_usdt: fee, activation_hours: hours } })
+        await audit(db, user.id, 'admin.zone.issue', { card_id: card.id, user_id: targetId, zone: zone.code, fee_usdt: fee, activation_hours: hours, detected_zone: card.detected_zone, override: card.zone_override })
+        return handleCORS(NextResponse.json({ ok: true, card: clean(card) }))
+      }
+      if (route === '/admin/zones/cards' && method === 'GET') {
+        const url = new URL(request.url)
+        const zoneFilter = (url.searchParams.get('zone') || '').toUpperCase()
+        const statusFilter = url.searchParams.get('status') || ''
+        const q = { type: 'zonal', status: { $ne: 'deleted' } }
+        if (zoneFilter && zoneFilter !== 'ALL') q.zone = zoneFilter
+        if (statusFilter && statusFilter !== 'all') q.status = statusFilter
+        const list = await db.collection('cards').find(q).sort({ created_at: -1 }).limit(300).toArray()
+        return handleCORS(NextResponse.json({ cards: await attachOwners(db, clean(list)) }))
       }
 
       if (route === '/admin/audit' && method === 'GET') {

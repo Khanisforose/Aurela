@@ -69,7 +69,7 @@ export function CardsPage({ goAuth }) {
           <div className="card-luxury rounded-2xl p-6">
             <Sparkles className="h-6 w-6 text-gold-bright"/>
             <div className="font-display text-xl mt-3">On-chain activation</div>
-            <p className="text-sm text-muted-foreground mt-2">Card activation is settled in USDT on the {network} network to Aurela’s treasury wallet, or paid directly from your Aurela USDT balance. Activation fees are configured live by Aurela administration.</p>
+            <p className="text-sm text-muted-foreground mt-2">Card activation is settled in USDT on the {network} network, sent from your external wallet to Aurela’s treasury address. Payments from your internal Aurela balance are not accepted. Activation fees are configured live by Aurela administration.</p>
             {wallet && <div className="mt-3 text-xs text-muted-foreground">Treasury (public): <span className="font-mono text-gold break-all">{wallet.slice(0,8)}…{wallet.slice(-6)}</span></div>}
           </div>
           <div className="card-luxury rounded-2xl p-6">
