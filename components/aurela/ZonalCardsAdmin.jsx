@@ -69,24 +69,25 @@ export function ZonalCardsAdmin() {
   return (
     <div className="space-y-6" data-testid="zonal-cards-admin">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="font-display text-2xl">Zonal cards</div>
-          <div className="text-sm text-muted-foreground max-w-2xl">
+          <div className="text-sm text-muted-foreground max-w-2xl hidden sm:block">
             Geolocation-based cards, one design per region. Set each zone's activation fee (USDT) and activation time — the number you enter is in <span className="text-gold">hours</span> (5 = 5 hours, 40 = 40 hours). Only admins can see and issue these; zonal cards do not trigger the geolocation withdrawal hold.
           </div>
+          <div className="text-xs text-muted-foreground sm:hidden">One card design per region. Fee in USDT, activation time in <span className="text-gold">hours</span>. Admin-only; no geo withdrawal hold.</div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-9"><RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`}/></Button>
-          <Button onClick={() => setIssueOpen(true)} className="gold-btn rounded-full h-9" data-testid="zonal-issue-btn"><Send className="h-4 w-4 mr-2"/> Issue zonal card</Button>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-10 sm:h-9 shrink-0"><RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`}/></Button>
+          <Button onClick={() => setIssueOpen(true)} className="gold-btn rounded-full h-10 sm:h-9 flex-1 sm:flex-none" data-testid="zonal-issue-btn"><Send className="h-4 w-4 mr-2"/> Issue zonal card</Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
-        {[['Zones', zones.filter(z => z.enabled).length + ' / ' + zones.length, 'enabled'], ['Cards issued', totals.total, 'all zones'], ['Active', totals.active, `${totals.pending} awaiting payment / review`]].map(([l, v, s]) => (
-          <div key={l} className="card-luxury rounded-2xl p-4">
-            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">{l}</div>
-            <div className="font-display text-2xl gold-text mt-1">{v}</div>
-            <div className="text-[11px] text-muted-foreground">{s}</div>
+      <div className="grid grid-cols-3 gap-2 sm:gap-3">
+        {[['Zones', zones.filter(z => z.enabled).length + ' / ' + zones.length, 'enabled'], ['Issued', totals.total, 'all zones'], ['Active', totals.active, `${totals.pending} pending`]].map(([l, v, s]) => (
+          <div key={l} className="card-luxury rounded-2xl p-3 sm:p-4 min-w-0">
+            <div className="text-[9px] sm:text-[10px] uppercase tracking-widest text-muted-foreground truncate">{l}</div>
+            <div className="font-display text-xl sm:text-2xl gold-text mt-1 truncate">{v}</div>
+            <div className="text-[10px] sm:text-[11px] text-muted-foreground truncate">{s}</div>
           </div>
         ))}
       </div>

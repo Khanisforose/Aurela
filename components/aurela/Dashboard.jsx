@@ -259,9 +259,11 @@ export function Dashboard() {
               <button onClick={() => setMobileNavOpen(true)} className="lg:hidden h-10 w-10 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 flex items-center justify-center shrink-0" aria-label="Open menu">
                 <Menu className="h-4 w-4 text-gold"/>
               </button>
-              <div className="min-w-0">
-                <div className="text-[10px] sm:text-xs uppercase tracking-widest text-muted-foreground truncate">{tab === 'overview' ? 'Welcome back' : (NAV.find(n => n.id === tab)?.label || (tab === 'wallets' || tab === 'wallets_fiat' ? 'Wallets' : ''))}</div>
-                <div className="font-display text-base sm:text-2xl truncate">{user?.full_name || user?.username}</div>
+              <div className="min-w-0 flex-1">
+                {/* Phones: the section name is the headline (the user's name lives in the avatar menu). Desktop keeps both lines. */}
+                <div className="text-[10px] sm:text-xs uppercase tracking-widest text-muted-foreground truncate hidden sm:block">{tab === 'overview' ? 'Welcome back' : (NAV.find(n => n.id === tab)?.label || (tab === 'wallets' || tab === 'wallets_fiat' ? 'Wallets' : ''))}</div>
+                <div className="font-display text-base sm:text-2xl truncate hidden sm:block">{user?.full_name || user?.username}</div>
+                <div className="font-display text-lg leading-tight truncate sm:hidden">{tab === 'overview' ? (user?.full_name || user?.username) : (NAV.find(n => n.id === tab)?.label || (tab === 'wallets' || tab === 'wallets_fiat' ? 'Wallets' : 'Aurela'))}</div>
               </div>
             </div>
             <div className="flex items-center gap-2 sm:gap-3 shrink-0">
@@ -349,15 +351,15 @@ export function Dashboard() {
               )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="flex items-center gap-2 pr-2 pl-1 py-1 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 transition">
-                    <div className="h-9 w-9 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 font-bold">
+                  <button className="flex items-center gap-2 pr-1 sm:pr-2 pl-1 py-1 rounded-full bg-secondary hover:bg-gold-500/10 border border-gold-500/20 transition">
+                    <div className="h-8 w-8 sm:h-9 sm:w-9 rounded-full bg-gradient-to-br from-gold-400 to-gold-700 flex items-center justify-center text-onyx-900 font-bold">
                       {(user?.full_name || user?.username || 'A').charAt(0).toUpperCase()}
                     </div>
                     <div className="hidden sm:block text-left pr-2">
                       <div className="text-xs text-muted-foreground leading-tight">@{user?.username}</div>
                       <div className="text-[10px] text-gold uppercase tracking-widest leading-tight">{isAdmin ? user?.role?.replace('_',' ') : 'Member'}</div>
                     </div>
-                    <ChevronDown className="h-4 w-4 text-muted-foreground"/>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground hidden sm:block"/>
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-64 bg-onyx-900 border-gold-500/25">
@@ -489,7 +491,7 @@ function CurrencySwitcher({ onSaved }) {
   }
   return (
     <Select value={user?.preferred_currency || 'USD'} onValueChange={change}>
-      <SelectTrigger className="w-32 bg-secondary border-gold-500/20">
+      <SelectTrigger className="w-[4.75rem] sm:w-32 h-9 sm:h-10 px-2 sm:px-3 bg-secondary border-gold-500/20 text-xs sm:text-sm" aria-label="Display currency">
         <SelectValue/>
       </SelectTrigger>
       <SelectContent>
