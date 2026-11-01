@@ -1145,6 +1145,19 @@ function RequestReviewDialog({ kind, data, onClose, onAction, busy }) {
                 {data?.wallet && <Row label={`User's ${r.currency} wallet`} value={`${fmt(data.wallet.balance, r.currency)} available${data.wallet.locked ? ` · ${fmt(data.wallet.locked, r.currency)} locked` : ''}`}/>}
                 {kind === 'withdraw' && r.allowance_reserved_usd > 0 && <Row label="Allowance consumed" value={`$${Number(r.allowance_reserved_usd).toLocaleString('en-US')}`}/>}
               </div>
+              {kind === 'withdraw' && Number(r.fee) > 0 && (
+                <div className="mt-4 pt-3 border-t border-gold-500/10" data-testid="withdraw-review-fee">
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Fee & payout</div>
+                  <div className="grid grid-cols-3 gap-2 text-center rounded-lg bg-onyx-950/50 p-3">
+                    <div><div className="text-[9px] uppercase text-muted-foreground">Requested</div><div className="font-mono text-sm">{fmt(r.amount, r.currency)}</div></div>
+                    <div><div className="text-[9px] uppercase text-muted-foreground">Fee → treasury</div><div className="font-mono text-sm text-red-300">− {fmt(r.fee, r.currency)}</div><div className="text-[10px] text-muted-foreground">≈ ${Number(r.fee_usd || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}</div></div>
+                    <div><div className="text-[9px] uppercase text-gold">Send to user</div><div className="font-mono text-sm gold-text font-semibold">{fmt(r.net_amount ?? (r.amount - r.fee), r.currency)}</div></div>
+                  </div>
+                  {r.fee_breakdown && !r.fee_breakdown.waived && (
+                    <div className="text-[11px] text-muted-foreground mt-2">{r.fee_breakdown.tier_label || 'Tier'} {r.fee_breakdown.percent}%{r.fee_breakdown.rail_fee_usd > 0 ? ` + ${r.fee_breakdown.rail} cost $${r.fee_breakdown.rail_fee_usd}` : ''}{r.fee_breakdown.min_applied ? ' · minimum applied' : ''}{r.fee_breakdown.max_applied ? ' · cap applied' : ''}{r.fee_collected ? ' · collected' : ''}</div>
+                  )}
+                </div>
+              )}
               {r.details && Object.keys(r.details).length > 0 && (
                 <div className="mt-4 pt-3 border-t border-gold-500/10">
                   <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">{kind === 'deposit' ? 'Payment information provided' : 'Beneficiary details'}</div>
@@ -1251,7 +1264,7 @@ function WithdrawalsAdmin() {
                 <div className="truncate font-medium">{ownerDisplayName(w.user, w.username)}</div>
                 <div className="truncate text-muted-foreground">@{w.user?.username || w.username || '—'} · {w.user?.email || ''}{w.user?.last_location?.country ? ` · ${w.user.last_location.city ? w.user.last_location.city + ', ' : ''}${w.user.last_location.country}` : ''}</div>
               </div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono text-gold">{fmt(w.amount, w.currency)}</div></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Amount</div><div className="font-mono text-gold">{fmt(w.amount, w.currency)}</div>{Number(w.fee) > 0 && <div className="text-[10px] text-muted-foreground">fee {fmt(w.fee, w.currency)} · pays <span className="text-foreground/80">{fmt(w.net_amount ?? (w.amount - w.fee), w.currency)}</span></div>}</div>
               <div><div className="text-muted-foreground uppercase text-[10px]">Method</div><div className="truncate">{w.method}{w.network ? ` · ${w.network}` : ''}</div></div>
               <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{new Date(w.created_at).toLocaleString()}</div></div>
               <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusBadgeClass(w.status)}>{w.status}</Badge></div>

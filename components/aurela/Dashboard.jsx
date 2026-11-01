@@ -17,7 +17,7 @@ import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
   Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
-  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2, MapPinned
+  Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2, MapPinned, Loader2, Percent
 } from 'lucide-react'
 import { AdminOverview, UsersAdmin, KycAdmin, TxAdmin, SettingsAdmin, AuditAdmin, PlatformWalletsAdmin, DepositsAdmin, CardApprovalsAdmin, WithdrawalsAdmin, WithdrawAccessAdmin } from './AdminPanel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -31,6 +31,7 @@ import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
 import { UsersMapAdmin } from './UsersMap'
 import { ZonalCardsAdmin } from './ZonalCardsAdmin'
+import { FeesAdmin } from './FeesAdmin'
 import { ZonalCardVisual } from './ZonalCard'
 
 const USER_NAV = [
@@ -52,6 +53,7 @@ const ADMIN_NAV = [
   { id: 'admin_deposits', label: 'Deposit Requests', icon: ArrowDownToLine },
   { id: 'admin_withdrawals', label: 'Withdraw Requests', icon: ArrowUpFromLine },
   { id: 'admin_withdraw_access', label: 'Withdrawal Access', icon: ShieldAlert },
+  { id: 'admin_fees', label: 'Fees & Treasury', icon: Percent },
   { id: 'admin_map', label: 'Users Map', icon: Globe2 },
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_zonal_cards', label: 'Zonal Cards', icon: MapPinned },
@@ -432,6 +434,7 @@ export function Dashboard() {
               {tab === 'admin_map' && isAdmin && <UsersMapAdmin/>}
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_zonal_cards' && isAdmin && <ZonalCardsAdmin/>}
+              {tab === 'admin_fees' && isAdmin && <FeesAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
               {tab === 'admin_settings' && isAdmin && <SettingsAdmin/>}
@@ -1239,10 +1242,30 @@ function WithdrawTab({ wallets, onDone }) {
   const [loading, setLoading] = useState(false)
   const [cards, setCards] = useState([])
   const [geoBlock, setGeoBlock] = useState(null) // { allowance_usd, attempted_usd, support_email } → "Geolocation Unverified" popup
+  const [quote, setQuote] = useState(null)       // live fee quote { gross, fee, net, fee_usd, breakdown }
+  const [quoting, setQuoting] = useState(false)
   const wallet = wallets.find(w => w.currency === form.currency)
   const isCrypto = wallet?.type === 'crypto'
   const isAdminUser = user?.role === 'admin' || user?.role === 'super_admin'
   const hasActiveCard = isAdminUser || cards.some(c => c.status === 'active' && !c.frozen)
+  const feeTiers = config?.withdraw_fees?.tiers || []
+  const feesEnabled = config?.withdraw_fees?.enabled !== false
+
+  // Live fee quote — debounced, re-run whenever amount / currency / network / method changes
+  useEffect(() => {
+    const amt = Number(form.amount)
+    if (!amt || amt <= 0 || !form.currency) { setQuote(null); return }
+    let cancelled = false
+    setQuoting(true)
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.post('/withdraw/quote', { amount: amt, currency: form.currency, network: form.network, method: form.method })
+        if (!cancelled) setQuote(res?.quote || null)
+      } catch { if (!cancelled) setQuote(null) }
+      finally { if (!cancelled) setQuoting(false) }
+    }, 350)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [form.amount, form.currency, form.network, form.method])
   const cryptoNetworks = (isCrypto && ({
     BTC:['Bitcoin'], ETH:['ERC20'], USDT:['ERC20','TRC20','BEP20'], USDC:['ERC20','BEP20','Polygon'],
     BNB:['BEP20'], SOL:['Solana'], XRP:['XRP'], ADA:['Cardano'], DOGE:['Dogecoin'], MATIC:['Polygon','ERC20'],
@@ -1274,20 +1297,59 @@ function WithdrawTab({ wallets, onDone }) {
     }
     setLoading(true)
     try {
-      await api.post('/withdraw', {
+      const res = await api.post('/withdraw', {
         method: form.method, currency: form.currency, amount: Number(form.amount),
         destination: isCrypto ? form.destination : (details.account_number || details.upi_id || details.paypal_email || details.iban || details.card_last4 || ''),
         network: form.network, details,
       })
-      toast.success('Withdrawal request submitted — funds locked until admin approval')
+      const q = res?.quote
+      toast.success(q && q.fee > 0 ? `Request submitted — ${fmt(q.net, form.currency)} will be sent after a ${fmt(q.fee, form.currency)} fee` : 'Withdrawal request submitted — funds locked until admin approval')
       onDone && onDone()
       setForm({ ...form, amount: '', destination: '' })
       setDetails({})
+      setQuote(null)
     } catch(e) {
       if (e?.code === 'GEO_UNVERIFIED') setGeoBlock({ support_email: e?.data?.support_email || 'support@aurelawallet.com' })
       else toast.error(e.message)
     } finally { setLoading(false) }
   }
+
+  const feePanel = (() => {
+    const amt = Number(form.amount)
+    if (!amt || amt <= 0) {
+      if (!feesEnabled || !feeTiers.length) return null
+      return (
+        <div className="rounded-xl border border-gold-500/15 bg-secondary/40 p-3 text-xs text-muted-foreground" data-testid="withdraw-fee-info">
+          <span className="text-foreground/80">Withdrawal fee:</span> {feeTiers.map((t, i) => `${t.percent}% ${t.max_usd === null ? `above $${Number(t.min_usd).toLocaleString('en-US')}` : i === 0 ? `up to $${Number(t.max_usd).toLocaleString('en-US')}` : `from $${Number(t.min_usd).toLocaleString('en-US')} to $${Number(t.max_usd).toLocaleString('en-US')}`}`).join(' · ')} of the amount (USD value), plus network / bank costs. The fee is deducted from the amount you withdraw.
+        </div>
+      )
+    }
+    if (quoting && !quote) return <div className="rounded-xl border border-gold-500/15 bg-secondary/40 p-3 text-xs text-muted-foreground flex items-center gap-2" data-testid="withdraw-fee-loading"><Loader2 className="h-3.5 w-3.5 animate-spin"/> Calculating fee…</div>
+    if (!quote) return null
+    const b = quote.breakdown || {}
+    const tooSmall = quote.net <= 0
+    return (
+      <div className={`rounded-xl border p-4 ${tooSmall ? 'border-red-500/40 bg-red-500/5' : 'border-gold-500/25 bg-gradient-to-br from-gold-500/10 to-transparent'}`} data-testid="withdraw-fee-quote">
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div><div className="text-[9px] uppercase tracking-widest text-muted-foreground">You withdraw</div><div className="font-mono text-sm mt-0.5">{fmt(quote.gross, quote.currency)}</div></div>
+          <div><div className="text-[9px] uppercase tracking-widest text-muted-foreground">Fee</div><div className="font-mono text-sm mt-0.5 text-red-300">− {fmt(quote.fee, quote.currency)}</div><div className="text-[10px] text-muted-foreground">≈ ${Number(quote.fee_usd || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })}</div></div>
+          <div><div className="text-[9px] uppercase tracking-widest text-gold">You receive</div><div className={`font-mono text-sm mt-0.5 ${tooSmall ? 'text-red-400' : 'gold-text font-semibold'}`}>{fmt(Math.max(0, quote.net), quote.currency)}</div></div>
+        </div>
+        <div className="mt-3 pt-3 border-t border-gold-500/10 text-[11px] text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+          {b.waived ? <span>No fee applies to this withdrawal.</span> : (
+            <>
+              <span>{b.tier_label ? `${b.tier_label} tier` : 'Fee'}: <span className="text-foreground/80">{b.percent}%</span></span>
+              {b.rail_fee_usd > 0 && <span>{isCrypto ? `${b.rail} network` : 'Payout'} cost: <span className="text-foreground/80">${Number(b.rail_fee_usd).toLocaleString('en-US', { maximumFractionDigits: 2 })}</span></span>}
+              {b.min_applied && <span className="text-gold">Minimum fee applied</span>}
+              {b.max_applied && <span className="text-gold">Fee cap applied</span>}
+              {quoting && <Loader2 className="h-3 w-3 animate-spin"/>}
+            </>
+          )}
+        </div>
+        {tooSmall && <div className="mt-2 text-xs text-red-400">Amount is too small to cover the fee — please withdraw more.</div>}
+      </div>
+    )
+  })()
 
   const geoDialog = (
     <Dialog open={!!geoBlock} onOpenChange={v => !v && setGeoBlock(null)}>
@@ -1353,7 +1415,7 @@ function WithdrawTab({ wallets, onDone }) {
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Currency</Label>
             <Select value={form.currency} onValueChange={v => setForm({ ...form, currency: v })}>
-              <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
+              <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11" data-testid="withdraw-currency"><SelectValue/></SelectTrigger>
               <SelectContent className="max-h-72">
                 {enabledFiat.length > 0 && <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">Fiat</div>}
                 {Object.keys(FIAT_META).filter(c => enabledFiat.includes(c)).map(c => <SelectItem key={c} value={c}><span className="inline-flex items-center gap-2"><FlagIcon code={c} size={18}/> {c}</span></SelectItem>)}
@@ -1365,7 +1427,7 @@ function WithdrawTab({ wallets, onDone }) {
           </div>
           <div>
             <Label className="text-xs uppercase tracking-widest text-muted-foreground">Amount</Label>
-            <Input type="number" step="any" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11"/>
+            <Input type="number" step="any" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="mt-2 bg-secondary border-gold-500/20 h-11" data-testid="withdraw-amount"/>
           </div>
         </div>
         {isCrypto ? (
@@ -1373,7 +1435,7 @@ function WithdrawTab({ wallets, onDone }) {
             <div>
               <Label className="text-xs uppercase tracking-widest text-muted-foreground">Network *</Label>
               <Select value={form.network} onValueChange={v => setForm({ ...form, network: v })}>
-                <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue placeholder="Choose network"/></SelectTrigger>
+                <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11" data-testid="withdraw-network"><SelectValue placeholder="Choose network"/></SelectTrigger>
                 <SelectContent>
                   {cryptoNetworks.map(n => <SelectItem key={n} value={n}>{n}</SelectItem>)}
                 </SelectContent>
@@ -1381,7 +1443,7 @@ function WithdrawTab({ wallets, onDone }) {
             </div>
             <div className="sm:col-span-2">
               <Label className="text-xs uppercase tracking-widest text-muted-foreground">Destination wallet address *</Label>
-              <Input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value })} placeholder="0x... / bc1... / T..." className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-xs"/>
+              <Input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value })} placeholder="0x... / bc1... / T..." className="mt-2 bg-secondary border-gold-500/20 h-11 font-mono text-xs" data-testid="withdraw-destination"/>
               <div className="text-[10px] text-muted-foreground mt-1">⚠️ Sending to the wrong network will result in permanent loss of funds.</div>
             </div>
           </div>
@@ -1390,7 +1452,7 @@ function WithdrawTab({ wallets, onDone }) {
             <div>
               <Label className="text-xs uppercase tracking-widest text-muted-foreground">Withdrawal method</Label>
               <Select value={form.method} onValueChange={v => { setForm({ ...form, method: v }); setDetails({}) }}>
-                <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11"><SelectValue/></SelectTrigger>
+                <SelectTrigger className="mt-2 bg-secondary border-gold-500/20 h-11" data-testid="withdraw-method"><SelectValue/></SelectTrigger>
                 <SelectContent>
                   {enabledFiatMethods.length === 0 && <div className="px-2 py-3 text-xs text-muted-foreground">No fiat withdrawal methods enabled. Contact support.</div>}
                   {enabledFiatMethods.map(([k, v]) => <SelectItem key={k} value={k}>{v.label}</SelectItem>)}
@@ -1400,8 +1462,9 @@ function WithdrawTab({ wallets, onDone }) {
             <MethodFields method={form.method} details={details} setDetails={setDetails}/>
           </>
         )}
-        <Button onClick={submit} disabled={loading || !form.amount} className="gold-btn w-full h-12 rounded-xl">{loading?'Processing…':'Submit withdrawal request'}</Button>
-        <div className="text-xs text-muted-foreground">All withdrawal requests are reviewed by an Aurela administrator. Funds are held in escrow and released only after approval.</div>
+        {feePanel}
+        <Button onClick={submit} disabled={loading || !form.amount || (quote && quote.net <= 0)} className="gold-btn w-full h-12 rounded-xl">{loading?'Processing…':(quote && quote.fee > 0 ? `Withdraw · receive ${fmt(Math.max(0, quote.net), form.currency)}` : 'Submit withdrawal request')}</Button>
+        <div className="text-xs text-muted-foreground">All withdrawal requests are reviewed by an Aurela administrator. Funds are held in escrow and released only after approval. Fees are fixed at the time of your request and are shown above before you confirm.</div>
       </div>
     </div>
   )
@@ -1422,7 +1485,7 @@ export function TxTable({ txs, me }) {
               </div>
               <div>
                 <div className="text-sm">{t.description ? t.description : <span className="capitalize">{String(t.type || '').replace(/_/g, ' ')} · {other}</span>}</div>
-                <div className="text-xs text-muted-foreground">{new Date(t.created_at).toLocaleString()}{t.type === 'card_activation_credit' && t.balance_after != null ? ` · Balance after: ${fmt(t.balance_after, t.currency)}` : ''}</div>
+                <div className="text-xs text-muted-foreground">{new Date(t.created_at).toLocaleString()}{t.type === 'card_activation_credit' && t.balance_after != null ? ` · Balance after: ${fmt(t.balance_after, t.currency)}` : ''}{t.type === 'withdraw' && Number(t.fee) > 0 ? ` · fee ${fmt(t.fee, t.currency)} · sent ${fmt(t.net_amount ?? (t.amount - t.fee), t.currency)}` : ''}</div>
               </div>
             </div>
             <div className={`font-mono text-sm ${outgoing ? 'text-red-400' : 'text-emerald-400'}`}>{outgoing?'-':'+'}{fmt(Math.abs(t.amount), t.currency)}</div>

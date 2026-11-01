@@ -854,6 +854,114 @@ function convertUSDTo(usd, currency, rates) {
   return 0
 }
 
+// ---------- External withdrawal fee engine ----------
+// Fee = tiered percentage of the gross amount (by USD value) + a flat "rail" cost for the network / payout method,
+// then clamped to [min_fee_usd, max_fee_usd]. The fee is DEDUCTED from the amount: the wallet is debited the gross
+// amount the user typed and the beneficiary receives gross − fee. Admins can edit everything (tiers, rails, min/max)
+// and override any of it per currency. Applies to fiat AND crypto alike. Defaults follow the operator's rule
+// (10% below $10k) and, above that, market practice: remittance / exchange-style 1% → OTC & private-banking
+// 0.5% → 0.15%, plus typical exchange network costs & bank wire fees.
+const WITHDRAW_FEE_DEFAULTS = {
+  enabled: true,
+  tiers: [
+    { min_usd: 0,         max_usd: 10000,   percent: 10,   label: 'Standard' },
+    { min_usd: 10000,     max_usd: 100000,  percent: 1,    label: 'Premium' },
+    { min_usd: 100000,    max_usd: 1000000, percent: 0.5,  label: 'High value' },
+    { min_usd: 1000000,   max_usd: null,    percent: 0.15, label: 'Institutional' },
+  ],
+  min_fee_usd: 1,
+  max_fee_usd: null,
+  // Flat cost per crypto network / fiat payout method, in USD (converted to the asset at quote time).
+  // Benchmarked against major exchanges' withdrawal fees and bank outgoing-wire fees.
+  rails: {
+    ERC20: 5, TRC20: 1, BEP20: 0.3, Polygon: 0.1, Solana: 0.05, Bitcoin: 3, XRP: 0.02, Cardano: 0.2, Dogecoin: 0.5,
+    Avalanche: 0.1, Polkadot: 0.15, Cosmos: 0.05, Litecoin: 0.1, BitcoinCash: 0.05, Stellar: 0.01, NEAR: 0.05, Aptos: 0.05,
+    Arbitrum: 0.3, Optimism: 0.3, Sui: 0.05, TON: 0.1, Aurela: 0, External: 1,
+    bank_swift: 25, bank_indian: 2, upi: 0, paypal: 1, stripe: 2, card: 2, sepa: 1, ach: 3, wise: 2,
+  },
+  // Per-currency overrides: { [code]: { enabled?, tiers?, min_fee_usd?, max_fee_usd?, rail_fee_usd? } }
+  currencies: {},
+}
+function normalizeTiers(tiers) {
+  const list = (Array.isArray(tiers) ? tiers : []).map(t => ({
+    min_usd: Math.max(0, Number(t.min_usd) || 0),
+    max_usd: (t.max_usd === null || t.max_usd === undefined || t.max_usd === '') ? null : Math.max(0, Number(t.max_usd) || 0),
+    percent: Math.min(100, Math.max(0, Number(t.percent) || 0)),
+    label: String(t.label || '').slice(0, 40),
+  })).sort((a, b) => a.min_usd - b.min_usd)
+  return list
+}
+function validateTiers(tiers) {
+  if (!tiers.length) return 'At least one fee tier is required'
+  if (tiers[0].min_usd !== 0) return 'The first tier must start at $0'
+  for (let i = 0; i < tiers.length; i++) {
+    const t = tiers[i], nx = tiers[i + 1]
+    if (t.max_usd !== null && t.max_usd <= t.min_usd) return `Tier ${i + 1}: upper bound must be greater than its lower bound`
+    if (nx) {
+      if (t.max_usd === null) return `Tier ${i + 1}: only the last tier may be open-ended`
+      if (Math.abs(nx.min_usd - t.max_usd) > 1e-6) return `Tier ${i + 2} must start where tier ${i + 1} ends ($${t.max_usd.toLocaleString('en-US')})`
+    }
+  }
+  return null
+}
+async function getWithdrawFeeSchedule(db) {
+  const s = await db.collection('settings').findOne({ id: 'platform' }, { projection: { withdraw_fees: 1 } })
+  const saved = s?.withdraw_fees || {}
+  return {
+    enabled: saved.enabled !== undefined ? !!saved.enabled : WITHDRAW_FEE_DEFAULTS.enabled,
+    tiers: normalizeTiers(saved.tiers?.length ? saved.tiers : WITHDRAW_FEE_DEFAULTS.tiers),
+    min_fee_usd: saved.min_fee_usd !== undefined ? Number(saved.min_fee_usd) || 0 : WITHDRAW_FEE_DEFAULTS.min_fee_usd,
+    max_fee_usd: (saved.max_fee_usd === null || saved.max_fee_usd === undefined) ? (saved.min_fee_usd !== undefined ? null : WITHDRAW_FEE_DEFAULTS.max_fee_usd) : Number(saved.max_fee_usd),
+    rails: { ...WITHDRAW_FEE_DEFAULTS.rails, ...(saved.rails || {}) },
+    currencies: saved.currencies || {},
+    updated_at: saved.updated_at || null,
+  }
+}
+function pickTier(tiers, usd) {
+  return tiers.find(t => usd >= t.min_usd && (t.max_usd === null || usd < t.max_usd)) || tiers[tiers.length - 1]
+}
+const roundAsset = (v, currency) => {
+  const dp = CRYPTO.includes(currency) ? 8 : 2
+  return Number(Number(v).toFixed(dp))
+}
+// Returns { gross, fee, net, fee_usd, gross_usd, net_usd, currency, breakdown }
+function quoteWithdrawFee(schedule, { amount, currency, network, method }, rates) {
+  const gross = Number(amount) || 0
+  const rate_usd = convertToUSD(1, currency, rates) || 0
+  const gross_usd = gross * rate_usd
+  const override = schedule.currencies?.[currency] || {}
+  const zero = (reason) => ({ gross, fee: 0, net: gross, fee_usd: 0, gross_usd, net_usd: gross_usd, currency, breakdown: { waived: true, reason, percent: 0, percent_fee: 0, rail_fee: 0, rail_fee_usd: 0, tier_label: null, min_applied: false, max_applied: false, rate_usd } })
+  if (!schedule.enabled) return zero('Fees disabled')
+  if (override.enabled === false) return zero(`No fee for ${currency}`)
+  const tiers = normalizeTiers(override.tiers?.length ? override.tiers : schedule.tiers)
+  const tier = pickTier(tiers, gross_usd)
+  const percent = tier?.percent || 0
+  const percent_fee_usd = gross_usd * percent / 100
+  const railKey = CRYPTO.includes(currency) ? (network || 'External') : (method || 'bank_swift')
+  const rail_fee_usd = override.rail_fee_usd !== undefined && override.rail_fee_usd !== null ? Number(override.rail_fee_usd) || 0 : (Number(schedule.rails?.[railKey]) || 0)
+  let fee_usd = percent_fee_usd + rail_fee_usd
+  const min_fee_usd = override.min_fee_usd !== undefined && override.min_fee_usd !== null ? Number(override.min_fee_usd) || 0 : (Number(schedule.min_fee_usd) || 0)
+  const max_fee_usd = override.max_fee_usd !== undefined && override.max_fee_usd !== null ? Number(override.max_fee_usd) : schedule.max_fee_usd
+  let min_applied = false, max_applied = false
+  if (fee_usd < min_fee_usd) { fee_usd = min_fee_usd; min_applied = true }
+  if (max_fee_usd !== null && max_fee_usd !== undefined && Number.isFinite(Number(max_fee_usd)) && fee_usd > Number(max_fee_usd)) { fee_usd = Number(max_fee_usd); max_applied = true }
+  const toAsset = (usd) => rate_usd > 0 ? usd / rate_usd : 0
+  let fee = roundAsset(toAsset(fee_usd), currency)
+  if (fee > gross) fee = gross
+  const net = roundAsset(gross - fee, currency)
+  return {
+    gross, fee, net, currency,
+    fee_usd: Number(fee_usd.toFixed(2)), gross_usd: Number(gross_usd.toFixed(2)), net_usd: Number((gross_usd - fee_usd).toFixed(2)),
+    breakdown: {
+      waived: false, percent, percent_fee: roundAsset(toAsset(percent_fee_usd), currency), percent_fee_usd: Number(percent_fee_usd.toFixed(2)),
+      rail: railKey, rail_fee: roundAsset(toAsset(rail_fee_usd), currency), rail_fee_usd,
+      tier_label: tier?.label || null, tier_min_usd: tier?.min_usd ?? 0, tier_max_usd: tier?.max_usd ?? null,
+      min_fee_usd, max_fee_usd: max_fee_usd ?? null, min_applied, max_applied, rate_usd,
+      currency_override: !!schedule.currencies?.[currency],
+    },
+  }
+}
+
 // ---------- Route Handler ----------
 async function handleRoute(request, { params }) {
   const { path = [] } = await params
@@ -1004,6 +1112,7 @@ async function handleRoute(request, { params }) {
         all_withdrawal_methods: [...ALL_FIAT_METHODS, ALL_CRYPTO_METHOD],
         apk_url: s?.apk_url || '',
         apk_version: s?.apk_version || '',
+        withdraw_fees: await (async () => { const f = await getWithdrawFeeSchedule(db); return { enabled: f.enabled, tiers: f.tiers, min_fee_usd: f.min_fee_usd, max_fee_usd: f.max_fee_usd } })(),
       }))
     }
 
@@ -1870,6 +1979,12 @@ async function handleRoute(request, { params }) {
         allowanceReserved = amountUsd
       }
 
+      // ---- Withdrawal fee (deducted from the amount; collected into treasury on approval) ----
+      const feeSchedule = await getWithdrawFeeSchedule(db)
+      const feeRates = await getRates(db)
+      const quote = quoteWithdrawFee(feeSchedule, { amount: amt, currency, network, method: chosen }, feeRates)
+      if (quote.net <= 0) return handleCORS(NextResponse.json({ error: `Amount too small — the withdrawal fee (${quote.fee} ${currency}) would consume the whole amount. Please withdraw more.`, code: 'FEE_EXCEEDS_AMOUNT', quote }, { status: 400 }))
+
       // Lock funds on the wallet until admin approves/rejects
       await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: -amt, locked: amt } })
       const wreq = {
@@ -1878,10 +1993,24 @@ async function handleRoute(request, { params }) {
         destination: destination || '', network: network || '', details: details || {},
         wallet_id: wallet.id, status: 'pending', created_at: now(),
         allowance_reserved_usd: allowanceReserved || 0,
+        // Fee snapshot (frozen at request time so later schedule edits never change what the user agreed to)
+        fee: quote.fee, net_amount: quote.net, fee_usd: quote.fee_usd, gross_usd: quote.gross_usd, fee_breakdown: quote.breakdown,
       }
       await db.collection('withdraw_requests').insertOne(wreq)
-      await audit(db, user.id, 'withdraw.request', { method: chosen, amount: amt, currency })
-      return handleCORS(NextResponse.json({ ok: true, message: 'Withdrawal request submitted. Funds are held on your account until admin approval.', request: clean(wreq) }))
+      await audit(db, user.id, 'withdraw.request', { method: chosen, amount: amt, currency, fee: quote.fee, net: quote.net })
+      return handleCORS(NextResponse.json({ ok: true, message: `Withdrawal request submitted. ${quote.net} ${currency} will be sent after a ${quote.fee} ${currency} fee; funds are held until admin approval.`, request: clean(wreq), quote }))
+    }
+    // Live fee quote for the withdraw form
+    if (route === '/withdraw/quote' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const amt = Number(body?.amount) || 0
+      const currency = String(body?.currency || '')
+      if (!currency || ![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
+      const schedule = await getWithdrawFeeSchedule(db)
+      const rates = await getRates(db)
+      const chosen = body?.method || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift')
+      const quote = quoteWithdrawFee(schedule, { amount: amt, currency, network: body?.network, method: chosen }, rates)
+      return handleCORS(NextResponse.json({ quote, tiers: schedule.tiers, enabled: schedule.enabled }))
     }
 
     // Cards
@@ -2259,11 +2388,30 @@ async function handleRoute(request, { params }) {
           // Funds already deducted at request time; just release the lock and mint transaction
           if (wallet) await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { locked: -wreq.amount } })
           const isCrypto = CRYPTO.includes(wreq.currency)
-          const tx = { id: uuidv4(), type: 'withdraw', method: wreq.method, currency: wreq.currency, amount: wreq.amount, user_id: wreq.user_id, destination: wreq.destination, network: wreq.network, from_username: wreq.username, to_username: 'external', status: 'completed', created_at: now(), withdraw_request_id: wreq.id }
+          const fee = Number(wreq.fee) || 0
+          const net = fee > 0 ? (Number(wreq.net_amount) || Math.max(0, wreq.amount - fee)) : wreq.amount
+          const tx = { id: uuidv4(), type: 'withdraw', method: wreq.method, currency: wreq.currency, amount: wreq.amount, fee, net_amount: net, fee_usd: Number(wreq.fee_usd) || 0, user_id: wreq.user_id, destination: wreq.destination, network: wreq.network, from_username: wreq.username, to_username: 'external', status: 'completed', created_at: now(), withdraw_request_id: wreq.id }
           await db.collection('transactions').insertOne(tx)
-          await writeBlock(db, { type: 'withdraw', tx_id: tx.id, currency: wreq.currency, amount: wreq.amount, network: isCrypto ? (wreq.network || 'external') : 'fiat_rail', from_user_id: wreq.user_id, from_username: wreq.username, to_username: 'external', destination: wreq.destination, method: wreq.method })
-          await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
-          await notifyUser(db, wreq.user_id, { kind: 'withdraw_approved', title: 'Withdrawal released', body: `Your withdrawal of ${wreq.amount} ${wreq.currency} to ${wreq.destination || 'external'} has been approved and released.` })
+          await writeBlock(db, { type: 'withdraw', tx_id: tx.id, currency: wreq.currency, amount: net, fee, network: isCrypto ? (wreq.network || 'external') : 'fiat_rail', from_user_id: wreq.user_id, from_username: wreq.username, to_username: 'external', destination: wreq.destination, method: wreq.method })
+          // ---- Collect the fee into the platform treasury (exactly once per request) ----
+          if (fee > 0) {
+            const already = await db.collection('treasury_ledger').findOne({ source_id: wreq.id, type: 'withdraw_fee' })
+            if (!already) {
+              const entry = {
+                id: uuidv4(), type: 'withdraw_fee', currency: wreq.currency, amount: fee, amount_usd: Number(wreq.fee_usd) || 0,
+                gross_amount: wreq.amount, gross_usd: Number(wreq.gross_usd) || 0, net_amount: net,
+                user_id: wreq.user_id, username: wreq.username, source: 'withdraw_request', source_id: wreq.id, tx_id: tx.id,
+                method: wreq.method, network: wreq.network || null, breakdown: wreq.fee_breakdown || null,
+                collected_by: user.id, created_at: now(),
+              }
+              await db.collection('treasury_ledger').insertOne(entry)
+              await writeBlock(db, { type: 'withdraw_fee', tx_id: entry.id, currency: wreq.currency, amount: fee, network: 'internal', from_user_id: wreq.user_id, from_username: wreq.username, to_username: 'aurela_treasury', withdraw_request_id: wreq.id })
+            }
+          }
+          await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id, fee_collected: fee > 0 } })
+          await notifyUser(db, wreq.user_id, { kind: 'withdraw_approved', title: 'Withdrawal released', body: fee > 0
+            ? `Your withdrawal has been approved. ${net} ${wreq.currency} has been released to ${wreq.destination || 'your external account'} (${wreq.amount} ${wreq.currency} less a ${fee} ${wreq.currency} withdrawal fee).`
+            : `Your withdrawal of ${wreq.amount} ${wreq.currency} to ${wreq.destination || 'external'} has been approved and released.` })
         } else {
           // Rejected — return the locked funds to available balance
           if (wallet) await db.collection('wallets').updateOne({ id: wallet.id }, { $inc: { balance: wreq.amount, locked: -wreq.amount } })
@@ -2669,6 +2817,89 @@ async function handleRoute(request, { params }) {
         if (statusFilter && statusFilter !== 'all') q.status = statusFilter
         const list = await db.collection('cards').find(q).sort({ created_at: -1 }).limit(300).toArray()
         return handleCORS(NextResponse.json({ cards: await attachOwners(db, clean(list)) }))
+      }
+
+      // ---------- Withdrawal fees: schedule + treasury report (admin) ----------
+      if (route === '/admin/fees/schedule' && method === 'GET') {
+        const schedule = await getWithdrawFeeSchedule(db)
+        return handleCORS(NextResponse.json({ schedule, defaults: WITHDRAW_FEE_DEFAULTS, rail_keys: { crypto: [...new Set(Object.values(CRYPTO_NETWORKS).flat())], fiat: ALL_FIAT_METHODS } }))
+      }
+      if (route === '/admin/fees/schedule' && method === 'PUT') {
+        const body = await request.json().catch(() => ({}))
+        const current = await getWithdrawFeeSchedule(db)
+        const next = { ...current }
+        if ('enabled' in body) next.enabled = !!body.enabled
+        if ('tiers' in body) {
+          next.tiers = normalizeTiers(body.tiers)
+          const err = validateTiers(next.tiers)
+          if (err) return handleCORS(NextResponse.json({ error: err }, { status: 400 }))
+        }
+        if ('min_fee_usd' in body) { const v = Number(body.min_fee_usd); if (!Number.isFinite(v) || v < 0) return handleCORS(NextResponse.json({ error: 'Minimum fee must be a number ≥ 0 (USD)' }, { status: 400 })); next.min_fee_usd = v }
+        if ('max_fee_usd' in body) {
+          if (body.max_fee_usd === null || body.max_fee_usd === '') next.max_fee_usd = null
+          else { const v = Number(body.max_fee_usd); if (!Number.isFinite(v) || v <= 0) return handleCORS(NextResponse.json({ error: 'Maximum fee must be a positive number (USD) or empty for no cap' }, { status: 400 })); next.max_fee_usd = v }
+        }
+        if (next.max_fee_usd !== null && next.max_fee_usd < next.min_fee_usd) return handleCORS(NextResponse.json({ error: 'Maximum fee cannot be lower than the minimum fee' }, { status: 400 }))
+        if ('rails' in body && body.rails && typeof body.rails === 'object') {
+          const rails = { ...current.rails }
+          for (const [k, v] of Object.entries(body.rails)) {
+            const n = Number(v); if (!Number.isFinite(n) || n < 0) return handleCORS(NextResponse.json({ error: `Rail fee for ${k} must be a number ≥ 0 (USD)` }, { status: 400 }))
+            rails[String(k).slice(0, 40)] = n
+          }
+          next.rails = rails
+        }
+        if ('currencies' in body && body.currencies && typeof body.currencies === 'object') {
+          const out = {}
+          for (const [code, o] of Object.entries(body.currencies)) {
+            if (![...FIAT, ...CRYPTO].includes(code)) return handleCORS(NextResponse.json({ error: `Unknown currency ${code}` }, { status: 400 }))
+            if (!o || typeof o !== 'object') continue
+            const ov = {}
+            if ('enabled' in o) ov.enabled = !!o.enabled
+            if (o.tiers?.length) { ov.tiers = normalizeTiers(o.tiers); const err = validateTiers(ov.tiers); if (err) return handleCORS(NextResponse.json({ error: `${code}: ${err}` }, { status: 400 })) }
+            for (const k of ['min_fee_usd', 'max_fee_usd', 'rail_fee_usd']) {
+              if (k in o && o[k] !== null && o[k] !== '') { const v = Number(o[k]); if (!Number.isFinite(v) || v < 0) return handleCORS(NextResponse.json({ error: `${code}: ${k} must be a number ≥ 0` }, { status: 400 })); ov[k] = v }
+            }
+            if (Object.keys(ov).length) out[code] = ov
+          }
+          next.currencies = out
+        }
+        next.updated_at = now(); next.updated_by = user.id
+        delete next.rail_keys
+        await db.collection('settings').updateOne({ id: 'platform' }, { $set: { withdraw_fees: next } }, { upsert: true })
+        await audit(db, user.id, 'admin.fees.update', { enabled: next.enabled, tiers: next.tiers, min_fee_usd: next.min_fee_usd, max_fee_usd: next.max_fee_usd, currencies: Object.keys(next.currencies) })
+        return handleCORS(NextResponse.json({ schedule: await getWithdrawFeeSchedule(db) }))
+      }
+      // Admin preview of a quote (any amount/currency) — used by the schedule editor's calculator
+      if (route === '/admin/fees/preview' && method === 'POST') {
+        const body = await request.json().catch(() => ({}))
+        const currency = String(body?.currency || 'USDT')
+        if (![...FIAT, ...CRYPTO].includes(currency)) return handleCORS(NextResponse.json({ error: 'Unsupported currency' }, { status: 400 }))
+        const schedule = body?.schedule ? { ...(await getWithdrawFeeSchedule(db)), ...body.schedule, tiers: normalizeTiers(body.schedule.tiers || (await getWithdrawFeeSchedule(db)).tiers) } : await getWithdrawFeeSchedule(db)
+        const rates = await getRates(db)
+        const quote = quoteWithdrawFee(schedule, { amount: Number(body?.amount) || 0, currency, network: body?.network, method: body?.method || (CRYPTO.includes(currency) ? 'crypto' : 'bank_swift') }, rates)
+        return handleCORS(NextResponse.json({ quote }))
+      }
+      if (route === '/admin/fees/report' && method === 'GET') {
+        const url = new URL(request.url)
+        const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 30))
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+        const [allTime, inRange, byCurrency, byDay, recent, pendingAgg] = await Promise.all([
+          db.collection('treasury_ledger').aggregate([{ $match: { type: 'withdraw_fee' } }, { $group: { _id: null, usd: { $sum: '$amount_usd' }, count: { $sum: 1 } } }]).toArray(),
+          db.collection('treasury_ledger').aggregate([{ $match: { type: 'withdraw_fee', created_at: { $gte: since } } }, { $group: { _id: null, usd: { $sum: '$amount_usd' }, count: { $sum: 1 }, gross_usd: { $sum: '$gross_usd' } } }]).toArray(),
+          db.collection('treasury_ledger').aggregate([{ $match: { type: 'withdraw_fee', created_at: { $gte: since } } }, { $group: { _id: '$currency', amount: { $sum: '$amount' }, usd: { $sum: '$amount_usd' }, count: { $sum: 1 } } }, { $sort: { usd: -1 } }]).toArray(),
+          db.collection('treasury_ledger').aggregate([{ $match: { type: 'withdraw_fee', created_at: { $gte: since } } }, { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } }, usd: { $sum: '$amount_usd' }, count: { $sum: 1 } } }, { $sort: { _id: 1 } }]).toArray(),
+          db.collection('treasury_ledger').find({ type: 'withdraw_fee' }).sort({ created_at: -1 }).limit(100).toArray(),
+          db.collection('withdraw_requests').aggregate([{ $match: { status: 'pending', fee: { $gt: 0 } } }, { $group: { _id: null, usd: { $sum: '$fee_usd' }, count: { $sum: 1 } } }]).toArray(),
+        ])
+        return handleCORS(NextResponse.json({
+          days,
+          all_time: { usd: Number((allTime[0]?.usd || 0).toFixed(2)), count: allTime[0]?.count || 0 },
+          range: { usd: Number((inRange[0]?.usd || 0).toFixed(2)), count: inRange[0]?.count || 0, gross_usd: Number((inRange[0]?.gross_usd || 0).toFixed(2)) },
+          pending: { usd: Number((pendingAgg[0]?.usd || 0).toFixed(2)), count: pendingAgg[0]?.count || 0 },
+          by_currency: byCurrency.map(c => ({ currency: c._id, amount: c.amount, usd: Number(c.usd.toFixed(2)), count: c.count })),
+          by_day: byDay.map(d => ({ day: d._id, usd: Number(d.usd.toFixed(2)), count: d.count })),
+          recent: await attachOwners(db, clean(recent)),
+        }))
       }
 
       if (route === '/admin/audit' && method === 'GET') {
