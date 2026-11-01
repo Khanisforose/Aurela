@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { useApp, FIAT_META, CRYPTO_META, fmt, KYC_DOCS_BY_COUNTRY, KYC_COUNTRIES, FIAT_METHODS, CoinIcon, FlagIcon } from './store'
 import { AurelaLogo, AurelaWordmark } from './Logo'
 import { CardVisual } from './Landing'
@@ -87,6 +87,59 @@ export function Dashboard() {
 
   // Close mobile nav after selecting a tab
   const goTab = useCallback((id) => { setTab(id); setMobileNavOpen(false) }, [])
+
+  // ---- Hardware/browser back button support (Android APK / PWA) ----
+  // Every tab change pushes a history entry and every open dialog pushes one more, so pressing the phone's
+  // back key closes the dialog → returns to the previous tab → and only exits the app from the very first screen.
+  const tabRef = useRef(tab)
+  const popTabRef = useRef(null) // tab applied from a popstate (don't push again)
+  const navOpenRef = useRef(false)
+  useEffect(() => { navOpenRef.current = mobileNavOpen }, [mobileNavOpen])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const DIALOG_SEL = '[role="dialog"][data-state="open"]:not([data-no-history])'
+    // Seed the current entry with the starting tab
+    window.history.replaceState({ ...(window.history.state || {}), aurelaTab: tabRef.current }, '')
+    const onPop = (e) => {
+      // A dialog is open → the back key closes it (Radix closes on Escape) and stops there
+      if (document.querySelector(DIALOG_SEL)) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))
+        return
+      }
+      // Landed on a stale "dialog" entry (its dialog was already closed) → keep going back
+      if (e.state?.aurelaDialog) { window.history.back(); return }
+      // Mobile nav drawer open → back just closes it and stays on the current tab
+      if (navOpenRef.current) {
+        setMobileNavOpen(false)
+        const url = new URL(window.location.href); url.searchParams.set('tab', tabRef.current)
+        window.history.pushState({ aurelaTab: tabRef.current }, '', url.toString())
+        return
+      }
+      const t = e.state?.aurelaTab
+      setMobileNavOpen(false)
+      if (t && t !== tabRef.current) { popTabRef.current = t; setTab(t) }
+    }
+    window.addEventListener('popstate', onPop)
+    // Each dialog that opens owns one history entry
+    const obs = new MutationObserver(() => {
+      const isOpen = !!document.querySelector(DIALOG_SEL)
+      const stateIsDialog = !!window.history.state?.aurelaDialog
+      if (isOpen && !stateIsDialog) window.history.pushState({ aurelaTab: tabRef.current, aurelaDialog: true }, '')
+      else if (!isOpen && stateIsDialog) window.history.back() // closed via its own button/overlay → drop its entry
+    })
+    obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-state'] })
+    return () => { window.removeEventListener('popstate', onPop); obs.disconnect() }
+  }, [])
+  useEffect(() => {
+    if (typeof window === 'undefined' || tab === tabRef.current) return
+    tabRef.current = tab
+    if (popTabRef.current === tab) { popTabRef.current = null; return } // came from back/forward — history already correct
+    const url = new URL(window.location.href)
+    url.searchParams.set('tab', tab)
+    window.history.pushState({ aurelaTab: tab }, '', url.toString())
+    // Start each tab at the top on phones
+    window.scrollTo({ top: 0, behavior: 'instant' })
+  }, [tab])
 
   const loadWallets = async () => {
     try { const { wallets, totals } = await api.get('/wallets'); setWallets(wallets); setTotals(totals) } catch(e) {}
@@ -699,7 +752,7 @@ function TransferTab({ wallets, onDone }) {
       // Clean the URL so a refresh doesn't repopulate stale values
       const url = new URL(window.location.href)
       ;['send_to','send_amount','send_currency','send_memo'].forEach(k => url.searchParams.delete(k))
-      window.history.replaceState({}, '', url.toString())
+      window.history.replaceState(window.history.state || {}, '', url.toString())
     }
   }, [])
 

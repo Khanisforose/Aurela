@@ -60,3 +60,7 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - Admin issues directly: user search → location/zone auto-detected from last GPS/IP fix → override zone/fee/hours per card → issue. Paid cards follow the existing tx-hash → Card Approvals flow; fee credited to USDT; usable_at = approval + hours. Fee 0 → straight to activating/active.
 - Zonal cards SKIP the geolocation withdraw hold and don't count toward the 3-tier-card cap.
 - Users see their metallic landmark card (ZonalCard.jsx) on the Cards tab; zone config/fees stay admin-only.
+
+## v1.6.1 — Mobile fixes
+- Global Dialog (components/ui/dialog.jsx): capped at 100dvh with internal scroll, 10px side margins, smaller padding on phones — pop-ups no longer run off-screen.
+- Android/PWA back key (Dashboard.jsx): tab changes push history entries (?tab=…), each open dialog pushes one; popstate closes dialog → previous tab → … → exit only from the first screen. Mobile nav drawer: back just closes it.
