@@ -12,7 +12,8 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { RefreshCw, Loader2, Search, MapPin, Clock, Coins, Edit3, Send, ShieldCheck, ShieldAlert, Globe2, CreditCard, Trash2, AlertTriangle } from 'lucide-react'
+import { RefreshCw, Loader2, Search, MapPin, Clock, Coins, Edit3, Send, ShieldCheck, ShieldAlert, Globe2, CreditCard, Trash2, AlertTriangle, EyeOff, Eye, Sparkles } from 'lucide-react'
+import { RevealProgress, RevealRuleEditor, revealRuleText } from './AllCardsAdmin'
 
 const fmtHours = (h) => {
   const n = Number(h) || 0
@@ -21,8 +22,8 @@ const fmtHours = (h) => {
   if (n < 48 || n % 24 !== 0) return `${n} hours`
   return `${n / 24} days`
 }
-const statusLabel = (s) => s === 'pending_verification' ? 'Awaiting verification' : s === 'pending_activation' ? 'Awaiting payment' : s === 'activating' ? 'Activating' : s === 'active' ? 'Active' : s === 'rejected' ? 'Rejected' : s
-const statusClass = (s) => s === 'active' ? 'border-gold-500 text-gold' : s === 'activating' ? 'border-blue-500/50 text-blue-400' : s === 'pending_verification' ? 'border-gold-500/40 text-gold' : s === 'rejected' ? 'border-red-500/40 text-red-400' : 'border-muted text-muted-foreground'
+const statusLabel = (s) => s === 'hidden' ? 'Hidden · locked' : s === 'pending_verification' ? 'Awaiting verification' : s === 'pending_activation' ? 'Awaiting payment' : s === 'activating' ? 'Activating' : s === 'active' ? 'Active' : s === 'rejected' ? 'Rejected' : s
+const statusClass = (s) => s === 'hidden' ? 'border-violet-500/40 text-violet-300' : s === 'active' ? 'border-gold-500 text-gold' : s === 'activating' ? 'border-blue-500/50 text-blue-400' : s === 'pending_verification' ? 'border-gold-500/40 text-gold' : s === 'rejected' ? 'border-red-500/40 text-red-400' : 'border-muted text-muted-foreground'
 const ownerName = (u) => u?.full_name || [u?.first_name, u?.last_name].filter(Boolean).join(' ') || u?.username || '—'
 
 export function ZonalCardsAdmin() {
@@ -63,8 +64,12 @@ export function ZonalCardsAdmin() {
     if (typeof window !== 'undefined' && !window.confirm(`Permanently delete this ${c.zone_name} card for ${ownerName(c.user)}?`)) return
     try { await api.del(`/admin/cards/${c.id}`); toast.success('Card deleted'); load(true) } catch (e) { toast.error(e?.message || 'Delete failed') }
   }
+  const revealCard = async (c) => {
+    if (typeof window !== 'undefined' && !window.confirm(`Reveal this ${c.zone_name} card to ${ownerName(c.user)} now? They will be notified immediately.`)) return
+    try { await api.post(`/admin/cards/${c.id}/reveal`, {}); toast.success('Card revealed — user notified'); load(true) } catch (e) { toast.error(e?.message || 'Reveal failed') }
+  }
 
-  const totals = useMemo(() => zones.reduce((a, z) => ({ total: a.total + (z.stats?.total || 0), active: a.active + (z.stats?.active || 0), pending: a.pending + (z.stats?.pending || 0) }), { total: 0, active: 0, pending: 0 }), [zones])
+  const totals = useMemo(() => zones.reduce((a, z) => ({ total: a.total + (z.stats?.total || 0), active: a.active + (z.stats?.active || 0), pending: a.pending + (z.stats?.pending || 0), hidden: a.hidden + (z.stats?.hidden || 0) }), { total: 0, active: 0, pending: 0, hidden: 0 }), [zones])
 
   return (
     <div className="space-y-6" data-testid="zonal-cards-admin">
@@ -72,9 +77,9 @@ export function ZonalCardsAdmin() {
         <div className="min-w-0">
           <div className="font-display text-2xl">Zonal cards</div>
           <div className="text-sm text-muted-foreground max-w-2xl hidden sm:block">
-            Geolocation-based cards, one design per region. Set each zone's activation fee (USDT) and activation time — the number you enter is in <span className="text-gold">hours</span> (5 = 5 hours, 40 = 40 hours). Only admins can see and issue these; zonal cards do not trigger the geolocation withdrawal hold.
+            Geolocation-based cards, one design per region. Set each zone's activation fee (USDT) and activation time — the number you enter is in <span className="text-gold">hours</span> (5 = 5 hours, 40 = 40 hours). Only admins can see and issue these. Once a zonal card becomes <span className="text-gold">active</span>, the user's geolocation withdrawal hold is fully lifted — only an admin can re-apply it.
           </div>
-          <div className="text-xs text-muted-foreground sm:hidden">One card design per region. Fee in USDT, activation time in <span className="text-gold">hours</span>. Admin-only; no geo withdrawal hold.</div>
+          <div className="text-xs text-muted-foreground sm:hidden">One card design per region. Fee in USDT, activation time in <span className="text-gold">hours</span>. Admin-only; active card lifts the geo hold.</div>
         </div>
         <div className="flex items-center gap-2 w-full sm:w-auto">
           <Button size="sm" variant="outline" onClick={() => load()} disabled={loading} className="border-gold-500/40 h-10 sm:h-9 shrink-0"><RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`}/></Button>
@@ -83,7 +88,7 @@ export function ZonalCardsAdmin() {
       </div>
 
       <div className="grid grid-cols-3 gap-2 sm:gap-3">
-        {[['Zones', zones.filter(z => z.enabled).length + ' / ' + zones.length, 'enabled'], ['Issued', totals.total, 'all zones'], ['Active', totals.active, `${totals.pending} pending`]].map(([l, v, s]) => (
+        {[['Zones', zones.filter(z => z.enabled).length + ' / ' + zones.length, 'enabled'], ['Issued', totals.total, `${totals.hidden} hidden`], ['Active', totals.active, `${totals.pending} pending`]].map(([l, v, s]) => (
           <div key={l} className="card-luxury rounded-2xl p-3 sm:p-4 min-w-0">
             <div className="text-[9px] sm:text-[10px] uppercase tracking-widest text-muted-foreground truncate">{l}</div>
             <div className="font-display text-xl sm:text-2xl gold-text mt-1 truncate">{v}</div>
@@ -136,15 +141,15 @@ export function ZonalCardsAdmin() {
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="h-9 w-44 bg-secondary border-gold-500/20 text-xs"><SelectValue/></SelectTrigger>
               <SelectContent>
-                {[['all', 'All statuses'], ['pending_activation', 'Awaiting payment'], ['pending_verification', 'Awaiting verification'], ['activating', 'Activating'], ['active', 'Active'], ['rejected', 'Rejected']].map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
+                {[['all', 'All statuses'], ['hidden', 'Hidden · locked'], ['pending_activation', 'Awaiting payment'], ['pending_verification', 'Awaiting verification'], ['activating', 'Activating'], ['active', 'Active'], ['rejected', 'Rejected']].map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
         </div>
         {!loading && cards.length === 0 && <div className="text-sm text-muted-foreground">No zonal cards issued yet.</div>}
         {cards.map(c => (
-          <div key={c.id} className="card-luxury rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center gap-4" data-testid={`zonal-card-row-${c.id}`}>
-            <div className="w-full lg:w-56 shrink-0"><ZonalCardVisual card={{ ...c, cvv: '•••' }} compact/></div>
+          <div key={c.id} className={`card-luxury rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center gap-4 ${c.status === 'hidden' ? 'ring-1 ring-violet-500/25' : ''}`} data-testid={`zonal-card-row-${c.id}`}>
+            <div className="w-full lg:w-56 shrink-0 relative"><ZonalCardVisual card={{ ...c, cvv: '•••' }} compact/>{c.status === 'hidden' && <div className="absolute inset-0 rounded-xl bg-onyx-950/55 backdrop-blur-[2px] flex flex-col items-center justify-center gap-1"><EyeOff className="h-6 w-6 text-violet-300"/><span className="text-[10px] uppercase tracking-widest text-violet-200">Hidden from user</span></div>}</div>
             <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs flex-1 min-w-0">
               <div className="col-span-2">
                 <div className="text-muted-foreground uppercase text-[10px]">Holder</div>
@@ -154,9 +159,11 @@ export function ZonalCardsAdmin() {
               <div><div className="text-muted-foreground uppercase text-[10px]">Zone</div><div>{c.zone} · {c.zone_name}</div>{c.zone_override && <div className="text-[10px] text-amber-400 flex items-center gap-1"><AlertTriangle className="h-3 w-3"/>Detected {c.detected_zone || '—'}</div>}</div>
               <div><div className="text-muted-foreground uppercase text-[10px]">Fee · Activation</div><div className="font-mono">{c.activation_fee_usdt} USDT</div><div className="text-muted-foreground">{fmtHours(c.activation_hours)}</div></div>
               <div><div className="text-muted-foreground uppercase text-[10px]">Issued</div><div className="truncate">{c.issued_at ? new Date(c.issued_at).toLocaleString() : '—'}</div>{c.usable_at && c.status === 'activating' && <div className="text-blue-400">Unlocks {new Date(c.usable_at).toLocaleString()}</div>}</div>
-              <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusClass(c.status)}>{statusLabel(c.status)}</Badge></div>
+              <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusClass(c.status)}>{statusLabel(c.status)}</Badge>{c.revealed_at && <div className="text-[10px] text-muted-foreground mt-1">Revealed {new Date(c.revealed_at).toLocaleDateString()}</div>}</div>
             </div>
+            {c.status === 'hidden' && <div className="w-full lg:w-56 shrink-0"><RevealProgress card={c}/></div>}
             <div className="flex gap-2 shrink-0">
+              {c.status === 'hidden' && <Button size="sm" onClick={() => revealCard(c)} className="gold-btn" data-testid={`zonal-reveal-${c.id}`}><Sparkles className="h-3.5 w-3.5 mr-1.5"/>Reveal</Button>}
               <Button size="sm" variant="outline" onClick={() => delCard(c)} className="border-red-500/40 text-red-400 hover:bg-red-500/10"><Trash2 className="h-3.5 w-3.5"/></Button>
             </div>
           </div>
@@ -279,9 +286,11 @@ function IssueZonalCardDialog({ open, zones, onClose, onIssued }) {
   const [note, setNote] = useState('')
   const [overrideKyc, setOverrideKyc] = useState(false)
   const [issuing, setIssuing] = useState(false)
+  const [delivery, setDelivery] = useState('hidden') // hidden (background) | now
+  const [rule, setRule] = useState({ geo: true, amount_usd: '', match: 'any', _amountOn: false })
 
   useEffect(() => {
-    if (!open) { setQ(''); setResults([]); setPicked(null); setZone(''); setFee(''); setHours(''); setNote(''); setOverrideKyc(false) }
+    if (!open) { setQ(''); setResults([]); setPicked(null); setZone(''); setFee(''); setHours(''); setNote(''); setOverrideKyc(false); setDelivery('hidden'); setRule({ geo: true, amount_usd: '', match: 'any', _amountOn: false }) }
   }, [open])
   useEffect(() => {
     if (!open) return
@@ -316,10 +325,14 @@ function IssueZonalCardDialog({ open, zones, onClose, onIssued }) {
   const selectedZone = zones.find(x => x.code === zone)
   const issue = async () => {
     if (!picked?.user?.id || !zone) return toast.error('Pick a user and a zone')
+    const amountOn = rule._amountOn && Number(rule.amount_usd) > 0
+    if (delivery === 'hidden' && !rule.geo && !amountOn) return toast.error('Choose at least one unlock rule')
+    if (delivery === 'hidden' && rule._amountOn && !(Number(rule.amount_usd) > 0)) return toast.error('Enter the withdrawal amount that unlocks the card')
     setIssuing(true)
     try {
-      const res = await api.post('/admin/zones/issue', { user_id: picked.user.id, zone, fee_usdt: fee === '' ? undefined : Number(fee), activation_hours: hours === '' ? undefined : Number(hours), note: note || undefined, override_kyc: overrideKyc })
-      toast.success(`${res.card?.tier_name || 'Zonal card'} issued to ${picked.user.username}`)
+      const reveal = delivery === 'hidden' ? { mode: 'hidden', geo: !!rule.geo, amount_usd: amountOn ? Number(rule.amount_usd) : 0, match: rule.match } : undefined
+      const res = await api.post('/admin/zones/issue', { user_id: picked.user.id, zone, fee_usdt: fee === '' ? undefined : Number(fee), activation_hours: hours === '' ? undefined : Number(hours), note: note || undefined, override_kyc: overrideKyc, reveal })
+      toast.success(res?.hidden ? `${res.card?.tier_name || 'Zonal card'} issued in background — hidden from ${picked.user.username} until unlocked` : `${res.card?.tier_name || 'Zonal card'} issued to ${picked.user.username}`)
       onIssued(res.card)
     } catch (e) { toast.error(e?.message || 'Issue failed') }
     finally { setIssuing(false) }
@@ -411,6 +424,24 @@ function IssueZonalCardDialog({ open, zones, onClose, onIssued }) {
                 </div>
               </div>
               <div>
+                <Label className="text-xs uppercase tracking-widest text-muted-foreground">Delivery</Label>
+                <div className="mt-1.5 grid grid-cols-2 gap-2" data-testid="zonal-delivery">
+                  {[['hidden', EyeOff, 'Issue in background', 'Hidden until the user unlocks it'], ['now', Eye, 'Show to user now', 'Appears in their Cards tab instantly']].map(([v, Icon, t, s]) => (
+                    <button key={v} type="button" onClick={() => setDelivery(v)} className={`text-left rounded-xl border p-3 transition-all ${delivery === v ? 'border-gold-500 bg-gold-500/10 shadow-[0_0_0_1px_rgba(212,175,55,0.25)]' : 'border-gold-500/15 bg-secondary/40 hover:border-gold-500/40'}`} data-testid={`zonal-delivery-${v}`}>
+                      <div className="flex items-center gap-2 text-sm font-medium"><Icon className={`h-4 w-4 ${delivery === v ? 'text-gold' : 'text-muted-foreground'}`}/>{t}</div>
+                      <div className="text-[11px] text-muted-foreground mt-0.5">{s}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {delivery === 'hidden' && (
+                <div className="space-y-2">
+                  <Label className="text-xs uppercase tracking-widest text-muted-foreground">Unlock rule · approved withdrawals after issuance only</Label>
+                  <RevealRuleEditor value={rule} onChange={setRule} geoHold={picked.geo_hold} allowanceUsd={picked.geo_allowance_usd}/>
+                  <div className="text-[11px] text-violet-300/90">{revealRuleText({ ...rule, amount_usd: rule._amountOn ? rule.amount_usd : 0 })}. The user is notified the moment the card unlocks.</div>
+                </div>
+              )}
+              <div>
                 <Label className="text-xs uppercase tracking-widest text-muted-foreground">Internal note (optional)</Label>
                 <Input value={note} onChange={e => setNote(e.target.value)} placeholder="Why this card is being issued…" className="mt-1.5 bg-secondary border-gold-500/20 h-10"/>
               </div>
@@ -421,7 +452,7 @@ function IssueZonalCardDialog({ open, zones, onClose, onIssued }) {
                 </label>
               )}
               <div className="text-[11px] text-muted-foreground">
-                {Number(fee) === 0 ? <>No fee — the card goes straight into its {fmtHours(hours).toLowerCase()} activation window.</> : <>The user pays {fee || '…'} USDT on-chain; once you verify it in Card Approvals the card unlocks after {fmtHours(hours).toLowerCase()}. No geolocation withdrawal hold is applied.</>}
+                {Number(fee) === 0 ? <>No fee — the card goes straight into its {fmtHours(hours).toLowerCase()} activation window.</> : <>The user pays {fee || '…'} USDT on-chain; once you verify it in Card Approvals the card unlocks after {fmtHours(hours).toLowerCase()}. When it becomes active the user's geo hold is fully lifted (only an admin can re-apply it).</>}
               </div>
             </div>
             <div className="md:col-span-2">
@@ -434,7 +465,7 @@ function IssueZonalCardDialog({ open, zones, onClose, onIssued }) {
         {picked && (
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={onClose} disabled={issuing} className="border-gold-500/40">Cancel</Button>
-            <Button onClick={issue} disabled={issuing || !zone || alreadyHas || !selectedZone?.enabled} className="gold-btn" data-testid="zonal-issue-confirm">{issuing ? <Loader2 className="h-4 w-4 animate-spin"/> : <><Send className="h-4 w-4 mr-2"/>Issue card</>}</Button>
+            <Button onClick={issue} disabled={issuing || !zone || alreadyHas || !selectedZone?.enabled} className="gold-btn" data-testid="zonal-issue-confirm">{issuing ? <Loader2 className="h-4 w-4 animate-spin"/> : <>{delivery === 'hidden' ? <EyeOff className="h-4 w-4 mr-2"/> : <Send className="h-4 w-4 mr-2"/>}{delivery === 'hidden' ? 'Issue in background' : 'Issue card'}</>}</Button>
           </DialogFooter>
         )}
       </DialogContent>

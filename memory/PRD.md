@@ -74,3 +74,9 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 ## Card activation reject → Try again
 - Admin rejects a pending card activation (tier or zonal) with an optional reason (default: hash could not be verified). Card stores rejection_reason, rejection_count, activation_attempts[], rejected_tx_hashes.
 - User sees "Activation rejected" + reason on the card, with "Try again" (re-opens activation dialog) and "Delete". Resubmission blocked for previously rejected hashes or hashes used by any other card. Admin sees prior rejected attempts in the request detail.
+
+## v1.8.0 — Background zonal cards, All Cards admin, zonal ⇒ geo hold lift
+- Zonal cards can be issued "in background" (status `hidden`, invisible to user). Unlock rule per card: geo-hold allowance fully withdrawn (or hold unlocked by admin) and/or approved withdrawals ≥ $X since issuance; match any/all. Only admin-approved withdrawals requested after issuance count. On unlock → user notification + "Card unlocked" celebration dialog + "New · Unlocked" badge; user then activates normally. Admin can Reveal now / edit rule.
+- Admin "All Cards" tab (AllCardsAdmin.jsx): every card of every user incl. hidden; search, type/status filters, pagination, view details, reveal, delete. Routes: GET /admin/all-cards, POST /admin/cards/:id/reveal, PUT /admin/cards/:id/reveal-rule, DELETE /admin/cards/:id.
+- When a zonal card becomes ACTIVE the user's geo hold is fully lifted (exempt from auto re-lock); only admin "Lock" in Withdrawal Access re-applies it.
+

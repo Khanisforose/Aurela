@@ -496,6 +496,96 @@ async function attachOwners(db, list) {
   return list.map(x => ({ ...x, user: byId[x.user_id] || null }))
 }
 
+// ---------- Hidden (background-issued) zonal cards ----------
+// An admin can issue a zonal card silently. It stays `status: 'hidden'` (invisible to the user) until the reveal
+// rule is satisfied, counting ONLY admin-approved withdrawals requested after the card was issued:
+//   reveal.geo        → the user's geolocation-hold allowance has been fully withdrawn (or the hold fully unlocked by admin)
+//   reveal.amount_usd → the user's approved withdrawals since issuance reach this USD total
+//   reveal.match      → 'any' (first condition met) | 'all' (every enabled condition) when both are enabled
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100
+function zonalRevealMet(card) {
+  const r = card?.reveal || {}
+  const checks = []
+  if (r.geo) checks.push(!!r.geo_met_at)
+  if (Number(r.amount_usd) > 0) checks.push((Number(r.progress_usd) || 0) + 1e-6 >= Number(r.amount_usd))
+  if (!checks.length) return true
+  return r.match === 'all' ? checks.every(Boolean) : checks.some(Boolean)
+}
+async function revealZonalCard(db, card, { by = 'auto', actor = null } = {}) {
+  const fee = Number(card.activation_fee_usdt) || 0
+  const hours = Math.max(0, Number(card.activation_hours) || 0)
+  const free = fee === 0
+  const immediate = free && hours === 0
+  const set = {
+    status: free ? (immediate ? 'active' : 'activating') : 'pending_activation',
+    revealed_at: now(), revealed_by: by === 'admin' ? actor : 'auto', 'reveal.revealed_via': by,
+  }
+  if (free) {
+    set.admin_approved_at = now(); set.approved_by = card.issued_by || actor
+    set.usable_at = immediate ? now() : new Date(Date.now() + hours * 60 * 60 * 1000)
+    set.activated_at = immediate ? now() : null
+  }
+  // Atomic: only the first caller flips hidden → visible (no duplicate notifications)
+  const res = await db.collection('cards').updateOne({ id: card.id, status: 'hidden' }, { $set: set })
+  if (res.modifiedCount !== 1) return false
+  const name = card.tier_name || `Aurela ${card.zone_name || 'Zonal'}`
+  const title = `🎉 Your ${name} card is ready`
+  const body = free
+    ? (immediate ? `Congratulations — you've unlocked the exclusive ${name} metal card. It is active and ready to use in your Cards tab.` : `Congratulations — you've unlocked the exclusive ${name} metal card. It will be ready for use in ${hoursLabel(hours)}.`)
+    : `Congratulations — you've unlocked the exclusive ${name} metal card. Open your Cards tab and tap Activate to pay the ${fee} USDT activation fee — it unlocks ${hours === 0 ? 'immediately' : `within ${hoursLabel(hours)}`} after verification.`
+  await notifyUser(db, card.user_id, { kind: 'zonal_card_unlocked', title, body, url: '/?tab=cards', meta: { card_id: card.id, zone: card.zone, zone_name: card.zone_name, fee_usdt: fee, activation_hours: hours } })
+  await audit(db, actor || card.user_id, 'zonal_card.reveal', { card_id: card.id, user_id: card.user_id, via: by })
+  if (set.status === 'active') await liftGeoHoldForZonal(db, card.user_id, card)
+  return true
+}
+// ---- Zonal card active ⇒ geolocation hold fully lifted ----
+// Once a zonal card is ACTIVE the user's geo hold is removed entirely and the user is exempted from automatic
+// re-locks (tier-card approvals). From then on, only an administrator can re-apply the hold (Withdrawal Access → Lock).
+async function liftGeoHoldForZonal(db, userId, card, { actor = 'zonal_card' } = {}) {
+  try {
+    const u = await db.collection('users').findOne({ id: userId }, { projection: { withdraw_lock: 1, withdraw_lock_exempt: 1 } })
+    if (!u) return false
+    if (u.withdraw_lock_exempt && !u.withdraw_lock?.active) return false // already fully unlocked
+    await db.collection('users').updateOne({ id: userId }, {
+      $set: { 'withdraw_lock.active': false, 'withdraw_lock.cleared_at': now(), 'withdraw_lock.cleared_by': actor, 'withdraw_lock.cleared_reason': 'zonal_card_active', 'withdraw_lock.cleared_card_id': card?.id || null, withdraw_lock_exempt: true },
+      $unset: { withdraw_allowance_usd: '' },
+    })
+    await db.collection('withdraw_attempts').updateMany({ user_id: userId, status: 'open' }, { $set: { status: 'resolved', resolved_at: now(), resolved_by: actor, resolution: 'zonal_card_active' } })
+    await audit(db, userId, 'geo_hold.lifted_by_zonal_card', { card_id: card?.id, zone: card?.zone, was_on_hold: !!u.withdraw_lock?.active })
+    // A lifted hold also satisfies the geo rule of any other hidden zonal card
+    await processHiddenZonalCards(db, userId, { geoEvent: true })
+    return true
+  } catch (e) { console.error('[geo_hold] zonal lift failed', e?.message); return false }
+}
+// Flip `activating` cards whose window elapsed to `active`; zonal ones lift the geo hold
+async function settleDueCards(db, userId) {
+  const nowMs = Date.now()
+  // Compare in JS so both Date and ISO-string `usable_at` values are handled
+  const due = (await db.collection('cards').find({ user_id: userId, status: 'activating' }).toArray())
+    .filter(c => c.usable_at && new Date(c.usable_at).getTime() <= nowMs)
+  for (const c of due) {
+    const r = await db.collection('cards').updateOne({ id: c.id, status: 'activating' }, { $set: { status: 'active', activated_at: now() } })
+    if (r.modifiedCount === 1 && c.type === 'zonal') await liftGeoHoldForZonal(db, userId, c)
+  }
+}
+// Called on withdrawal approval and on geo-hold unlock. Never throws (must not break the calling flow).
+async function processHiddenZonalCards(db, userId, { withdrawUsd = 0, requestedAt = null, geoEvent = false } = {}) {
+  try {
+    const hidden = await db.collection('cards').find({ user_id: userId, type: 'zonal', status: 'hidden' }).toArray()
+    for (const c of hidden) {
+      const issuedAt = new Date(c.issued_at || c.created_at).getTime()
+      const after = !requestedAt || new Date(requestedAt).getTime() >= issuedAt
+      const inc = {}; const set = {}
+      if (after && withdrawUsd > 0) { inc['reveal.progress_usd'] = round2(withdrawUsd); inc['reveal.withdrawals_counted'] = 1; set['reveal.last_progress_at'] = now() }
+      if (after && geoEvent && c.reveal?.geo && !c.reveal?.geo_met_at) set['reveal.geo_met_at'] = now()
+      if (!Object.keys(inc).length && !Object.keys(set).length) continue
+      const upd = await db.collection('cards').findOneAndUpdate({ id: c.id, status: 'hidden' }, { ...(Object.keys(inc).length ? { $inc: inc } : {}), ...(Object.keys(set).length ? { $set: set } : {}) }, { returnDocument: 'after' })
+      const fresh = upd?.value ?? upd
+      if (fresh && fresh.status === 'hidden' && zonalRevealMet(fresh)) await revealZonalCard(db, fresh)
+    }
+  } catch (e) { console.error('[zonal_reveal] failed', e?.message) }
+}
+
 // Context for the admin "Open request" dialogs (deposits & withdrawals): owner, KYC (no images), wallet, history, location, explorer link
 const TX_EXPLORERS = { ERC20: 'https://etherscan.io/tx/', TRC20: 'https://tronscan.org/#/transaction/', BEP20: 'https://bscscan.com/tx/', POLYGON: 'https://polygonscan.com/tx/', SOLANA: 'https://solscan.io/tx/', BITCOIN: 'https://mempool.space/tx/', XRP: 'https://xrpscan.com/tx/', LITECOIN: 'https://blockchair.com/litecoin/transaction/', DOGECOIN: 'https://blockchair.com/dogecoin/transaction/', AVALANCHE: 'https://snowtrace.io/tx/' }
 async function requestReviewContext(db, req) {
@@ -1956,7 +2046,10 @@ async function handleRoute(request, { params }) {
       // ---- Geolocation verification hold (set automatically on card approval) ----
       // While the hold is active the user may only withdraw up to the USD allowance an admin has granted.
       // The allowance is internal (never disclosed to the user). Any blocked attempt is recorded and administrators are alerted.
-      const freshUser = isAdminUser ? null : await db.collection('users').findOne({ id: user.id }, { projection: { id: 1, withdraw_lock: 1, withdraw_allowance_usd: 1, username: 1, email: 1, full_name: 1 } })
+      const freshUser = isAdminUser ? null : await (async () => {
+        await settleDueCards(db, user.id) // a zonal card whose window just elapsed lifts the hold before we check it
+        return db.collection('users').findOne({ id: user.id }, { projection: { id: 1, withdraw_lock: 1, withdraw_allowance_usd: 1, username: 1, email: 1, full_name: 1 } })
+      })()
       let allowanceReserved = 0
       if (freshUser?.withdraw_lock?.active) {
         const rates = await getRates(db)
@@ -2015,13 +2108,9 @@ async function handleRoute(request, { params }) {
 
     // Cards
     if (route === '/cards' && method === 'GET') {
-      // Auto-flip cards whose 24h activation window has elapsed
-      const nowTs = Date.now()
-      const dueCards = await db.collection('cards').find({ user_id: user.id, status: 'activating', usable_at: { $lte: new Date(nowTs) } }).toArray()
-      if (dueCards.length) {
-        await db.collection('cards').updateMany({ id: { $in: dueCards.map(c=>c.id) } }, { $set: { status: 'active', activated_at: now() } })
-      }
-      const cards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' } }).sort({ created_at: -1 }).toArray()
+      // Auto-flip cards whose activation window has elapsed (zonal ones also lift the geo hold)
+      await settleDueCards(db, user.id)
+      const cards = await db.collection('cards').find({ user_id: user.id, status: { $nin: ['deleted', 'hidden'] } }).sort({ created_at: -1 }).toArray()
       return handleCORS(NextResponse.json({ cards: clean(cards) }))
     }
     if (route === '/cards/request' && method === 'POST') {
@@ -2056,7 +2145,7 @@ async function handleRoute(request, { params }) {
     if (route.startsWith('/cards/') && method === 'DELETE') {
       const cardId = route.split('/')[2]
       const card = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
-      if (!card) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      if (!card || card.status === 'hidden') return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
       await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'deleted', deleted_at: now(), frozen: true } })
       await audit(db, user.id, 'card.delete', { card_id: cardId, tier: card.tier })
       return handleCORS(NextResponse.json({ ok: true, message: 'Card deleted. You may request a new one — the activation fee will need to be paid again.' }))
@@ -2068,7 +2157,7 @@ async function handleRoute(request, { params }) {
       const { tx_hash, network } = body || {}
       const card = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
       if (!card) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
-      if (card.status === 'deleted') return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      if (card.status === 'deleted' || card.status === 'hidden') return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
       if (card.status === 'active' || card.status === 'activating') return handleCORS(NextResponse.json({ error: 'Already active' }, { status: 400 }))
       if (card.status === 'pending_verification') return handleCORS(NextResponse.json({ error: 'Your previous transaction is still being verified.' }, { status: 400 }))
       const hash = String(tx_hash || '').trim()
@@ -2089,7 +2178,7 @@ async function handleRoute(request, { params }) {
     if (route.startsWith('/cards/') && route.endsWith('/freeze') && method === 'POST') {
       const cardId = route.split('/')[2]
       const body = await request.json()
-      await db.collection('cards').updateOne({ id: cardId, user_id: user.id }, { $set: { frozen: !!body.frozen } })
+      await db.collection('cards').updateOne({ id: cardId, user_id: user.id, status: { $nin: ['hidden', 'deleted'] } }, { $set: { frozen: !!body.frozen } })
       const upd = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
       await audit(db, user.id, 'card.freeze', { card_id: cardId, frozen: !!body.frozen })
       return handleCORS(NextResponse.json({ card: clean(upd) }))
@@ -2218,6 +2307,8 @@ async function handleRoute(request, { params }) {
             } })
           } else if (mode === 'unlock') {
             await db.collection('users').updateOne({ id: targetId }, { $set: { 'withdraw_lock.active': false, 'withdraw_lock.cleared_at': now(), 'withdraw_lock.cleared_by': user.id, withdraw_lock_exempt: true }, $unset: { withdraw_allowance_usd: '' } })
+            // Geo hold fully unlocked → satisfies the "geo-hold" reveal rule of any hidden zonal card
+            await processHiddenZonalCards(db, targetId, { geoEvent: true })
           } else if (mode === 'lock') {
             await db.collection('users').updateOne({ id: targetId }, { $set: { withdraw_lock: { active: true, reason: 'geolocation_unverified', since: now(), set_by: user.id, note: body?.note || null }, withdraw_lock_exempt: false }, $unset: { withdraw_allowance_usd: '' } })
           }
@@ -2420,6 +2511,21 @@ async function handleRoute(request, { params }) {
             }
           }
           await db.collection('withdraw_requests').updateOne({ id: wid }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id, fee_collected: fee > 0 } })
+          // ---- Hidden zonal cards: count this approved withdrawal toward their reveal rule ----
+          {
+            let withdrawUsd = Number(wreq.gross_usd) || 0
+            if (!withdrawUsd) { try { withdrawUsd = Number(convertToUSD(wreq.amount, wreq.currency, await getRates(db))) || 0 } catch(e) {} }
+            let geoEvent = false
+            if (Number(wreq.allowance_reserved_usd) > 0) {
+              // Geo-hold allowance is "fully withdrawn" when nothing is left and no other allowance-backed request is still pending
+              const [owner, otherPending] = await Promise.all([
+                db.collection('users').findOne({ id: wreq.user_id }, { projection: { withdraw_allowance_usd: 1, withdraw_lock: 1 } }),
+                db.collection('withdraw_requests').countDocuments({ user_id: wreq.user_id, status: 'pending', allowance_reserved_usd: { $gt: 0 }, id: { $ne: wreq.id } }),
+              ])
+              geoEvent = (Number(owner?.withdraw_allowance_usd) || 0) <= 0.01 && otherPending === 0
+            }
+            await processHiddenZonalCards(db, wreq.user_id, { withdrawUsd, requestedAt: wreq.created_at, geoEvent })
+          }
           await notifyUser(db, wreq.user_id, { kind: 'withdraw_approved', title: 'Withdrawal released', body: fee > 0
             ? `Your withdrawal has been approved. ${net} ${wreq.currency} has been released to ${wreq.destination || 'your external account'} (${wreq.amount} ${wreq.currency} less a ${fee} ${wreq.currency} withdrawal fee).`
             : `Your withdrawal of ${wreq.amount} ${wreq.currency} to ${wreq.destination || 'external'} has been approved and released.` })
@@ -2563,11 +2669,74 @@ async function handleRoute(request, { params }) {
         await audit(db, user.id, 'admin.chain.seed', { count })
         return handleCORS(NextResponse.json({ ok: true, seeded: created.length, first_block: created[0], last_block: created[created.length-1] }))
       }
+      // Admin: every card of every user (incl. hidden background-issued zonal cards). Query: q, type, status, page, limit
+      if (route === '/admin/all-cards' && method === 'GET') {
+        const url = new URL(request.url)
+        const qText = String(url.searchParams.get('q') || '').trim().slice(0, 80)
+        const type = url.searchParams.get('type') || 'all'      // all | tier | zonal
+        const status = url.searchParams.get('status') || 'all'  // all | hidden | pending_activation | pending_verification | activating | active | rejected | frozen | deleted
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1)
+        const limit = Math.min(100, Math.max(5, parseInt(url.searchParams.get('limit') || '25', 10) || 25))
+        const q = {}
+        if (type === 'zonal') q.type = 'zonal'
+        else if (type === 'tier') q.type = { $ne: 'zonal' }
+        if (status === 'frozen') { q.frozen = true; q.status = { $nin: ['deleted'] } }
+        else if (status !== 'all') q.status = status
+        else q.status = { $ne: 'deleted' }
+        if (qText) {
+          const rx = new RegExp(qText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+          const digits = qText.replace(/\D/g, '')
+          const matchUsers = await db.collection('users').find({ $or: [{ username: rx }, { email: rx }, { full_name: rx }, { first_name: rx }, { last_name: rx }, { user_code: rx }] }, { projection: { id: 1 } }).limit(200).toArray()
+          const or = [{ user_id: { $in: matchUsers.map(u => u.id) } }, { holder: rx }, { zone_name: rx }, { zone: rx }, { tier_name: rx }, { id: qText }]
+          if (digits.length >= 4) or.push({ number: new RegExp(digits.split('').join('\\s?')) })
+          q.$or = or
+        }
+        const [list, total, countsAgg] = await Promise.all([
+          db.collection('cards').find(q, { projection: { cvv: 0 } }).sort({ created_at: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+          db.collection('cards').countDocuments(q),
+          db.collection('cards').aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]).toArray(),
+        ])
+        const counts = Object.fromEntries(countsAgg.map(c => [c._id || 'unknown', c.n]))
+        counts.total = Object.entries(counts).filter(([k]) => k !== 'deleted').reduce((a, [, n]) => a + n, 0)
+        // Mask PAN for the list; full details stay in the card review dialog
+        const masked = clean(list).map(c => ({ ...c, number_masked: c.number ? '•••• ' + String(c.number).replace(/\s/g, '').slice(-4) : null, number: undefined }))
+        return handleCORS(NextResponse.json({ cards: await attachOwners(db, masked), total, page, limit, pages: Math.max(1, Math.ceil(total / limit)), counts }))
+      }
+      // Admin: reveal a hidden zonal card right now (skips the withdrawal rule)
+      if (route.startsWith('/admin/cards/') && route.endsWith('/reveal') && method === 'POST') {
+        const cardId = route.split('/')[3]
+        const card = await db.collection('cards').findOne({ id: cardId })
+        if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (card.status !== 'hidden') return handleCORS(NextResponse.json({ error: 'This card is already visible to the user' }, { status: 400 }))
+        const ok = await revealZonalCard(db, card, { by: 'admin', actor: user.id })
+        const fresh = await db.collection('cards').findOne({ id: cardId })
+        return handleCORS(NextResponse.json({ ok, card: clean(fresh) }))
+      }
+      // Admin: update the reveal rule of a hidden zonal card. Body: { geo?, amount_usd?, match? }
+      if (route.startsWith('/admin/cards/') && route.endsWith('/reveal-rule') && method === 'PUT') {
+        const cardId = route.split('/')[3]
+        const body = await request.json().catch(() => ({}))
+        const card = await db.collection('cards').findOne({ id: cardId })
+        if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (card.status !== 'hidden') return handleCORS(NextResponse.json({ error: 'Only hidden cards have an unlock rule' }, { status: 400 }))
+        const geo = 'geo' in body ? !!body.geo : !!card.reveal?.geo
+        const amountUsd = 'amount_usd' in body ? ((body.amount_usd === '' || body.amount_usd == null) ? 0 : Number(body.amount_usd)) : Number(card.reveal?.amount_usd) || 0
+        if (!Number.isFinite(amountUsd) || amountUsd < 0) return handleCORS(NextResponse.json({ error: 'Unlock amount must be a number ≥ 0 (USD)' }, { status: 400 }))
+        if (!geo && !(amountUsd > 0)) return handleCORS(NextResponse.json({ error: 'Choose at least one unlock rule' }, { status: 400 }))
+        const match = (geo && amountUsd > 0 && (body.match ?? card.reveal?.match) === 'all') ? 'all' : 'any'
+        await db.collection('cards').updateOne({ id: cardId }, { $set: { 'reveal.geo': geo, 'reveal.amount_usd': round2(amountUsd), 'reveal.match': match, 'reveal.updated_at': now(), 'reveal.updated_by': user.id } })
+        let fresh = await db.collection('cards').findOne({ id: cardId })
+        if (zonalRevealMet(fresh)) { await revealZonalCard(db, fresh, { by: 'admin', actor: user.id }); fresh = await db.collection('cards').findOne({ id: cardId }) }
+        await audit(db, user.id, 'admin.zonal.reveal_rule', { card_id: cardId, geo, amount_usd: amountUsd, match })
+        return handleCORS(NextResponse.json({ ok: true, card: clean(fresh) }))
+      }
       // Admin: delete a card entirely (also user-facing effect: card removed)
       if (route.startsWith('/admin/cards/') && route.split('/').length === 4 && method === 'DELETE') {
         const cardId = route.split('/')[3]
+        const delCard = await db.collection('cards').findOne({ id: cardId }, { projection: { _id: 0, id: 1, user_id: 1, type: 1, tier: 1, zone: 1, status: 1 } })
+        if (!delCard) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
         await db.collection('cards').deleteOne({ id: cardId })
-        await audit(db, user.id, 'admin.card.delete', { card_id: cardId })
+        await audit(db, user.id, 'admin.card.delete', { card_id: cardId, user_id: delCard.user_id, type: delCard.type || 'tier', tier: delCard.tier, zone: delCard.zone || null, status: delCard.status })
         return handleCORS(NextResponse.json({ ok: true }))
       }
       // Admin: delete a transaction (audit-logged; does NOT reverse balances)
@@ -2584,6 +2753,7 @@ async function handleRoute(request, { params }) {
         const body = await request.json().catch(()=>({}))
         const card = await db.collection('cards').findOne({ id: cardId })
         if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (card.status === 'hidden') return handleCORS(NextResponse.json({ error: 'This card is still hidden from the user. Reveal it first.' }, { status: 400 }))
         if (action === 'approve') {
           const isZonal = card.type === 'zonal'
           // Zonal cards carry their own admin-defined activation window (hours); tier cards use the 24h default
@@ -2593,6 +2763,7 @@ async function handleRoute(request, { params }) {
           const finalUsable = immediate ? now() : new Date(Date.now() + windowHours*60*60*1000)
           const windowText = isZonal ? hoursLabel(windowHours) : '24 hours'
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), approved_by: user.id, usable_at: finalUsable, activated_at: immediate ? now() : null } })
+          if (isZonal && immediate) await liftGeoHoldForZonal(db, card.user_id, card, { actor: user.id })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
 
           // ---- Geolocation verification hold on external withdrawals ----
@@ -2703,14 +2874,15 @@ async function handleRoute(request, { params }) {
         ]).toArray()
         const stats = {}
         for (const c of counts) {
-          const z = c._id.zone; if (!stats[z]) stats[z] = { total: 0, active: 0, activating: 0, pending: 0, rejected: 0 }
+          const z = c._id.zone; if (!stats[z]) stats[z] = { total: 0, active: 0, activating: 0, pending: 0, rejected: 0, hidden: 0 }
           stats[z].total += c.n
           if (c._id.status === 'active') stats[z].active += c.n
           else if (c._id.status === 'activating') stats[z].activating += c.n
           else if (c._id.status === 'rejected') stats[z].rejected += c.n
+          else if (c._id.status === 'hidden') stats[z].hidden += c.n
           else stats[z].pending += c.n
         }
-        return handleCORS(NextResponse.json({ zones: clean(zones).map(z => ({ ...z, stats: stats[z.code] || { total: 0, active: 0, activating: 0, pending: 0, rejected: 0 } })) }))
+        return handleCORS(NextResponse.json({ zones: clean(zones).map(z => ({ ...z, stats: stats[z.code] || { total: 0, active: 0, activating: 0, pending: 0, rejected: 0, hidden: 0 } })) }))
       }
       if (route.startsWith('/admin/zones/') && route.split('/').length === 4 && method === 'PUT') {
         const code = route.split('/')[3].toUpperCase()
@@ -2754,7 +2926,7 @@ async function handleRoute(request, { params }) {
         const url = new URL(request.url)
         const targetId = url.searchParams.get('user_id')
         if (!targetId) return handleCORS(NextResponse.json({ error: 'user_id required' }, { status: 400 }))
-        const target = await db.collection('users').findOne({ id: targetId }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, last_location: 1, withdraw_lock: 1, withdraw_lock_exempt: 1, role: 1 } })
+        const target = await db.collection('users').findOne({ id: targetId }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, last_location: 1, withdraw_lock: 1, withdraw_lock_exempt: 1, withdraw_allowance_usd: 1, role: 1 } })
         if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
         const zones = await getCardZones(db)
         const loc = userCountryCode(target)
@@ -2767,6 +2939,7 @@ async function handleRoute(request, { params }) {
           zone: zone ? clean(zone) : null,
           existing_zonal_cards: existing,
           geo_hold: !!target.withdraw_lock?.active,
+          geo_allowance_usd: target.withdraw_lock?.active ? (Number(target.withdraw_allowance_usd) || 0) : null,
         }))
       }
       // Admin issues a zonal card directly to a user. Body: { user_id, zone, fee_usdt?, activation_hours?, note?, override_kyc? }
@@ -2795,6 +2968,17 @@ async function handleRoute(request, { params }) {
         const detected = zoneForCountry(zones, loc.cc)
         const free = fee === 0
         const immediate = free && hours === 0
+        // ---- Background (hidden) issuance: card stays invisible until the reveal rule is met ----
+        const rv = body?.reveal && typeof body.reveal === 'object' ? body.reveal : null
+        const hiddenIssue = !!rv && rv.mode === 'hidden'
+        let reveal = null
+        if (hiddenIssue) {
+          const amountUsd = (rv.amount_usd === '' || rv.amount_usd == null) ? 0 : Number(rv.amount_usd)
+          if (!Number.isFinite(amountUsd) || amountUsd < 0) return handleCORS(NextResponse.json({ error: 'Unlock amount must be a number ≥ 0 (USD)' }, { status: 400 }))
+          const geo = !!rv.geo
+          if (!geo && !(amountUsd > 0)) return handleCORS(NextResponse.json({ error: 'Choose at least one unlock rule: geo-hold allowance and/or a withdrawal amount.' }, { status: 400 }))
+          reveal = { mode: 'hidden', geo, amount_usd: round2(amountUsd), match: (geo && amountUsd > 0 && rv.match === 'all') ? 'all' : 'any', progress_usd: 0, withdrawals_counted: 0, geo_met_at: null, set_by: user.id, set_at: now(), geo_hold_at_issue: !!target.withdraw_lock?.active, allowance_at_issue_usd: Number(target.withdraw_allowance_usd) || 0 }
+        }
         const card = {
           id: uuidv4(), user_id: targetId, type: 'zonal', tier: 'zonal',
           zone: zone.code, zone_name: zone.name, tier_name: `Aurela ${zone.name}`,
@@ -2802,7 +2986,8 @@ async function handleRoute(request, { params }) {
           number: fmtCardNumber(), expiry: cardExpiry(), cvv: randDigits(3),
           holder: (target.full_name || target.username || '').toUpperCase(),
           // Free cards need no payment: they go straight into the activation window (or active when hours = 0)
-          status: free ? (immediate ? 'active' : 'activating') : 'pending_activation', frozen: false,
+          status: hiddenIssue ? 'hidden' : (free ? (immediate ? 'active' : 'activating') : 'pending_activation'), frozen: false,
+          ...(reveal ? { reveal } : {}),
           daily_spend_limit: Number(zone.daily_spend) || CARD_ZONE_LIMITS.daily_spend,
           daily_withdraw_limit: Number(zone.daily_withdraw) || CARD_ZONE_LIMITS.daily_withdraw,
           monthly_spend_limit: Number(zone.monthly_spend) || CARD_ZONE_LIMITS.monthly_spend,
@@ -2816,12 +3001,18 @@ async function handleRoute(request, { params }) {
           zone_override: detected ? detected.code !== zone.code : true,
           created_at: now(),
         }
-        if (free) {
+        if (free && !hiddenIssue) {
           card.admin_approved_at = now(); card.approved_by = user.id
           card.usable_at = immediate ? now() : new Date(Date.now() + hours*60*60*1000)
           card.activated_at = immediate ? now() : null
         }
         await db.collection('cards').insertOne(card)
+        if (!hiddenIssue && card.status === 'active') await liftGeoHoldForZonal(db, targetId, card, { actor: user.id })
+        if (hiddenIssue) {
+          await audit(db, user.id, 'admin.zone.issue_hidden', { card_id: card.id, user_id: targetId, zone: zone.code, fee_usdt: fee, activation_hours: hours, reveal })
+          // Rare edge: hold already fully lifted when issuing with a geo-only "any" rule → reveal on the next qualifying event only (by design, counts only after issuance)
+          return handleCORS(NextResponse.json({ ok: true, hidden: true, card: clean(card) }))
+        }
         const title = `${card.tier_name} card issued`
         const bodyText = free
           ? (immediate ? `Your ${card.tier_name} card has been issued and is active now — no activation fee required.` : `Your ${card.tier_name} card has been issued with no activation fee. It will unlock for use in ${hoursLabel(hours)}.`)

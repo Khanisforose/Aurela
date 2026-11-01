@@ -31,6 +31,7 @@ import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
 import { UsersMapAdmin } from './UsersMap'
 import { ZonalCardsAdmin } from './ZonalCardsAdmin'
+import { AllCardsAdmin } from './AllCardsAdmin'
 import { FeesAdmin } from './FeesAdmin'
 import { ZonalCardVisual } from './ZonalCard'
 
@@ -57,6 +58,7 @@ const ADMIN_NAV = [
   { id: 'admin_map', label: 'Users Map', icon: Globe2 },
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_zonal_cards', label: 'Zonal Cards', icon: MapPinned },
+  { id: 'admin_all_cards', label: 'All Cards', icon: CreditCard },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
   { id: 'admin_settings', label: 'Platform Settings', icon: Settings },
@@ -434,6 +436,7 @@ export function Dashboard() {
               {tab === 'admin_map' && isAdmin && <UsersMapAdmin/>}
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_zonal_cards' && isAdmin && <ZonalCardsAdmin/>}
+              {tab === 'admin_all_cards' && isAdmin && <AllCardsAdmin/>}
               {tab === 'admin_fees' && isAdmin && <FeesAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
@@ -837,6 +840,19 @@ function CardsTab({ cards, onChange, onWalletChange }) {
   const [showCvv, setShowCvv] = useState({})
   const [loading, setLoading] = useState(false)
   const kycOK = user?.kyc_status === 'approved'
+  // Celebrate background-issued zonal cards the first time the user sees them after they unlock
+  const [unlocked, setUnlocked] = useState(null)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const fresh = (cards || []).find(c => c.type === 'zonal' && c.revealed_at && (Date.now() - new Date(c.revealed_at).getTime()) < 30*24*3600*1000 && !localStorage.getItem(`aurela_seen_unlock_${c.id}`))
+    if (fresh && !unlocked) setUnlocked(fresh)
+  }, [cards])
+  const dismissUnlocked = (activateNow) => {
+    const c = unlocked
+    try { localStorage.setItem(`aurela_seen_unlock_${c.id}`, '1') } catch(e) {}
+    setUnlocked(null)
+    if (activateNow && c?.status === 'pending_activation') { setActTxHash(''); setOpenAct(c) }
+  }
 
   const usdtWallets = (config?.platform_wallets || []).filter(p => p.asset === 'USDT')
   const activeActWallet = usdtWallets.find(p => p.network === actNetwork) || usdtWallets[0]
@@ -898,7 +914,10 @@ function CardsTab({ cards, onChange, onWalletChange }) {
           </div>
         )}
         {cards.map(c => (
-          <div key={c.id} className="card-luxury rounded-2xl p-6">
+          <div key={c.id} className={`card-luxury rounded-2xl p-6 relative ${c.revealed_at && (Date.now() - new Date(c.revealed_at).getTime()) < 7*24*3600*1000 ? 'ring-1 ring-gold-500/40' : ''}`}>
+            {c.revealed_at && (Date.now() - new Date(c.revealed_at).getTime()) < 7*24*3600*1000 && (
+              <div className="absolute -top-2.5 right-5 z-10 rounded-full bg-gradient-to-r from-gold-300 to-gold-600 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-onyx-950 shadow-lg" data-testid={`card-new-badge-${c.id}`}>New · Unlocked</div>
+            )}
             {c.type === 'zonal' ? (
               <ZonalCardVisual card={c} showCvvToggle/>
             ) : (
@@ -1038,6 +1057,33 @@ function CardsTab({ cards, onChange, onWalletChange }) {
                 {loading ? 'Submitting…' : 'Submit for verification'}
               </Button>
               <div className="text-xs text-muted-foreground">Your card will activate after Aurela admins verify the on-chain transaction. Payments from your internal balance are not accepted — funds must arrive from an external wallet.</div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Card unlocked celebration (background-issued zonal cards) */}
+      <Dialog open={!!unlocked} onOpenChange={v => !v && dismissUnlocked(false)}>
+        <DialogContent className="bg-onyx-900 border-gold-500/30 max-w-md overflow-hidden" data-testid="card-unlocked-dialog">
+          <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 h-64 w-64 rounded-full bg-gold-500/20 blur-3xl animate-pulse"/>
+          {unlocked && (
+            <div className="relative space-y-5 text-center">
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-gold-500/40 bg-gold-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-gold"><Sparkles className="h-3 w-3"/> Card unlocked</div>
+              <div className="font-display text-2xl leading-tight">Welcome to <span className="gold-text">{unlocked.tier_name || `Aurela ${unlocked.zone_name}`}</span></div>
+              <div className="mx-auto max-w-[340px] animate-in fade-in zoom-in-95 slide-in-from-bottom-4 duration-700 drop-shadow-[0_20px_40px_rgba(212,175,55,0.25)]">
+                <ZonalCardVisual card={{ ...unlocked, cvv: '•••' }} compact/>
+              </div>
+              <div className="text-sm text-muted-foreground">
+                {unlocked.status === 'pending_activation'
+                  ? <>You've unlocked an exclusive {unlocked.zone_name} metal card. Activate it with a {unlocked.activation_fee_usdt} USDT payment from your external wallet.</>
+                  : unlocked.status === 'activating'
+                    ? <>Your exclusive {unlocked.zone_name} metal card is being prepared and will be ready in {timeUntil(unlocked.usable_at)}.</>
+                    : <>Your exclusive {unlocked.zone_name} metal card is active and ready to use.</>}
+              </div>
+              <div className="flex flex-col gap-2">
+                {unlocked.status === 'pending_activation' && <Button onClick={() => dismissUnlocked(true)} className="gold-btn h-12 rounded-xl" data-testid="card-unlocked-activate"><Sparkles className="h-4 w-4 mr-2"/> Activate now · {unlocked.activation_fee_usdt} USDT</Button>}
+                <Button variant="ghost" onClick={() => dismissUnlocked(false)} className="text-muted-foreground" data-testid="card-unlocked-later">{unlocked.status === 'pending_activation' ? 'Later' : 'View my card'}</Button>
+              </div>
             </div>
           )}
         </DialogContent>
