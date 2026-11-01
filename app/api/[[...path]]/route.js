@@ -2068,9 +2068,20 @@ async function handleRoute(request, { params }) {
       const { tx_hash, network } = body || {}
       const card = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
       if (!card) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
-      if (card.status === 'active') return handleCORS(NextResponse.json({ error: 'Already active' }, { status: 400 }))
-      if (!tx_hash || tx_hash.length < 8) return handleCORS(NextResponse.json({ error: 'A valid on-chain USDT transaction hash is required.' }, { status: 400 }))
-      await db.collection('cards').updateOne({ id: card.id }, { $set: { status: 'pending_verification', activation_tx_hash: tx_hash, activation_network_used: network || card.activation_network, activation_submitted_at: now() } })
+      if (card.status === 'deleted') return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      if (card.status === 'active' || card.status === 'activating') return handleCORS(NextResponse.json({ error: 'Already active' }, { status: 400 }))
+      if (card.status === 'pending_verification') return handleCORS(NextResponse.json({ error: 'Your previous transaction is still being verified.' }, { status: 400 }))
+      const hash = String(tx_hash || '').trim()
+      if (!hash || hash.length < 8) return handleCORS(NextResponse.json({ error: 'A valid on-chain USDT transaction hash is required.' }, { status: 400 }))
+      // Anti-fraud: a hash already rejected for this card, or already used by any other card, cannot be resubmitted
+      if ((card.rejected_tx_hashes || []).includes(hash)) return handleCORS(NextResponse.json({ error: 'This transaction hash was already rejected. Please submit a new, valid USDT transaction hash.' }, { status: 400 }))
+      const reused = await db.collection('cards').findOne({ id: { $ne: card.id }, $or: [{ activation_tx_hash: hash }, { rejected_tx_hashes: hash }] }, { projection: { id: 1 } })
+      if (reused) return handleCORS(NextResponse.json({ error: 'This transaction hash has already been used. Please submit the hash of your own new USDT payment.' }, { status: 400 }))
+      const isRetry = card.status === 'rejected'
+      await db.collection('cards').updateOne({ id: card.id }, {
+        $set: { status: 'pending_verification', activation_tx_hash: hash, activation_network_used: network || card.activation_network, activation_submitted_at: now(), ...(isRetry ? { resubmitted_at: now() } : {}) },
+        $unset: { rejection_reason: '', rejected_at: '', rejected_by: '' },
+      })
       await audit(db, user.id, 'card.activate.submit', { card_id: card.id, tx_hash, network })
       const upd = await db.collection('cards').findOne({ id: card.id })
       return handleCORS(NextResponse.json({ card: clean(upd), message: 'Transaction hash submitted. Card will be activated after on-chain verification by admin.' }))
@@ -2665,8 +2676,19 @@ async function handleRoute(request, { params }) {
           await audit(db, user.id, `admin.card.approve`, { card_id: cardId, fee_credit: credit })
           return handleCORS(NextResponse.json({ ok: true, credit }))
         } else {
-          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'rejected' } })
-          await notifyUser(db, card.user_id, { kind: 'card_rejected', title: 'Card activation rejected', body: `Your ${card.tier} card activation was rejected. The USDT transfer could not be verified — please contact support.` })
+          if (card.status !== 'pending_verification' && card.status !== 'pending_activation') {
+            return handleCORS(NextResponse.json({ error: `Only pending activations can be rejected (card is ${card.status}).` }, { status: 400 }))
+          }
+          const reason = String(body?.reason || '').trim().slice(0, 300) || 'The USDT transaction hash could not be verified on-chain.'
+          const attempt = { tx_hash: card.activation_tx_hash || null, network: card.activation_network_used || null, submitted_at: card.activation_submitted_at || null, rejected_at: now(), rejected_by: user.id, reason }
+          await db.collection('cards').updateOne({ id: cardId }, {
+            $set: { status: 'rejected', rejection_reason: reason, rejected_at: now(), rejected_by: user.id },
+            $inc: { rejection_count: 1 },
+            $push: { activation_attempts: attempt },
+            ...(card.activation_tx_hash ? { $addToSet: { rejected_tx_hashes: card.activation_tx_hash } } : {}),
+          })
+          const cardLabel = card.tier_name || (card.type === 'zonal' ? `Zonal ${card.zone || ''} card` : `Aurela ${card.tier}`)
+          await notifyUser(db, card.user_id, { kind: 'card_rejected', title: 'Card activation rejected — try again', body: `Your ${cardLabel} activation was rejected. Reason: ${reason} You can tap "Try again" on the card to submit a valid USDT transaction hash, or delete the card.`, url: '/?tab=cards' })
         }
         await audit(db, user.id, `admin.card.${action}`, { card_id: cardId })
         return handleCORS(NextResponse.json({ ok: true }))

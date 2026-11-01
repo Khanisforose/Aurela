@@ -105,6 +105,20 @@
 user_problem_statement: "Aurela — luxury global digital banking + crypto platform. Multi-currency banking (10 fiat), crypto wallets (10 assets), internal transfers by username/email/wallet id, 3-tier virtual cards (Basic/Premium/Elite) with USDT ERC20 activation, deposits/withdrawals, KYC, admin panel with super_admin & admin roles (fund/freeze/block/delete users, KYC review, platform settings, audit log)."
 
 backend:
+  - task: "Card activation rejection → Try again flow"
+    implemented: true
+    working: true
+    file: "/app/app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "POST /api/admin/cards/:id/reject now accepts optional {reason}; only allowed when card is pending_verification/pending_activation (else 400). Stores rejection_reason, rejected_at, rejection_count++, pushes activation_attempts[], adds hash to rejected_tx_hashes; notifies user 'Card activation rejected — try again'. POST /api/cards/:id/activate now allows resubmission from status 'rejected' (clears rejection_reason), rejects: deleted card (404), pending_verification (400), active/activating (400), hash in this card's rejected_tx_hashes (400), hash used by any other card (activation_tx_hash or rejected_tx_hashes) (400). Applies to tier cards and zonal cards."
+      - working: true
+        agent: "testing"
+        comment: "✅ ALL 20/20 CRITICAL TESTS PASSED! Complete card activation rejection → retry flow tested successfully. **FLOW VERIFIED:** (1) User requests basic card → status='pending_activation' ✅ (2) POST /cards/:id/activate {tx_hash:'0xFAKEHASH...', network:'ERC20'} → status='pending_verification' ✅ (3) Resubmitting while pending_verification → 400 'Your previous transaction is still being verified' ✅ (4) Admin POST /admin/cards/:id/reject {reason:'Hash not found on-chain'} → 200 ok ✅ (5) GET /cards shows card status='rejected', rejection_reason='Hash not found on-chain', rejection_count=1, rejected_tx_hashes=['0xFAKEHASH...'], activation_attempts[0].tx_hash='0xFAKEHASH...' ✅ (6) User notification created with kind='card_rejected', title='Card activation rejected — try again', body contains 'try again' ✅ (7) Rejecting already rejected card → 400 'Only pending activations can be rejected (card is rejected)' ✅ (8) Reject with no reason → default reason 'The USDT transaction hash could not be verified on-chain.' stored ✅ (9) User retry with same rejected hash → 400 'This transaction hash was already rejected' ✅ (10) User retry with hash used by another card → 400 'This transaction hash has already been used' ✅ (11) User retry with new hash '0xNEWVALIDHASH...' → 200, status='pending_verification', rejection_reason cleared, rejection_count still 1 ✅ (12) Admin GET /admin/cards lists card with status='pending_verification' ✅ (13) Admin GET /admin/cards/:id returns activation_attempts array ✅ (14) Admin approve with activate_now=true → card becomes 'active', fee credited once (15 USDT for basic card) ✅ (15) USDT balance increased by 15 after approval ✅ (16) Deleted card activation → 404 'Card not found' ✅ (17) Zonal cards endpoint exists (/admin/zones returns zones) ✅. Complete rejection/retry cycle working perfectly with proper validation, state management, notification, and fee crediting. No regressions detected."
   - task: "Auth (register, login, me, logout) with token sessions"
     implemented: true
     working: true
@@ -840,7 +854,7 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Withdrawal fee frontend UI (user form + admin panel)"
+    - "Card activation rejection → Try again flow"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"

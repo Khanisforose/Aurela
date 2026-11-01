@@ -69,3 +69,8 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - Fee deducted from the withdrawn amount (wallet debited gross, user receives net). Tiers by USD value: <$100k 10%, $100k–$1M 0.5%, ≥$1M 0.15% (market-benchmarked), + flat rail cost per crypto network / fiat method (ERC20 $5, TRC20 $1, SWIFT $25 …), clamped by min ($1) / max (none). Per-currency overrides (enable/min/max/rail/tiers).
 - Live quote on the Withdraw form (You withdraw → Fee → You receive). Quote frozen on the request; collected into `treasury_ledger` (type withdraw_fee) only on admin approval; rejection refunds gross.
 - Admin "Fees & Treasury" tab (FeesAdmin.jsx): revenue report (range stats, daily chart, by currency, recent) + schedule editor (tiers, min/max, rails, overrides) with live calculator. Routes: /withdraw/quote, /admin/fees/schedule (GET/PUT), /admin/fees/preview, /admin/fees/report.
+
+
+## Card activation reject → Try again
+- Admin rejects a pending card activation (tier or zonal) with an optional reason (default: hash could not be verified). Card stores rejection_reason, rejection_count, activation_attempts[], rejected_tx_hashes.
+- User sees "Activation rejected" + reason on the card, with "Try again" (re-opens activation dialog) and "Delete". Resubmission blocked for previously rejected hashes or hashes used by any other card. Admin sees prior rejected attempts in the request detail.

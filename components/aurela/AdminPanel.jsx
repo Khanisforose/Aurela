@@ -1339,6 +1339,7 @@ function CardApprovalsAdmin() {
   const [open, setOpen] = useState(null) // { card, user, kyc, usdt_wallet, other_cards, explorer_url }
   const [detailLoading, setDetailLoading] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [rejectReason, setRejectReason] = useState('')
   const load = async (silent = false) => {
     if (!silent) setLoading(true)
     try {
@@ -1355,6 +1356,7 @@ function CardApprovalsAdmin() {
     try {
       const res = await api.get(`/admin/cards/${c.id}`)
       if (!res?.card) throw new Error('Card not found')
+      setRejectReason('')
       setOpen(res)
     } catch(e) { toast.error(e?.message || 'Could not open card request') }
     finally { setDetailLoading(false) }
@@ -1362,8 +1364,9 @@ function CardApprovalsAdmin() {
   const action = async (c, act, activate_now=false) => {
     setBusy(true)
     try {
-      const res = await api.post(`/admin/cards/${c.id}/${act}`, { activate_now })
+      const res = await api.post(`/admin/cards/${c.id}/${act}`, act === 'reject' ? { reason: rejectReason.trim() } : { activate_now })
       if (act === 'approve' && res?.credit) toast.success(`Card approved · ${res.credit.amount} ${res.credit.currency} credited to the user's balance`)
+      else if (act === 'reject') toast.success('Card rejected — the user can try again with a new hash')
       else toast.success(`Card ${act}d`)
       setOpen(null); load()
     }
@@ -1407,7 +1410,7 @@ function CardApprovalsAdmin() {
             <div><div className="text-muted-foreground uppercase text-[10px]">Tier</div><div className="capitalize">{c.type === 'zonal' ? <span className="text-gold">Zonal · {c.zone}</span> : c.tier}</div>{c.type === 'zonal' && <div className="text-[10px] text-muted-foreground">{c.zone_name} · unlocks {windowLabel(c)}</div>}</div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Fee</div><div className="font-mono">{c.activation_fee_usdt} USDT</div></div>
             <div><div className="text-muted-foreground uppercase text-[10px]">Submitted</div><div className="truncate">{(c.activation_submitted_at || c.created_at) ? new Date(c.activation_submitted_at || c.created_at).toLocaleString() : '—'}</div></div>
-            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusClass(c.status)}>{statusLabel(c.status)}</Badge></div>
+            <div><div className="text-muted-foreground uppercase text-[10px]">Status</div><Badge variant="outline" className={statusClass(c.status)}>{statusLabel(c.status)}</Badge>{Number(c.rejection_count) > 0 && <div className="text-[10px] text-red-400 mt-1">Resubmitted · {c.rejection_count} prior rejection{Number(c.rejection_count) === 1 ? '' : 's'}</div>}</div>
           </div>
           <div className="flex gap-2 shrink-0 flex-wrap justify-end">
             <Button size="sm" variant="outline" onClick={()=>openDetail(c)} disabled={detailLoading} className="border-gold-500/40" data-testid={`card-open-${c.id}`}>{detailLoading ? <Loader2 className="h-3 w-3 animate-spin"/> : 'Open request'}</Button>
@@ -1488,10 +1491,30 @@ function CardApprovalsAdmin() {
                 </div>
               </div>
 
+              {Array.isArray(open.card?.activation_attempts) && open.card.activation_attempts.length > 0 && (
+                <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4" data-testid="card-rejected-attempts">
+                  <div className="text-[10px] uppercase tracking-widest text-red-400 mb-2">Previously rejected attempts ({open.card.activation_attempts.length})</div>
+                  <div className="space-y-2">
+                    {open.card.activation_attempts.map((a, i) => (
+                      <div key={i} className="text-xs">
+                        <div className="font-mono text-muted-foreground break-all">{a.tx_hash || '—'}{a.network ? ` · ${a.network}` : ''}</div>
+                        <div className="text-[11px] text-muted-foreground">Rejected {a.rejected_at ? new Date(a.rejected_at).toLocaleString() : ''} · {a.reason}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {Array.isArray(open.other_cards) && open.other_cards.length > 0 && (
                 <div className="text-xs text-muted-foreground">This user also holds {open.other_cards.length} other card{open.other_cards.length === 1 ? '' : 's'}: {open.other_cards.map(oc => `${oc.tier} (${oc.status})`).join(', ')}</div>
               )}
 
+              {isActionable(open.card) && (
+                <div>
+                  <Label className="text-[10px] uppercase tracking-widest text-muted-foreground">Rejection reason (shown to user)</Label>
+                  <Input value={rejectReason} onChange={e => setRejectReason(e.target.value)} placeholder="e.g. Transaction hash not found on-chain or amount does not match" className="mt-2 bg-secondary border-gold-500/20 h-10 text-xs" data-testid="card-reject-reason"/>
+                </div>
+              )}
               {isActionable(open.card) ? (
                 <DialogFooter className="gap-2 flex-wrap">
                   <Button variant="ghost" onClick={() => del(open.card)} disabled={busy} className="text-red-400 hover:bg-red-500/10 mr-auto">Delete</Button>

@@ -15,7 +15,7 @@ import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
-  Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles,
+  Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles, RefreshCw,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
   Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2, MapPinned, Loader2, Percent
 } from 'lucide-react'
@@ -943,7 +943,17 @@ function CardsTab({ cards, onChange, onWalletChange }) {
                 <Button onClick={() => setOpenAct(c)} className="gold-btn flex-1 rounded-full"><Sparkles className="h-4 w-4 mr-2"/> Activate{c.type === 'zonal' ? ` · ${c.activation_fee_usdt} USDT` : ''}</Button>
               )}
               {c.status === 'pending_verification' && (
-                <div className="flex-1 text-xs text-muted-foreground">⏳ Waiting for admin to verify your USDT transfer…</div>
+                <div className="flex-1 text-xs text-muted-foreground">⏳ Waiting for admin to verify your USDT transfer…{Number(c.rejection_count) > 0 ? ` (attempt ${Number(c.rejection_count) + 1})` : ''}</div>
+              )}
+              {c.status === 'rejected' && (
+                <div className="w-full rounded-xl border border-red-500/30 bg-red-500/5 p-3" data-testid={`card-rejected-${c.id}`}>
+                  <div className="text-sm font-medium text-red-400">Activation rejected</div>
+                  <div className="text-xs text-muted-foreground mt-1">{c.rejection_reason || 'The USDT transaction hash could not be verified on-chain.'}</div>
+                  <div className="text-[11px] text-muted-foreground mt-1">Send the activation fee from your external wallet and submit the new, valid transaction hash.{c.rejected_at ? ` · Reviewed ${new Date(c.rejected_at).toLocaleString()}` : ''}</div>
+                </div>
+              )}
+              {c.status === 'rejected' && (
+                <Button onClick={() => { setActTxHash(''); setOpenAct(c) }} className="gold-btn flex-1 rounded-full" data-testid={`card-retry-${c.id}`}><RefreshCw className="h-4 w-4 mr-2"/> Try again{c.activation_fee_usdt ? ` · ${c.activation_fee_usdt} USDT` : ''}</Button>
               )}
               {c.status === 'activating' && (
                 <div className="flex-1 text-xs text-muted-foreground">🎉 Approved! Your card unlocks in {timeUntil(c.usable_at)}.</div>
@@ -992,9 +1002,15 @@ function CardsTab({ cards, onChange, onWalletChange }) {
 
       <Dialog open={!!openAct} onOpenChange={v => !v && setOpenAct(null)}>
         <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-lg">
-          <DialogHeader><DialogTitle className="font-display">Activate your card</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle className="font-display">{openAct?.status === 'rejected' ? 'Try activation again' : 'Activate your card'}</DialogTitle></DialogHeader>
           {openAct && (
             <div className="space-y-4">
+              {openAct.status === 'rejected' && (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-xs">
+                  <div className="text-red-400 font-medium">Previous attempt rejected</div>
+                  <div className="text-muted-foreground mt-1">{openAct.rejection_reason || 'The USDT transaction hash could not be verified on-chain.'} Previously rejected hashes cannot be reused.</div>
+                </div>
+              )}
               <div className="text-sm text-muted-foreground">Send exactly <span className="text-gold font-semibold">{openAct.activation_fee_usdt} USDT</span> from your external wallet to the Aurela treasury address below, then paste the transaction hash for verification.</div>
               <div>
                 <Label className="text-xs uppercase tracking-widest text-muted-foreground">USDT network</Label>
