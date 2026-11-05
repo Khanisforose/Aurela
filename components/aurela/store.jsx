@@ -18,6 +18,7 @@ const api = {
       err.status = res.status
       err.code = json?.code || null
       err.data = json || null
+      if (err.code === 'FORCE_KYC_REQUIRED' && typeof window !== 'undefined') window.dispatchEvent(new Event('aurela:force-kyc'))
       throw err
     }
     return json

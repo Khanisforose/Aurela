@@ -29,6 +29,8 @@ import { PushSettings } from './PushSettings'
 import { ErrorBoundary } from './ErrorBoundary'
 import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
+import { ForceKycGate } from './ForceKycGate'
+import { ForceKycAdmin } from './ForceKycAdmin'
 import { UsersMapAdmin } from './UsersMap'
 import { ZonalCardsAdmin } from './ZonalCardsAdmin'
 import { AllCardsAdmin } from './AllCardsAdmin'
@@ -59,6 +61,7 @@ const ADMIN_NAV = [
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_zonal_cards', label: 'Zonal Cards', icon: MapPinned },
   { id: 'admin_all_cards', label: 'All Cards', icon: CreditCard },
+  { id: 'admin_force_kyc', label: 'Force KYC', icon: ShieldAlert },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
   { id: 'admin_settings', label: 'Platform Settings', icon: Settings },
@@ -437,6 +440,7 @@ export function Dashboard() {
               {tab === 'admin_card_approvals' && isAdmin && <CardApprovalsAdmin/>}
               {tab === 'admin_zonal_cards' && isAdmin && <ZonalCardsAdmin/>}
               {tab === 'admin_all_cards' && isAdmin && <AllCardsAdmin/>}
+              {tab === 'admin_force_kyc' && isAdmin && <ForceKycAdmin/>}
               {tab === 'admin_fees' && isAdmin && <FeesAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
@@ -486,6 +490,8 @@ export function Dashboard() {
       <PasscodeLock ctrl={passcode} />
       {/* Location verification on every login (blocks non-admin users until allowed) */}
       <LocationGate />
+      {/* Force KYC — full-screen, non-dismissable lock until enhanced re-verification is approved */}
+      <ForceKycGate />
     </div>
   )
 }

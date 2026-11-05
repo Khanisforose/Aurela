@@ -10,6 +10,15 @@ import pkg from '../../../package.json'
 const APP_VERSION = pkg.version
 const BUILD_TIME  = new Date().toISOString()   // set at cold-start; a fresh deploy gets a new build_time
 
+// -------- Force KYC (enhanced re-verification) --------
+const FKYC_REVIEW_HOURS = 48
+const FKYC_DOC_LABELS = {
+  id_front: 'Government ID — front', id_back: 'Government ID — back', passport: 'Passport photo page',
+  selfie_with_id: 'Selfie holding your ID', proof_of_address: 'Proof of address', bank_statement: 'Bank statement',
+  source_of_funds: 'Source of funds evidence', tax_id: 'Tax ID document', residence_permit: 'Residence permit / visa',
+  drivers_license: "Driver's licence",
+}
+
 // ============================================================
 // AURELA — Global Digital Banking & Crypto Platform (MVP API)
 // ============================================================
@@ -1604,6 +1613,215 @@ async function handleRoute(request, { params }) {
     // ---------- Authenticated ----------
     const user = await getUserByToken(db, request)
     if (!user) return handleCORS(NextResponse.json({ error: 'Unauthorized' }, { status: 401 }))
+
+    // ================= FORCE KYC (enhanced re-verification) =================
+    const isAdminRole = user.role === 'admin' || user.role === 'super_admin'
+    const fk = user.force_kyc || null
+    const fkLocked = !isAdminRole && !!fk?.active
+    // Hard lock: while force-KYC is active the user can only read data, complete re-KYC, manage session/notifications.
+    // Incoming money still arrives (it is triggered by the sender's request, not the locked user's).
+    if (fkLocked && method !== 'GET') {
+      const allowed = ['/force-kyc', '/auth', '/location', '/push', '/notifications', '/profile/passcode', '/devices']
+      if (!allowed.some(p => route === p || route.startsWith(p + '/'))) {
+        return handleCORS(NextResponse.json({ error: 'Your account is locked until you complete enhanced identity verification. Contact support@aurelawallet.com for help.', code: 'FORCE_KYC_REQUIRED' }, { status: 423 }))
+      }
+    }
+
+    // ---- user: current state + server-side draft (uploaded files for this attempt) ----
+    if (route === '/force-kyc' && method === 'GET') {
+      if (!fk) return handleCORS(NextResponse.json({ force_kyc: null }))
+      const [files, lastKyc, latestSub] = await Promise.all([
+        db.collection('fkyc_files').find({ user_id: user.id, attempt: fk.attempt || 1, status: 'complete' }, { projection: { _id: 0 } }).sort({ created_at: 1 }).toArray(),
+        db.collection('kyc').find({ user_id: user.id }).sort({ submitted_at: -1 }).limit(1).toArray(),
+        db.collection('fkyc_submissions').find({ user_id: user.id }).sort({ submitted_at: -1 }).limit(1).toArray(),
+      ])
+      const uploads = {}
+      for (const f of files) uploads[f.slot] = { file_id: f.id, mime: f.mime, name: f.name, size: f.size }   // latest wins
+      const k = lastKyc[0] || {}
+      const prefill = {
+        full_name: k.full_name || user.full_name || '', dob: k.dob || '', nationality: k.country || user.country || '', country: k.country || user.country || '',
+        city: k.city || '', address: k.address || '', postal_code: k.postal_code || '', occupation: k.occupation || '',
+        id_type: k.id_type || '', id_number: k.id_number || '',
+      }
+      return handleCORS(NextResponse.json({ force_kyc: fk, uploads, prefill, review_hours: FKYC_REVIEW_HOURS, last_submission: latestSub[0] ? { id: latestSub[0].id, status: latestSub[0].status, submitted_at: latestSub[0].submitted_at } : null }))
+    }
+    // ---- user: chunked uploads (bypass proxy body limits) ----
+    if (route === '/force-kyc/upload/init' && method === 'POST') {
+      if (!fk?.active || !['required', 'rejected'].includes(fk.status)) return handleCORS(NextResponse.json({ error: 'No re-verification is pending' }, { status: 400 }))
+      const body = await request.json().catch(() => ({}))
+      const slot = String(body.slot || '')
+      const mime = String(body.mime || '').toLowerCase()
+      const size = Number(body.size) || 0
+      const chunks = parseInt(body.chunks, 10) || 0
+      const isDocSlot = (fk.required_docs || []).includes(slot)
+      const isLive = slot === 'liveness_video' || /^liveness_frame_\d{1,2}$/.test(slot)
+      if (!isDocSlot && !isLive) return handleCORS(NextResponse.json({ error: 'Unknown upload slot' }, { status: 400 }))
+      if (slot === 'liveness_video' ? !mime.startsWith('video/') : !(mime.startsWith('image/') || (isDocSlot && mime === 'application/pdf'))) return handleCORS(NextResponse.json({ error: 'Unsupported file type' }, { status: 400 }))
+      const max = slot === 'liveness_video' ? 40 : 12
+      if (size <= 0 || size > max * 1024 * 1024) return handleCORS(NextResponse.json({ error: `File must be under ${max} MB` }, { status: 400 }))
+      if (chunks < 1 || chunks > 120) return handleCORS(NextResponse.json({ error: 'Invalid chunk count' }, { status: 400 }))
+      const file = { id: uuidv4(), user_id: user.id, attempt: fk.attempt || 1, slot, mime, size, name: String(body.name || slot).slice(0, 120), chunks_expected: chunks, status: 'uploading', created_at: now() }
+      await db.collection('fkyc_files').insertOne(file)
+      return handleCORS(NextResponse.json({ file_id: file.id }))
+    }
+    if (route === '/force-kyc/upload/chunk' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const file = await db.collection('fkyc_files').findOne({ id: String(body.file_id || ''), user_id: user.id })
+      if (!file || file.status !== 'uploading') return handleCORS(NextResponse.json({ error: 'Upload not found' }, { status: 404 }))
+      const index = parseInt(body.index, 10)
+      if (!(index >= 0 && index < file.chunks_expected)) return handleCORS(NextResponse.json({ error: 'Invalid chunk index' }, { status: 400 }))
+      const buf = Buffer.from(String(body.data || ''), 'base64')
+      if (!buf.length || buf.length > 1024 * 1024) return handleCORS(NextResponse.json({ error: 'Invalid chunk' }, { status: 400 }))
+      await db.collection('fkyc_chunks').updateOne({ file_id: file.id, index }, { $set: { file_id: file.id, index, data: buf, at: now() } }, { upsert: true })
+      return handleCORS(NextResponse.json({ ok: true }))
+    }
+    if (route === '/force-kyc/upload/complete' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const file = await db.collection('fkyc_files').findOne({ id: String(body.file_id || ''), user_id: user.id })
+      if (!file) return handleCORS(NextResponse.json({ error: 'Upload not found' }, { status: 404 }))
+      const n = await db.collection('fkyc_chunks').countDocuments({ file_id: file.id })
+      if (n !== file.chunks_expected) return handleCORS(NextResponse.json({ error: `Upload incomplete (${n}/${file.chunks_expected} parts)` }, { status: 400 }))
+      await db.collection('fkyc_files').updateOne({ id: file.id }, { $set: { status: 'complete', completed_at: now() } })
+      return handleCORS(NextResponse.json({ ok: true, file_id: file.id }))
+    }
+    // ---- owner or admin: stream an uploaded file ----
+    if (route.startsWith('/force-kyc/file/') && method === 'GET') {
+      const fid = route.split('/')[3]
+      const file = await db.collection('fkyc_files').findOne({ id: fid })
+      if (!file || (file.user_id !== user.id && !isAdminRole)) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+      const parts = await db.collection('fkyc_chunks').find({ file_id: fid }).sort({ index: 1 }).toArray()
+      const buf = Buffer.concat(parts.map(p => Buffer.from(p.data?.buffer ?? p.data)))
+      return handleCORS(new NextResponse(buf, { status: 200, headers: { 'Content-Type': file.mime || 'application/octet-stream', 'Content-Length': String(buf.length), 'Cache-Control': 'private, max-age=600' } }))
+    }
+    // ---- user: final submission ----
+    if (route === '/force-kyc/submit' && method === 'POST') {
+      if (!fk?.active) return handleCORS(NextResponse.json({ error: 'No re-verification is pending' }, { status: 400 }))
+      if (fk.status === 'submitted') return handleCORS(NextResponse.json({ error: 'Your verification is already under review' }, { status: 400 }))
+      const body = await request.json().catch(() => ({}))
+      const p = body.personal || {}
+      const s = (k) => String(p[k] ?? '').trim().slice(0, 200)
+      const reqDocs = fk.required_docs || []
+      const PERSONAL = [['full_name', 'Full legal name'], ['dob', 'Date of birth'], ['nationality', 'Nationality'], ['country', 'Country of residence'], ['city', 'City'], ['address', 'Residential address'], ['postal_code', 'Postal code'], ['occupation', 'Occupation'], ['id_type', 'ID document type'], ['id_number', 'ID document number']]
+      if (reqDocs.includes('tax_id')) PERSONAL.push(['tax_id_number', 'Tax ID number'])
+      if (reqDocs.includes('source_of_funds')) PERSONAL.push(['source_of_funds', 'Source of funds'])
+      const missing = PERSONAL.filter(([k]) => !s(k)).map(([, l]) => l)
+      if (missing.length) return handleCORS(NextResponse.json({ error: `Missing: ${missing.join(', ')}`, missing }, { status: 400 }))
+      const dob = new Date(s('dob'))
+      if (Number.isNaN(dob.getTime()) || dob > new Date(Date.now() - 16 * 365.25 * 864e5)) return handleCORS(NextResponse.json({ error: 'Please enter a valid date of birth' }, { status: 400 }))
+      if (!body.consent) return handleCORS(NextResponse.json({ error: 'Please confirm the declaration' }, { status: 400 }))
+      // Every required document + liveness must reference a COMPLETE upload owned by this user for this attempt
+      const docs = body.docs || {}
+      const live = body.liveness || {}
+      const frames = Array.isArray(live.frames) ? live.frames.slice(0, 12) : []
+      const ids = [...reqDocs.map(d => docs[d]), ...frames.map(f => f?.file_id), live.video_file_id].filter(Boolean)
+      const owned = await db.collection('fkyc_files').find({ id: { $in: ids }, user_id: user.id, attempt: fk.attempt || 1, status: 'complete' }, { projection: { _id: 0, id: 1, slot: 1, mime: 1, size: 1 } }).toArray()
+      const byId = Object.fromEntries(owned.map(f => [f.id, f]))
+      const missingDocs = reqDocs.filter(d => !docs[d] || byId[docs[d]]?.slot !== d)
+      if (missingDocs.length) return handleCORS(NextResponse.json({ error: `Please upload: ${missingDocs.map(d => FKYC_DOC_LABELS[d] || d).join(', ')}`, missing_docs: missingDocs }, { status: 400 }))
+      const goodFrames = frames.filter(f => f?.file_id && byId[f.file_id] && /^liveness_frame_/.test(byId[f.file_id].slot))
+      if (goodFrames.length < 4) return handleCORS(NextResponse.json({ error: 'Please complete the liveness check', code: 'LIVENESS_REQUIRED' }, { status: 400 }))
+      const sub = {
+        id: uuidv4(), user_id: user.id, attempt: fk.attempt || 1, status: 'pending',
+        personal: Object.fromEntries(PERSONAL.map(([k]) => [k, s(k)])),
+        required_docs: reqDocs,
+        docs: Object.fromEntries(reqDocs.map(d => [d, { file_id: docs[d], mime: byId[docs[d]].mime, size: byId[docs[d]].size }])),
+        liveness: {
+          video_file_id: live.video_file_id && byId[live.video_file_id]?.slot === 'liveness_video' ? live.video_file_id : null,
+          frames: goodFrames.map(f => ({ file_id: f.file_id, challenge: String(f.challenge || '').slice(0, 40), at: f.at || null })),
+          challenges: (Array.isArray(live.challenges) ? live.challenges : []).map(c => String(c).slice(0, 40)).slice(0, 12),
+          started_at: live.started_at || null, completed_at: live.completed_at || null, duration_ms: Number(live.duration_ms) || null,
+          face_signals: live.face_signals && typeof live.face_signals === 'object' ? live.face_signals : null,
+        },
+        device: { ua: (request.headers.get('user-agent') || '').slice(0, 300), ip: (request.headers.get('x-forwarded-for') || '').split(',')[0].trim() || null, platform: String(body.device?.platform || '').slice(0, 60), screen: String(body.device?.screen || '').slice(0, 30), tz: String(body.device?.tz || '').slice(0, 60) },
+        submitted_at: now(),
+        review_due_at: new Date(Date.now() + FKYC_REVIEW_HOURS * 3600 * 1000),
+      }
+      await db.collection('fkyc_submissions').insertOne(sub)
+      await db.collection('users').updateOne({ id: user.id }, { $set: { 'force_kyc.status': 'submitted', 'force_kyc.submitted_at': sub.submitted_at, 'force_kyc.review_due_at': sub.review_due_at, 'force_kyc.submission_id': sub.id }, $unset: { 'force_kyc.rejection_reason': '' } })
+      await audit(db, user.id, 'force_kyc.submit', { submission_id: sub.id, attempt: sub.attempt, docs: reqDocs.length, frames: goodFrames.length, video: !!sub.liveness.video_file_id })
+      try {
+        const admins = await db.collection('users').find({ role: { $in: ['admin', 'super_admin'] } }, { projection: { id: 1 } }).toArray()
+        await Promise.all(admins.map(a => notifyUser(db, a.id, { kind: 'admin_force_kyc_submitted', title: 'Enhanced KYC submitted', body: `@${user.username} submitted enhanced verification (attempt ${sub.attempt}). Review within ${FKYC_REVIEW_HOURS}h.`, url: '/?tab=admin_force_kyc' })))
+      } catch (e) {}
+      return handleCORS(NextResponse.json({ ok: true, submission_id: sub.id, review_due_at: sub.review_due_at }))
+    }
+
+    // ---------------- admin: force-KYC management ----------------
+    if (route.startsWith('/admin/force-kyc') && !isAdminRole) return handleCORS(NextResponse.json({ error: 'Forbidden' }, { status: 403 }))
+    if (route === '/admin/force-kyc/lookup' && method === 'GET') {
+      const qText = String(new URL(request.url).searchParams.get('q') || '').trim().slice(0, 80)
+      if (qText.length < 2) return handleCORS(NextResponse.json({ users: [] }))
+      const rx = new RegExp(qText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      const users = await db.collection('users').find({ role: { $nin: ['admin', 'super_admin'] }, $or: [{ username: rx }, { email: rx }, { full_name: rx }, { user_code: rx }, { id: qText }] }, { projection: { _id: 0, id: 1, username: 1, email: 1, full_name: 1, country: 1, kyc_status: 1, force_kyc: 1, status: 1 } }).limit(8).toArray()
+      return handleCORS(NextResponse.json({ users }))
+    }
+    if (route === '/admin/force-kyc' && method === 'GET') {
+      const status = new URL(request.url).searchParams.get('status') || 'open'
+      const q = { force_kyc: { $exists: true } }
+      if (status === 'open') q['force_kyc.active'] = true
+      else if (status !== 'all') q['force_kyc.status'] = status
+      const users = await db.collection('users').find(q, { projection: { _id: 0, id: 1, username: 1, email: 1, full_name: 1, country: 1, kyc_status: 1, force_kyc: 1 } }).sort({ 'force_kyc.requested_at': -1 }).limit(300).toArray()
+      const agg = await db.collection('users').aggregate([{ $match: { force_kyc: { $exists: true } } }, { $group: { _id: '$force_kyc.status', n: { $sum: 1 } } }]).toArray()
+      const counts = Object.fromEntries(agg.map(a => [a._id || 'unknown', a.n]))
+      counts.overdue = await db.collection('users').countDocuments({ 'force_kyc.status': 'submitted', 'force_kyc.review_due_at': { $lt: new Date() } })
+      return handleCORS(NextResponse.json({ users, counts, review_hours: FKYC_REVIEW_HOURS }))
+    }
+    if (route === '/admin/force-kyc/enable' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const target = await db.collection('users').findOne({ id: String(body.user_id || '') })
+      if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
+      if (target.role === 'admin' || target.role === 'super_admin') return handleCORS(NextResponse.json({ error: 'Admins cannot be placed in force KYC mode' }, { status: 400 }))
+      const docs = [...new Set((Array.isArray(body.required_docs) ? body.required_docs : []).filter(d => FKYC_DOC_LABELS[d]))]
+      if (!docs.length) return handleCORS(NextResponse.json({ error: 'Select at least one document' }, { status: 400 }))
+      const reason = String(body.reason || '').trim().slice(0, 500)
+      const attempt = (Number(target.force_kyc?.attempt) || 0) + 1
+      const state = { active: true, status: 'required', required_docs: docs, reason, requested_by: user.id, requested_by_name: user.username, requested_at: now(), attempt }
+      await db.collection('users').updateOne({ id: target.id }, { $set: { force_kyc: state } })
+      await audit(db, user.id, 'admin.force_kyc.enable', { user_id: target.id, docs, attempt })
+      await notifyUser(db, target.id, { kind: 'force_kyc_required', title: 'Action required: verify your identity', body: `For your security, Aurela requires an enhanced identity verification before you can continue using your account.${reason ? ' Reason: ' + reason : ''} Open the app to start — it takes about 5 minutes.`, url: '/' })
+      return handleCORS(NextResponse.json({ ok: true, force_kyc: state }))
+    }
+    if (route.startsWith('/admin/force-kyc/') && method === 'GET') {
+      const targetId = route.split('/')[3]
+      const target = await db.collection('users').findOne({ id: targetId }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, force_kyc: 1, dob: 1 } })
+      if (!target) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+      const [subs, lastKyc] = await Promise.all([
+        db.collection('fkyc_submissions').find({ user_id: targetId }).sort({ submitted_at: -1 }).limit(10).toArray(),
+        db.collection('kyc').find({ user_id: targetId }, { projection: { doc_front: 0, doc_back: 0, selfie: 0 } }).sort({ submitted_at: -1 }).limit(1).toArray(),
+      ])
+      return handleCORS(NextResponse.json({ user: clean(target), submissions: clean(subs), previous_kyc: lastKyc[0] ? clean(lastKyc[0]) : null, review_hours: FKYC_REVIEW_HOURS }))
+    }
+    if (route.startsWith('/admin/force-kyc/') && method === 'POST' && ['approve', 'reject', 'cancel'].includes(route.split('/')[4])) {
+      const targetId = route.split('/')[3]
+      const action = route.split('/')[4]
+      const body = await request.json().catch(() => ({}))
+      const target = await db.collection('users').findOne({ id: targetId })
+      if (!target?.force_kyc) return handleCORS(NextResponse.json({ error: 'User is not in force KYC mode' }, { status: 404 }))
+      const st = target.force_kyc
+      if (action === 'approve') {
+        if (!st.active || st.status !== 'submitted') return handleCORS(NextResponse.json({ error: 'Only submitted verifications can be approved' }, { status: 400 }))
+        await db.collection('fkyc_submissions').updateOne({ id: st.submission_id }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
+        await db.collection('users').updateOne({ id: targetId }, { $set: { 'force_kyc.active': false, 'force_kyc.status': 'approved', 'force_kyc.approved_at': now(), 'force_kyc.reviewed_by': user.id, kyc_status: 'approved', kyc_enhanced_at: now() } })
+        await audit(db, user.id, 'admin.force_kyc.approve', { user_id: targetId, submission_id: st.submission_id })
+        await notifyUser(db, targetId, { kind: 'force_kyc_approved', title: 'Identity verified ✓', body: 'Your enhanced verification has been approved. Full access to your Aurela account is restored.', url: '/' })
+      } else if (action === 'reject') {
+        if (!st.active || st.status !== 'submitted') return handleCORS(NextResponse.json({ error: 'Only submitted verifications can be rejected' }, { status: 400 }))
+        const reason = String(body.reason || '').trim().slice(0, 500)
+        if (!reason) return handleCORS(NextResponse.json({ error: 'A rejection reason is required so the user knows what to fix' }, { status: 400 }))
+        const docsToRedo = [...new Set((Array.isArray(body.required_docs) ? body.required_docs : st.required_docs).filter(d => FKYC_DOC_LABELS[d]))]
+        await db.collection('fkyc_submissions').updateOne({ id: st.submission_id }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id, rejection_reason: reason } })
+        await db.collection('users').updateOne({ id: targetId }, { $set: { 'force_kyc.status': 'rejected', 'force_kyc.rejection_reason': reason, 'force_kyc.rejected_at': now(), 'force_kyc.attempt': (Number(st.attempt) || 1) + 1, 'force_kyc.required_docs': docsToRedo.length ? docsToRedo : st.required_docs } })
+        await audit(db, user.id, 'admin.force_kyc.reject', { user_id: targetId, submission_id: st.submission_id, reason })
+        await notifyUser(db, targetId, { kind: 'force_kyc_rejected', title: 'Verification needs attention', body: `Your enhanced verification could not be approved. Reason: ${reason} Please open the app and submit again.`, url: '/' })
+      } else {
+        if (!st.active) return handleCORS(NextResponse.json({ error: 'Force KYC is not active for this user' }, { status: 400 }))
+        await db.collection('users').updateOne({ id: targetId }, { $set: { 'force_kyc.active': false, 'force_kyc.status': 'cancelled', 'force_kyc.cancelled_at': now(), 'force_kyc.cancelled_by': user.id } })
+        await audit(db, user.id, 'admin.force_kyc.cancel', { user_id: targetId })
+        await notifyUser(db, targetId, { kind: 'force_kyc_cancelled', title: 'Account access restored', body: 'The identity re-verification request on your account has been lifted. You can use Aurela normally again.', url: '/' })
+      }
+      const fresh = await db.collection('users').findOne({ id: targetId }, { projection: { _id: 0, force_kyc: 1 } })
+      return handleCORS(NextResponse.json({ ok: true, force_kyc: fresh?.force_kyc }))
+    }
 
     // 2FA setup: returns a fresh secret + otpauth uri + qr svg
     if (route === '/profile/2fa/setup' && method === 'POST') {

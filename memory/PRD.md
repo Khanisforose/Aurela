@@ -80,3 +80,9 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - Admin "All Cards" tab (AllCardsAdmin.jsx): every card of every user incl. hidden; search, type/status filters, pagination, view details, reveal, delete. Routes: GET /admin/all-cards, POST /admin/cards/:id/reveal, PUT /admin/cards/:id/reveal-rule, DELETE /admin/cards/:id.
 - When a zonal card becomes ACTIVE the user's geo hold is fully lifted (exempt from auto re-lock); only admin "Lock" in Withdrawal Access re-applies it.
 
+
+## v1.9.0 — Force KYC mode
+- Admin "Force KYC" tab (ForceKycAdmin.jsx): search user, pick required docs (country-suggested / enhanced presets; liveness always), message → user locked. Review dialog: liveness video + challenge frames, documents (images/PDF, zoom), details vs previous KYC (mismatch highlights), device/IP; Approve / Reject (reason + docs to redo, new attempt) / Lift.
+- User: full-screen non-dismissable ForceKycGate (z-95) — Overview → Personal details → Documents (camera/upload, compressed, 512KB chunked uploads) → in-app liveness (5 random guided challenges, frames + session video, lighting check) → Review & consent → Under review with 48h countdown. Support mailto support@aurelawallet.com + sign out always visible.
+- Backend: non-GET requests return 423 FORCE_KYC_REQUIRED while locked (incoming money still arrives). Files in fkyc_files/fkyc_chunks; submissions in fkyc_submissions.
+
