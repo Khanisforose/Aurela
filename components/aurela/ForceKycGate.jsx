@@ -125,9 +125,14 @@ function UnderReview({ fk, user }) {
   )
 }
 
-// ---------------- Main flow ----------------
-function Flow({ fk, user }) {
+// ---------------- Main flow (shared by Force KYC and Master Global card KYC) ----------------
+// cfg: { loadUrl, submitUrl, uploadExtra, onSubmitted, variant: 'force' | 'global', reviewHours }
+export function Flow({ fk, user, cfg = {} }) {
   const { api, refreshUser } = useApp()
+  const loadUrl = cfg.loadUrl || '/force-kyc'
+  const submitUrl = cfg.submitUrl || '/force-kyc/submit'
+  const uploadExtra = cfg.uploadExtra || {}
+  const variant = cfg.variant || 'force'
   const reqDocs = useMemo(() => FKYC_DOC_ORDER.filter(d => (fk.required_docs || []).includes(d)), [fk.required_docs])
   const [step, setStep] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -138,13 +143,13 @@ function Flow({ fk, user }) {
   const [consent, setConsent] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const topRef = useRef(null)
-  const dk = draftKey(user.id, fk.attempt || 1)
+  const dk = draftKey(user.id, `${variant}_${uploadExtra.card_id || ''}_${fk.attempt || 1}`)
 
   useEffect(() => {
     let alive = true
     ;(async () => {
       try {
-        const res = await api.get('/force-kyc')
+        const res = await api.get(loadUrl)
         if (!alive) return
         const up = res?.uploads || {}
         setUploads(up)
@@ -183,13 +188,13 @@ function Flow({ fk, user }) {
       const frames = []
       for (let i = 0; i < r.frames.length; i++) {
         const f = r.frames[i]
-        const fid = await uploadChunked(api, { slot: `liveness_frame_${i}`, blob: f.blob, name: `frame-${i}-${f.challenge}` })
+        const fid = await uploadChunked(api, { slot: `liveness_frame_${i}`, blob: f.blob, name: `frame-${i}-${f.challenge}`, extra: uploadExtra })
         frames.push({ file_id: fid, challenge: f.challenge, at: f.at })
         done++; setLiveUploading(Math.round((done / totalParts) * 100))
       }
       let video_file_id = null
       if (r.videoBlob) {
-        video_file_id = await uploadChunked(api, { slot: 'liveness_video', blob: r.videoBlob, name: 'liveness-session', onProgress: (p) => setLiveUploading(Math.round(((done + p / 100) / totalParts) * 100)) })
+        video_file_id = await uploadChunked(api, { slot: 'liveness_video', blob: r.videoBlob, name: 'liveness-session', extra: uploadExtra, onProgress: (p) => setLiveUploading(Math.round(((done + p / 100) / totalParts) * 100)) })
       }
       setLive({ video_file_id, frames, challenges: r.challenges, started_at: r.started_at, completed_at: r.completed_at, duration_ms: r.duration_ms, face_signals: r.face_signals })
       toast.success('Liveness check saved')
@@ -201,7 +206,7 @@ function Flow({ fk, user }) {
   const submit = async () => {
     setSubmitting(true)
     try {
-      await api.post('/force-kyc/submit', {
+      await api.post(submitUrl, {
         personal: Object.fromEntries(personalFields.map(k => [k, String(P(k)).trim()])),
         docs: Object.fromEntries(reqDocs.map(d => [d, uploads[d]?.file_id])),
         liveness: live, consent,
@@ -209,7 +214,8 @@ function Flow({ fk, user }) {
       })
       try { localStorage.removeItem(dk) } catch (e) {}
       toast.success('Submitted for review')
-      await refreshUser()
+      if (cfg.onSubmitted) await cfg.onSubmitted()
+      else await refreshUser()
     } catch (e) {
       toast.error(e?.message || 'Submission failed')
       if (e?.data?.missing_docs) setStep(2)
@@ -234,9 +240,9 @@ function Flow({ fk, user }) {
 
       <AnimatePresence mode="wait">
         <motion.div key={step} initial={{ opacity: 0, x: 24 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -24 }} transition={{ duration: 0.22 }}>
-          {step === 0 && <Intro fk={fk} reqDocs={reqDocs} onStart={() => setStep(1)}/>}
+          {step === 0 && <Intro fk={fk} reqDocs={reqDocs} onStart={() => setStep(1)} variant={variant} reviewHours={cfg.reviewHours}/>}
           {step === 1 && <Personal P={P} setP={setP} needTax={needTax} needSof={needSof}/>}
-          {step === 2 && <Documents reqDocs={reqDocs} uploads={uploads} setUploads={setUploads}/>}
+          {step === 2 && <Documents reqDocs={reqDocs} uploads={uploads} setUploads={setUploads} extra={uploadExtra}/>}
           {step === 3 && (
             <div className="space-y-4">
               <SectionTitle icon={ScanFace} title="Liveness check" sub="A quick guided video selfie confirms you are a real person and match your documents."/>
@@ -259,7 +265,7 @@ function Flow({ fk, user }) {
               ) : <LivenessCheck onComplete={onLiveness}/>}
             </div>
           )}
-          {step === 4 && <Review reqDocs={reqDocs} personal={personal} personalDone={personalDone} docsDone={docsDone} liveDone={liveDone} consent={consent} setConsent={setConsent} goto={setStep}/>}
+          {step === 4 && <Review reqDocs={reqDocs} personal={personal} personalDone={personalDone} docsDone={docsDone} liveDone={liveDone} consent={consent} setConsent={setConsent} goto={setStep} reviewText={variant === 'global' ? `Review takes about ${cfg.reviewHours ?? 24} hour${Number(cfg.reviewHours) === 1 ? '' : 's'}. You can keep using Aurela meanwhile.` : null}/>}
         </motion.div>
       </AnimatePresence>
 
@@ -290,17 +296,19 @@ function SectionTitle({ icon: Icon, title, sub }) {
   )
 }
 
-function Intro({ fk, reqDocs, onStart }) {
+function Intro({ fk, reqDocs, onStart, variant = 'force', reviewHours }) {
+  const g = variant === 'global'
+  const hrs = Number(reviewHours ?? 24)
   return (
     <div className="space-y-6" data-testid="force-kyc-intro">
       <div className="text-center space-y-4 pt-2">
         <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: 'spring', stiffness: 200, damping: 18 }} className="relative mx-auto h-20 w-20">
           <div className="absolute inset-0 rounded-full bg-gold-500/20 blur-xl animate-pulse"/>
-          <div className="relative h-20 w-20 rounded-full bg-gradient-to-br from-gold-300/20 to-gold-700/10 ring-1 ring-gold-500/40 flex items-center justify-center"><ShieldAlert className="h-9 w-9 text-gold"/></div>
+          <div className="relative h-20 w-20 rounded-full bg-gradient-to-br from-gold-300/20 to-gold-700/10 ring-1 ring-gold-500/40 flex items-center justify-center">{g ? <Sparkles className="h-9 w-9 text-gold"/> : <ShieldAlert className="h-9 w-9 text-gold"/>}</div>
         </motion.div>
         <div>
-          <h1 className="font-display text-2xl sm:text-3xl leading-tight">{fk.status === 'rejected' ? 'Please re-submit your verification' : 'Enhanced identity verification required'}</h1>
-          <p className="text-sm text-muted-foreground mt-2 max-w-md mx-auto">To keep your account and funds secure, Aurela needs to re-verify your identity. Your account is paused until this is complete.</p>
+          <h1 className="font-display text-2xl sm:text-3xl leading-tight">{fk.status === 'rejected' ? 'Please re-submit your verification' : g ? 'Master Global enhanced verification' : 'Enhanced identity verification required'}</h1>
+          <p className="text-sm text-muted-foreground mt-2 max-w-md mx-auto">{g ? 'The Master Global card carries our highest limits and worldwide access, so it needs our most thorough identity check. You can keep using Aurela while we review.' : 'To keep your account and funds secure, Aurela needs to re-verify your identity. Your account is paused until this is complete.'}</p>
         </div>
       </div>
       {fk.status === 'rejected' && fk.rejection_reason && (
@@ -319,7 +327,7 @@ function Intro({ fk, reqDocs, onStart }) {
         <Row icon={ScanFace} t="Liveness check" s="A short guided video selfie — about 20 seconds"/>
       </div>
       <div className="grid sm:grid-cols-3 gap-3 text-xs">
-        {[[Clock, 'Up to 48h review', 'Reviewed by our compliance team'], [Lock, 'Bank-grade privacy', 'Encrypted, used only for verification'], [Sparkles, 'Incoming money arrives', 'Your balance keeps receiving funds']].map(([I, t, s]) => (
+        {[[Clock, g ? `About ${hrs}h review` : 'Up to 48h review', 'Reviewed by our compliance team'], [Lock, 'Bank-grade privacy', 'Encrypted, used only for verification'], [Sparkles, g ? 'App stays usable' : 'Incoming money arrives', g ? 'Only this card waits for approval' : 'Your balance keeps receiving funds']].map(([I, t, s]) => (
           <div key={t} className="rounded-2xl border border-gold-500/10 bg-secondary/30 p-3"><I className="h-4 w-4 text-gold mb-1.5"/><div className="font-medium text-sm">{t}</div><div className="text-muted-foreground">{s}</div></div>
         ))}
       </div>
@@ -370,7 +378,7 @@ function Personal({ P, setP, needTax, needSof }) {
   )
 }
 
-function Documents({ reqDocs, uploads, setUploads }) {
+function Documents({ reqDocs, uploads, setUploads, extra }) {
   const done = reqDocs.filter(d => uploads[d]?.file_id).length
   return (
     <div className="space-y-5" data-testid="force-kyc-docs">
@@ -378,12 +386,12 @@ function Documents({ reqDocs, uploads, setUploads }) {
         <SectionTitle icon={FileText} title="Documents" sub="Clear, colour photos. All corners visible, no glare."/>
         <div className="text-xs text-muted-foreground shrink-0">{done}/{reqDocs.length} done</div>
       </div>
-      <div className="space-y-3">{reqDocs.map(d => <DocSlot key={d} slot={d} value={uploads[d]} onUploaded={(v) => setUploads(u => ({ ...u, [d]: v }))}/>)}</div>
+      <div className="space-y-3">{reqDocs.map(d => <DocSlot key={d} slot={d} value={uploads[d]} extra={extra} onUploaded={(v) => setUploads(u => ({ ...u, [d]: v }))}/>)}</div>
     </div>
   )
 }
 
-function DocSlot({ slot, value, onUploaded }) {
+function DocSlot({ slot, value, onUploaded, extra }) {
   const { api } = useApp()
   const meta = FKYC_DOCS[slot]
   const I = DOC_ICONS[meta.icon] || FileText
@@ -405,7 +413,7 @@ function DocSlot({ slot, value, onUploaded }) {
     setProgress(0)
     try {
       const blob = await compressImage(file)
-      const fid = await uploadChunked(api, { slot, blob, name: file.name || slot, onProgress: setProgress })
+      const fid = await uploadChunked(api, { slot, blob, name: file.name || slot, onProgress: setProgress, extra })
       onUploaded({ file_id: fid, mime: blob.type || file.type, name: file.name, size: blob.size })
       toast.success(`${meta.label} uploaded`)
     } catch (err) { toast.error(err?.message || 'Upload failed') }
@@ -439,7 +447,7 @@ function DocSlot({ slot, value, onUploaded }) {
   )
 }
 
-function Review({ reqDocs, personal, personalDone, docsDone, liveDone, consent, setConsent, goto }) {
+function Review({ reqDocs, personal, personalDone, docsDone, liveDone, consent, setConsent, goto, reviewText }) {
   const items = [
     ['Personal details', personalDone, 1, personal.full_name ? `${personal.full_name} · ${personal.id_type || ''}` : 'Incomplete'],
     ['Documents', docsDone, 2, `${reqDocs.length} required`],
@@ -461,7 +469,7 @@ function Review({ reqDocs, personal, personalDone, docsDone, liveDone, consent, 
         <Checkbox checked={consent} onCheckedChange={v => setConsent(!!v)} className="mt-0.5" data-testid="force-kyc-consent"/>
         <span className="text-xs text-muted-foreground leading-relaxed">I confirm that the information and documents I've provided are genuine, belong to me and are up to date. I consent to Aurela processing my biometric and identity data solely for verification and regulatory compliance.</span>
       </label>
-      <div className="text-xs text-muted-foreground flex gap-2"><Clock className="h-4 w-4 text-gold shrink-0"/>Review takes up to 48 hours. Your account stays paused until approval.</div>
+      <div className="text-xs text-muted-foreground flex gap-2"><Clock className="h-4 w-4 text-gold shrink-0"/>{reviewText || 'Review takes up to 48 hours. Your account stays paused until approval.'}</div>
     </div>
   )
 }

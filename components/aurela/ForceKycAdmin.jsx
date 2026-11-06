@@ -25,7 +25,7 @@ const STATUS = {
 }
 const StatusBadge = ({ s }) => <Badge variant="outline" className={STATUS[s]?.[1] || ''}>{STATUS[s]?.[0] || s}</Badge>
 
-function SlaChip({ fk }) {
+export function SlaChip({ fk }) {
   const [nowTs, setNowTs] = useState(Date.now())
   useEffect(() => { const id = setInterval(() => setNowTs(Date.now()), 30000); return () => clearInterval(id) }, [])
   if (fk?.status !== 'submitted' || !fk.review_due_at) return null
@@ -230,7 +230,7 @@ function SecureMedia({ fileId, mime, className = '', mirror = false, onOpen }) {
 }
 
 // ---------------- Review ----------------
-function ReviewDialog({ userId, onClose, onChanged }) {
+export function ReviewDialog({ userId, onClose, onChanged, loadUrl, actionBase, allowCancel = true, approveLabel = 'Approve & restore access', header }) {
   const { api } = useApp()
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -238,10 +238,10 @@ function ReviewDialog({ userId, onClose, onChanged }) {
   const [rejReason, setRejReason] = useState('')
   const [redoDocs, setRedoDocs] = useState([])
   const [zoom, setZoom] = useState(null)
-  const load = async () => { try { setData(await api.get(`/admin/force-kyc/${userId}`)) } catch (e) { toast.error(e?.message || 'Failed to load') } }
+  const load = async () => { try { setData(await api.get(loadUrl || `/admin/force-kyc/${userId}`)) } catch (e) { toast.error(e?.message || 'Failed to load') } }
   useEffect(() => { setData(null); setRejecting(false); setRejReason(''); if (userId) load() }, [userId])
   const u = data?.user
-  const fk = u?.force_kyc
+  const fk = data?.state || u?.force_kyc
   const sub = data?.submissions?.[0]
   const isCurrent = sub && fk?.submission_id === sub.id
   useEffect(() => { if (fk) setRedoDocs(fk.required_docs || []) }, [fk?.submission_id])
@@ -251,8 +251,8 @@ function ReviewDialog({ userId, onClose, onChanged }) {
     if (action === 'reject' && !rejReason.trim()) return toast.error('Add a reason so the user knows what to fix')
     setBusy(true)
     try {
-      await api.post(`/admin/force-kyc/${userId}/${action}`, action === 'reject' ? { reason: rejReason.trim(), required_docs: redoDocs } : {})
-      toast.success(action === 'approve' ? 'Approved — access restored' : action === 'reject' ? 'Rejected — user asked to resubmit' : 'Force KYC lifted')
+      await api.post(`${actionBase || `/admin/force-kyc/${userId}`}/${action}`, action === 'reject' ? { reason: rejReason.trim(), required_docs: redoDocs } : {})
+      toast.success(action === 'approve' ? (allowCancel ? 'Approved — access restored' : 'Approved — card activated') : action === 'reject' ? 'Rejected — user asked to resubmit' : 'Force KYC lifted')
       onChanged(); onClose()
     } catch (e) { toast.error(e?.message || 'Failed') } finally { setBusy(false) }
   }
@@ -279,7 +279,8 @@ function ReviewDialog({ userId, onClose, onChanged }) {
               <span>Requested {fk?.requested_at ? new Date(fk.requested_at).toLocaleString() : '—'} by @{fk?.requested_by_name || 'admin'}</span>
               {fk?.status === 'submitted' && <SlaChip fk={fk}/>}
             </div>
-            {fk?.reason && <div className="text-xs rounded-xl bg-secondary/40 p-3"><span className="text-muted-foreground">Message to user:</span> {fk.reason}</div>}
+            {fk?.reason && <div className="text-xs rounded-xl bg-secondary/40 p-3"><span className="text-muted-foreground">{header ? 'Issue note:' : 'Message to user:'}</span> {fk.reason}</div>}
+            {header}
             {!sub ? (
               <div className="card-luxury rounded-2xl p-8 text-center text-sm text-muted-foreground"><Clock className="h-6 w-6 text-gold mx-auto mb-2"/>The user hasn't submitted yet. Required: liveness + {(fk?.required_docs || []).map(d => FKYC_DOCS[d]?.label).join(', ')}.</div>
             ) : (
@@ -365,10 +366,10 @@ function ReviewDialog({ userId, onClose, onChanged }) {
         )}
         {fk?.active && (
           <DialogFooter className="gap-2 flex-wrap">
-            <Button variant="ghost" onClick={() => act('cancel')} disabled={busy} className="sm:mr-auto text-muted-foreground" data-testid="fk-cancel"><Ban className="h-4 w-4 mr-2"/>Lift without verification</Button>
+            {allowCancel && <Button variant="ghost" onClick={() => act('cancel')} disabled={busy} className="sm:mr-auto text-muted-foreground" data-testid="fk-cancel"><Ban className="h-4 w-4 mr-2"/>Lift without verification</Button>}
             {fk.status === 'submitted' && !rejecting && <Button variant="outline" onClick={() => setRejecting(true)} disabled={busy} className="border-red-500/40 text-red-400 hover:bg-red-500/10" data-testid="fk-reject-open"><X className="h-4 w-4 mr-2"/>Reject</Button>}
             {fk.status === 'submitted' && rejecting && <Button variant="outline" onClick={() => act('reject')} disabled={busy || !rejReason.trim()} className="border-red-500/40 text-red-400 hover:bg-red-500/10" data-testid="fk-reject-confirm">{busy ? <Loader2 className="h-4 w-4 animate-spin"/> : 'Confirm rejection'}</Button>}
-            {fk.status === 'submitted' && <Button onClick={() => act('approve')} disabled={busy} className="gold-btn" data-testid="fk-approve">{busy ? <Loader2 className="h-4 w-4 animate-spin"/> : <><Check className="h-4 w-4 mr-2"/>Approve & restore access</>}</Button>}
+            {fk.status === 'submitted' && <Button onClick={() => act('approve')} disabled={busy} className="gold-btn" data-testid="fk-approve">{busy ? <Loader2 className="h-4 w-4 animate-spin"/> : <><Check className="h-4 w-4 mr-2"/>{approveLabel}</>}</Button>}
           </DialogFooter>
         )}
         {zoom && <div className="fixed inset-0 z-[200] bg-black/90 flex items-center justify-center p-4 cursor-zoom-out" onClick={() => setZoom(null)}><img src={zoom} alt="" className="max-h-full max-w-full rounded-xl"/></div>}

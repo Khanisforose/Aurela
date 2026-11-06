@@ -86,3 +86,8 @@ Live: https://www.aurelawallet.com (Dockerized on Hostinger VPS, data in named D
 - User: full-screen non-dismissable ForceKycGate (z-95) — Overview → Personal details → Documents (camera/upload, compressed, 512KB chunked uploads) → in-app liveness (5 random guided challenges, frames + session video, lighting check) → Review & consent → Under review with 48h countdown. Support mailto support@aurelawallet.com + sign out always visible.
 - Backend: non-GET requests return 423 FORCE_KYC_REQUIRED while locked (incoming money still arrives). Files in fkyc_files/fkyc_chunks; submissions in fkyc_submissions.
 
+## v1.10.0 — Master Global card
+- Admin-issued premium card (type `global`): admin sets fee (USDT, 0 = free), KYC review hours (any number = hours, default 24) and required docs. Flow: pending_activation → user pays externally (tx hash) → pending_verification → admin approves payment in Card Approvals (fee credited like other cards) → kyc_required → user does enhanced card KYC (same liveness + docs flow as Force KYC, app NOT locked) → kyc_review with countdown → admin approves in Master Global tab → active + geo hold fully lifted (admin-only re-lock). Reject → kyc_rejected, new attempt.
+- Files: GlobalCard.jsx (visual, status panel, KYC overlay), GlobalCardsAdmin.jsx (list, issue, edit, review via shared ReviewDialog). Backend helper buildEnhancedSubmission shared with Force KYC.
+
+

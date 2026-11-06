@@ -547,6 +547,57 @@ async function revealZonalCard(db, card, { by = 'auto', actor = null } = {}) {
   if (set.status === 'active') await liftGeoHoldForZonal(db, card.user_id, card)
   return true
 }
+// ---------- Enhanced KYC submission builder (Force KYC + Master Global card KYC) ----------
+// Validates personal details, required docs and liveness frames against COMPLETE uploads owned by the user for this
+// attempt + context. Returns { sub } or { error: {error, ...} }.
+async function buildEnhancedSubmission(db, user, request, body, { reqDocs, attempt, ctxKeys, reviewHours, extra = {} }) {
+  const p = body.personal || {}
+  const s = (k) => String(p[k] ?? '').trim().slice(0, 200)
+  const PERSONAL = [['full_name', 'Full legal name'], ['dob', 'Date of birth'], ['nationality', 'Nationality'], ['country', 'Country of residence'], ['city', 'City'], ['address', 'Residential address'], ['postal_code', 'Postal code'], ['occupation', 'Occupation'], ['id_type', 'ID document type'], ['id_number', 'ID document number']]
+  if (reqDocs.includes('tax_id')) PERSONAL.push(['tax_id_number', 'Tax ID number'])
+  if (reqDocs.includes('source_of_funds')) PERSONAL.push(['source_of_funds', 'Source of funds'])
+  const missing = PERSONAL.filter(([k]) => !s(k)).map(([, l]) => l)
+  if (missing.length) return { error: { error: `Missing: ${missing.join(', ')}`, missing } }
+  const dob = new Date(s('dob'))
+  if (Number.isNaN(dob.getTime()) || dob > new Date(Date.now() - 16 * 365.25 * 864e5)) return { error: { error: 'Please enter a valid date of birth' } }
+  if (!body.consent) return { error: { error: 'Please confirm the declaration' } }
+  const docs = body.docs || {}
+  const live = body.liveness || {}
+  const frames = Array.isArray(live.frames) ? live.frames.slice(0, 12) : []
+  const ids = [...reqDocs.map(d => docs[d]), ...frames.map(f => f?.file_id), live.video_file_id].filter(Boolean)
+  const owned = await db.collection('fkyc_files').find({ id: { $in: ids }, user_id: user.id, attempt, status: 'complete', ctx: { $in: ctxKeys } }, { projection: { _id: 0, id: 1, slot: 1, mime: 1, size: 1 } }).toArray()
+  const byId = Object.fromEntries(owned.map(f => [f.id, f]))
+  const missingDocs = reqDocs.filter(d => !docs[d] || byId[docs[d]]?.slot !== d)
+  if (missingDocs.length) return { error: { error: `Please upload: ${missingDocs.map(d => FKYC_DOC_LABELS[d] || d).join(', ')}`, missing_docs: missingDocs } }
+  const goodFrames = frames.filter(f => f?.file_id && byId[f.file_id] && /^liveness_frame_/.test(byId[f.file_id].slot))
+  if (goodFrames.length < 4) return { error: { error: 'Please complete the liveness check', code: 'LIVENESS_REQUIRED' } }
+  return { sub: {
+    id: uuidv4(), user_id: user.id, attempt, status: 'pending', ...extra,
+    personal: Object.fromEntries(PERSONAL.map(([k]) => [k, s(k)])),
+    required_docs: reqDocs,
+    docs: Object.fromEntries(reqDocs.map(d => [d, { file_id: docs[d], mime: byId[docs[d]].mime, size: byId[docs[d]].size }])),
+    liveness: {
+      video_file_id: live.video_file_id && byId[live.video_file_id]?.slot === 'liveness_video' ? live.video_file_id : null,
+      frames: goodFrames.map(f => ({ file_id: f.file_id, challenge: String(f.challenge || '').slice(0, 40), at: f.at || null })),
+      challenges: (Array.isArray(live.challenges) ? live.challenges : []).map(c => String(c).slice(0, 40)).slice(0, 12),
+      started_at: live.started_at || null, completed_at: live.completed_at || null, duration_ms: Number(live.duration_ms) || null,
+      face_signals: live.face_signals && typeof live.face_signals === 'object' ? live.face_signals : null,
+    },
+    device: { ua: (request.headers.get('user-agent') || '').slice(0, 300), ip: (request.headers.get('x-forwarded-for') || '').split(',')[0].trim() || null, platform: String(body.device?.platform || '').slice(0, 60), screen: String(body.device?.screen || '').slice(0, 30), tz: String(body.device?.tz || '').slice(0, 60) },
+    submitted_at: now(),
+    review_due_at: new Date(Date.now() + reviewHours * 3600 * 1000),
+  } }
+}
+async function enhancedKycPrefill(db, user) {
+  const k = (await db.collection('kyc').find({ user_id: user.id }).sort({ submitted_at: -1 }).limit(1).toArray())[0] || {}
+  return {
+    full_name: k.full_name || user.full_name || '', dob: k.dob || '', nationality: k.country || user.country || '', country: k.country || user.country || '',
+    city: k.city || '', address: k.address || '', postal_code: k.postal_code || '', occupation: k.occupation || '',
+    id_type: k.id_type || '', id_number: k.id_number || '',
+  }
+}
+const GLOBAL_CARD_DEFAULT_DOCS = ['passport', 'id_front', 'id_back', 'selfie_with_id', 'proof_of_address', 'bank_statement', 'source_of_funds']
+
 // ---- Zonal card active ⇒ geolocation hold fully lifted ----
 // Once a zonal card is ACTIVE the user's geo hold is removed entirely and the user is exempted from automatic
 // re-locks (tier-card approvals). From then on, only an administrator can re-apply the hold (Withdrawal Access → Lock).
@@ -1631,7 +1682,7 @@ async function handleRoute(request, { params }) {
     if (route === '/force-kyc' && method === 'GET') {
       if (!fk) return handleCORS(NextResponse.json({ force_kyc: null }))
       const [files, lastKyc, latestSub] = await Promise.all([
-        db.collection('fkyc_files').find({ user_id: user.id, attempt: fk.attempt || 1, status: 'complete' }, { projection: { _id: 0 } }).sort({ created_at: 1 }).toArray(),
+        db.collection('fkyc_files').find({ user_id: user.id, attempt: fk.attempt || 1, status: 'complete', ctx: { $in: [null, 'force'] } }, { projection: { _id: 0 } }).sort({ created_at: 1 }).toArray(),
         db.collection('kyc').find({ user_id: user.id }).sort({ submitted_at: -1 }).limit(1).toArray(),
         db.collection('fkyc_submissions').find({ user_id: user.id }).sort({ submitted_at: -1 }).limit(1).toArray(),
       ])
@@ -1647,20 +1698,29 @@ async function handleRoute(request, { params }) {
     }
     // ---- user: chunked uploads (bypass proxy body limits) ----
     if (route === '/force-kyc/upload/init' && method === 'POST') {
-      if (!fk?.active || !['required', 'rejected'].includes(fk.status)) return handleCORS(NextResponse.json({ error: 'No re-verification is pending' }, { status: 400 }))
       const body = await request.json().catch(() => ({}))
+      // Upload context: Force-KYC (account) or a Master Global card's enhanced KYC
+      let ctx = null
+      if (body.card_id) {
+        const gc = await db.collection('cards').findOne({ id: String(body.card_id), user_id: user.id, type: 'global' })
+        if (!gc || !['kyc_required', 'kyc_rejected'].includes(gc.status)) return handleCORS(NextResponse.json({ error: 'This card is not awaiting verification' }, { status: 400 }))
+        ctx = { key: 'card:' + gc.id, attempt: gc.kyc?.attempt || 1, required_docs: gc.kyc?.required_docs || [] }
+      } else {
+        if (!fk?.active || !['required', 'rejected'].includes(fk.status)) return handleCORS(NextResponse.json({ error: 'No re-verification is pending' }, { status: 400 }))
+        ctx = { key: 'force', attempt: fk.attempt || 1, required_docs: fk.required_docs || [] }
+      }
       const slot = String(body.slot || '')
       const mime = String(body.mime || '').toLowerCase()
       const size = Number(body.size) || 0
       const chunks = parseInt(body.chunks, 10) || 0
-      const isDocSlot = (fk.required_docs || []).includes(slot)
+      const isDocSlot = ctx.required_docs.includes(slot)
       const isLive = slot === 'liveness_video' || /^liveness_frame_\d{1,2}$/.test(slot)
       if (!isDocSlot && !isLive) return handleCORS(NextResponse.json({ error: 'Unknown upload slot' }, { status: 400 }))
       if (slot === 'liveness_video' ? !mime.startsWith('video/') : !(mime.startsWith('image/') || (isDocSlot && mime === 'application/pdf'))) return handleCORS(NextResponse.json({ error: 'Unsupported file type' }, { status: 400 }))
       const max = slot === 'liveness_video' ? 40 : 12
       if (size <= 0 || size > max * 1024 * 1024) return handleCORS(NextResponse.json({ error: `File must be under ${max} MB` }, { status: 400 }))
       if (chunks < 1 || chunks > 120) return handleCORS(NextResponse.json({ error: 'Invalid chunk count' }, { status: 400 }))
-      const file = { id: uuidv4(), user_id: user.id, attempt: fk.attempt || 1, slot, mime, size, name: String(body.name || slot).slice(0, 120), chunks_expected: chunks, status: 'uploading', created_at: now() }
+      const file = { id: uuidv4(), user_id: user.id, attempt: ctx.attempt, ctx: ctx.key, slot, mime, size, name: String(body.name || slot).slice(0, 120), chunks_expected: chunks, status: 'uploading', created_at: now() }
       await db.collection('fkyc_files').insertOne(file)
       return handleCORS(NextResponse.json({ file_id: file.id }))
     }
@@ -1698,44 +1758,11 @@ async function handleRoute(request, { params }) {
       if (!fk?.active) return handleCORS(NextResponse.json({ error: 'No re-verification is pending' }, { status: 400 }))
       if (fk.status === 'submitted') return handleCORS(NextResponse.json({ error: 'Your verification is already under review' }, { status: 400 }))
       const body = await request.json().catch(() => ({}))
-      const p = body.personal || {}
-      const s = (k) => String(p[k] ?? '').trim().slice(0, 200)
-      const reqDocs = fk.required_docs || []
-      const PERSONAL = [['full_name', 'Full legal name'], ['dob', 'Date of birth'], ['nationality', 'Nationality'], ['country', 'Country of residence'], ['city', 'City'], ['address', 'Residential address'], ['postal_code', 'Postal code'], ['occupation', 'Occupation'], ['id_type', 'ID document type'], ['id_number', 'ID document number']]
-      if (reqDocs.includes('tax_id')) PERSONAL.push(['tax_id_number', 'Tax ID number'])
-      if (reqDocs.includes('source_of_funds')) PERSONAL.push(['source_of_funds', 'Source of funds'])
-      const missing = PERSONAL.filter(([k]) => !s(k)).map(([, l]) => l)
-      if (missing.length) return handleCORS(NextResponse.json({ error: `Missing: ${missing.join(', ')}`, missing }, { status: 400 }))
-      const dob = new Date(s('dob'))
-      if (Number.isNaN(dob.getTime()) || dob > new Date(Date.now() - 16 * 365.25 * 864e5)) return handleCORS(NextResponse.json({ error: 'Please enter a valid date of birth' }, { status: 400 }))
-      if (!body.consent) return handleCORS(NextResponse.json({ error: 'Please confirm the declaration' }, { status: 400 }))
-      // Every required document + liveness must reference a COMPLETE upload owned by this user for this attempt
-      const docs = body.docs || {}
-      const live = body.liveness || {}
-      const frames = Array.isArray(live.frames) ? live.frames.slice(0, 12) : []
-      const ids = [...reqDocs.map(d => docs[d]), ...frames.map(f => f?.file_id), live.video_file_id].filter(Boolean)
-      const owned = await db.collection('fkyc_files').find({ id: { $in: ids }, user_id: user.id, attempt: fk.attempt || 1, status: 'complete' }, { projection: { _id: 0, id: 1, slot: 1, mime: 1, size: 1 } }).toArray()
-      const byId = Object.fromEntries(owned.map(f => [f.id, f]))
-      const missingDocs = reqDocs.filter(d => !docs[d] || byId[docs[d]]?.slot !== d)
-      if (missingDocs.length) return handleCORS(NextResponse.json({ error: `Please upload: ${missingDocs.map(d => FKYC_DOC_LABELS[d] || d).join(', ')}`, missing_docs: missingDocs }, { status: 400 }))
-      const goodFrames = frames.filter(f => f?.file_id && byId[f.file_id] && /^liveness_frame_/.test(byId[f.file_id].slot))
-      if (goodFrames.length < 4) return handleCORS(NextResponse.json({ error: 'Please complete the liveness check', code: 'LIVENESS_REQUIRED' }, { status: 400 }))
-      const sub = {
-        id: uuidv4(), user_id: user.id, attempt: fk.attempt || 1, status: 'pending',
-        personal: Object.fromEntries(PERSONAL.map(([k]) => [k, s(k)])),
-        required_docs: reqDocs,
-        docs: Object.fromEntries(reqDocs.map(d => [d, { file_id: docs[d], mime: byId[docs[d]].mime, size: byId[docs[d]].size }])),
-        liveness: {
-          video_file_id: live.video_file_id && byId[live.video_file_id]?.slot === 'liveness_video' ? live.video_file_id : null,
-          frames: goodFrames.map(f => ({ file_id: f.file_id, challenge: String(f.challenge || '').slice(0, 40), at: f.at || null })),
-          challenges: (Array.isArray(live.challenges) ? live.challenges : []).map(c => String(c).slice(0, 40)).slice(0, 12),
-          started_at: live.started_at || null, completed_at: live.completed_at || null, duration_ms: Number(live.duration_ms) || null,
-          face_signals: live.face_signals && typeof live.face_signals === 'object' ? live.face_signals : null,
-        },
-        device: { ua: (request.headers.get('user-agent') || '').slice(0, 300), ip: (request.headers.get('x-forwarded-for') || '').split(',')[0].trim() || null, platform: String(body.device?.platform || '').slice(0, 60), screen: String(body.device?.screen || '').slice(0, 30), tz: String(body.device?.tz || '').slice(0, 60) },
-        submitted_at: now(),
-        review_due_at: new Date(Date.now() + FKYC_REVIEW_HOURS * 3600 * 1000),
-      }
+      const built = await buildEnhancedSubmission(db, user, request, body, { reqDocs: fk.required_docs || [], attempt: fk.attempt || 1, ctxKeys: [null, 'force'], reviewHours: FKYC_REVIEW_HOURS })
+      if (built.error) return handleCORS(NextResponse.json(built.error, { status: 400 }))
+      const sub = built.sub
+      const reqDocs = sub.required_docs
+      const goodFrames = sub.liveness.frames
       await db.collection('fkyc_submissions').insertOne(sub)
       await db.collection('users').updateOne({ id: user.id }, { $set: { 'force_kyc.status': 'submitted', 'force_kyc.submitted_at': sub.submitted_at, 'force_kyc.review_due_at': sub.review_due_at, 'force_kyc.submission_id': sub.id }, $unset: { 'force_kyc.rejection_reason': '' } })
       await audit(db, user.id, 'force_kyc.submit', { submission_id: sub.id, attempt: sub.attempt, docs: reqDocs.length, frames: goodFrames.length, video: !!sub.liveness.video_file_id })
@@ -1744,6 +1771,138 @@ async function handleRoute(request, { params }) {
         await Promise.all(admins.map(a => notifyUser(db, a.id, { kind: 'admin_force_kyc_submitted', title: 'Enhanced KYC submitted', body: `@${user.username} submitted enhanced verification (attempt ${sub.attempt}). Review within ${FKYC_REVIEW_HOURS}h.`, url: '/?tab=admin_force_kyc' })))
       } catch (e) {}
       return handleCORS(NextResponse.json({ ok: true, submission_id: sub.id, review_due_at: sub.review_due_at }))
+    }
+
+    // ================= MASTER GLOBAL CARD — enhanced card KYC (app stays usable) =================
+    if (route.startsWith('/cards/') && route.endsWith('/kyc') && method === 'GET') {
+      const gc = await db.collection('cards').findOne({ id: route.split('/')[2], user_id: user.id, type: 'global' })
+      if (!gc) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      const attempt = gc.kyc?.attempt || 1
+      const files = await db.collection('fkyc_files').find({ user_id: user.id, ctx: 'card:' + gc.id, attempt, status: 'complete' }, { projection: { _id: 0 } }).sort({ created_at: 1 }).toArray()
+      const uploads = {}
+      for (const f of files) uploads[f.slot] = { file_id: f.id, mime: f.mime, name: f.name, size: f.size }
+      return handleCORS(NextResponse.json({ kyc: gc.kyc || null, card_status: gc.status, uploads, prefill: await enhancedKycPrefill(db, user), review_hours: Number(gc.review_hours) || 24 }))
+    }
+    if (route.startsWith('/cards/') && route.endsWith('/kyc/submit') && method === 'POST') {
+      const gc = await db.collection('cards').findOne({ id: route.split('/')[2], user_id: user.id, type: 'global' })
+      if (!gc) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      if (gc.status === 'kyc_review') return handleCORS(NextResponse.json({ error: 'Your verification is already under review' }, { status: 400 }))
+      if (!['kyc_required', 'kyc_rejected'].includes(gc.status)) return handleCORS(NextResponse.json({ error: gc.status === 'pending_activation' || gc.status === 'pending_verification' || gc.status === 'rejected' ? 'Pay and confirm the card fee first' : 'This card is not awaiting verification' }, { status: 400 }))
+      const body = await request.json().catch(() => ({}))
+      const hours = Number(gc.review_hours) || 24
+      const built = await buildEnhancedSubmission(db, user, request, body, { reqDocs: gc.kyc?.required_docs || [], attempt: gc.kyc?.attempt || 1, ctxKeys: ['card:' + gc.id], reviewHours: hours, extra: { context: 'global_card', card_id: gc.id } })
+      if (built.error) return handleCORS(NextResponse.json(built.error, { status: 400 }))
+      const sub = built.sub
+      await db.collection('fkyc_submissions').insertOne(sub)
+      await db.collection('cards').updateOne({ id: gc.id }, { $set: { status: 'kyc_review', 'kyc.status': 'submitted', 'kyc.submitted_at': sub.submitted_at, 'kyc.review_due_at': sub.review_due_at, 'kyc.submission_id': sub.id }, $unset: { 'kyc.rejection_reason': '' } })
+      await audit(db, user.id, 'global_card.kyc_submit', { card_id: gc.id, submission_id: sub.id, attempt: sub.attempt })
+      await notifyUser(db, user.id, { kind: 'global_card_kyc_submitted', title: 'Master Global verification received', body: `Thanks — our compliance team is reviewing your verification. This takes up to ${hoursLabel(hours)}. We'll notify you once your card is unlocked.`, url: '/?tab=cards' })
+      try {
+        const admins = await db.collection('users').find({ role: { $in: ['admin', 'super_admin'] } }, { projection: { id: 1 } }).toArray()
+        await Promise.all(admins.map(a => notifyUser(db, a.id, { kind: 'admin_global_kyc_submitted', title: 'Master Global KYC submitted', body: `@${user.username} submitted enhanced verification for the Master Global card. Review within ${hoursLabel(hours)}.`, url: '/?tab=admin_global_cards' })))
+      } catch (e) {}
+      return handleCORS(NextResponse.json({ ok: true, submission_id: sub.id, review_due_at: sub.review_due_at }))
+    }
+    if (route.startsWith('/admin/global-cards') && !isAdminRole) return handleCORS(NextResponse.json({ error: 'Forbidden' }, { status: 403 }))
+    if (route === '/admin/global-cards' && method === 'GET') {
+      const status = new URL(request.url).searchParams.get('status') || 'all'
+      const q = { type: 'global', status: status === 'all' ? { $ne: 'deleted' } : status }
+      const [list, agg, settings] = await Promise.all([
+        db.collection('cards').find(q, { projection: { _id: 0, cvv: 0 } }).sort({ created_at: -1 }).limit(300).toArray(),
+        db.collection('cards').aggregate([{ $match: { type: 'global' } }, { $group: { _id: '$status', n: { $sum: 1 } } }]).toArray(),
+        db.collection('settings').findOne({ id: 'platform' }, { projection: { _id: 0, global_card_defaults: 1 } }),
+      ])
+      const counts = Object.fromEntries(agg.map(a => [a._id, a.n]))
+      counts.overdue = await db.collection('cards').countDocuments({ type: 'global', status: 'kyc_review', 'kyc.review_due_at': { $lt: new Date() } })
+      const masked = list.map(c => ({ ...c, number_masked: c.number ? '•••• ' + String(c.number).replace(/\s/g, '').slice(-4) : null, number: undefined }))
+      return handleCORS(NextResponse.json({ cards: await attachOwners(db, masked), counts, defaults: { fee_usdt: 500, review_hours: 24, required_docs: GLOBAL_CARD_DEFAULT_DOCS, ...(settings?.global_card_defaults || {}) } }))
+    }
+    if (route === '/admin/global-cards/issue' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const target = await db.collection('users').findOne({ id: String(body.user_id || '') })
+      if (!target) return handleCORS(NextResponse.json({ error: 'User not found' }, { status: 404 }))
+      if (target.role === 'admin' || target.role === 'super_admin') return handleCORS(NextResponse.json({ error: 'Cannot issue to an admin account' }, { status: 400 }))
+      if (target.status === 'blocked') return handleCORS(NextResponse.json({ error: 'This account is blocked' }, { status: 400 }))
+      const dup = await db.collection('cards').findOne({ user_id: target.id, type: 'global', status: { $ne: 'deleted' } })
+      if (dup) return handleCORS(NextResponse.json({ error: `User already holds a Master Global card (${dup.status.replace(/_/g, ' ')})` }, { status: 400 }))
+      const fee = Number(body.fee_usdt)
+      const hours = Number(body.review_hours)
+      if (body.fee_usdt === '' || body.fee_usdt == null || !Number.isFinite(fee) || fee < 0) return handleCORS(NextResponse.json({ error: 'Fee must be a number ≥ 0 (USDT)' }, { status: 400 }))
+      if (body.review_hours === '' || body.review_hours == null || !Number.isFinite(hours) || hours < 0 || hours > 8760) return handleCORS(NextResponse.json({ error: 'Review time must be a number of hours between 0 and 8760' }, { status: 400 }))
+      const docs = [...new Set((Array.isArray(body.required_docs) ? body.required_docs : []).filter(d => FKYC_DOC_LABELS[d]))]
+      if (!docs.length) return handleCORS(NextResponse.json({ error: 'Select at least one document' }, { status: 400 }))
+      const settings = await db.collection('settings').findOne({ id: 'platform' })
+      const free = fee === 0
+      const card = {
+        id: uuidv4(), user_id: target.id, type: 'global', tier: 'master_global', tier_name: 'Aurela Master Global',
+        number: fmtCardNumber(), expiry: cardExpiry(), cvv: randDigits(3),
+        holder: (target.full_name || target.username || '').toUpperCase(),
+        status: free ? 'kyc_required' : 'pending_activation', frozen: false,
+        daily_spend_limit: 250000, daily_withdraw_limit: 50000, monthly_spend_limit: 2500000,
+        activation_fee_usdt: fee, review_hours: hours,
+        activation_wallet: settings?.card_activation_wallet, activation_network: settings?.card_activation_network || 'ERC20',
+        skip_geo_hold: true,
+        kyc: { status: free ? 'required' : 'awaiting_payment', required_docs: docs, attempt: 1 },
+        issued_by: user.id, issued_at: now(), issue_note: body.note ? String(body.note).slice(0, 300) : null,
+        ...(free ? { payment_approved_at: now() } : {}),
+        created_at: now(),
+      }
+      await db.collection('cards').insertOne(card)
+      await db.collection('settings').updateOne({ id: 'platform' }, { $set: { global_card_defaults: { fee_usdt: fee, review_hours: hours, required_docs: docs } } }, { upsert: true })
+      await audit(db, user.id, 'admin.global_card.issue', { card_id: card.id, user_id: target.id, fee_usdt: fee, review_hours: hours, docs })
+      await notifyUser(db, target.id, { kind: 'global_card_issued', title: '🌐 You’ve been invited to Aurela Master Global', body: free ? `Your exclusive Master Global card is reserved. Complete the enhanced verification in your Cards tab — review takes about ${hoursLabel(hours)}.` : `Your exclusive Master Global card is reserved. Pay the ${fee} USDT card fee from an external wallet in your Cards tab, then complete the enhanced verification (review about ${hoursLabel(hours)}).`, url: '/?tab=cards' })
+      return handleCORS(NextResponse.json({ ok: true, card: clean(card) }))
+    }
+    if (route.startsWith('/admin/global-cards/') && route.split('/').length === 4 && method === 'PUT') {
+      const cardId = route.split('/')[3]
+      const body = await request.json().catch(() => ({}))
+      const gc = await db.collection('cards').findOne({ id: cardId, type: 'global' })
+      if (!gc) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+      const set = {}
+      if ('review_hours' in body) { const h = Number(body.review_hours); if (!Number.isFinite(h) || h < 0 || h > 8760) return handleCORS(NextResponse.json({ error: 'Review time must be 0–8760 hours' }, { status: 400 })); set.review_hours = h; if (gc.status === 'kyc_review' && gc.kyc?.submitted_at) set['kyc.review_due_at'] = new Date(new Date(gc.kyc.submitted_at).getTime() + h * 3600 * 1000) }
+      if ('fee_usdt' in body) { if (gc.status !== 'pending_activation' && gc.status !== 'rejected') return handleCORS(NextResponse.json({ error: 'The fee can only be changed before the user pays' }, { status: 400 })); const f = Number(body.fee_usdt); if (!Number.isFinite(f) || f < 0) return handleCORS(NextResponse.json({ error: 'Fee must be ≥ 0' }, { status: 400 })); set.activation_fee_usdt = f }
+      if (!Object.keys(set).length) return handleCORS(NextResponse.json({ error: 'Nothing to update' }, { status: 400 }))
+      await db.collection('cards').updateOne({ id: cardId }, { $set: set })
+      await audit(db, user.id, 'admin.global_card.update', { card_id: cardId, ...set })
+      return handleCORS(NextResponse.json({ ok: true, card: clean(await db.collection('cards').findOne({ id: cardId })) }))
+    }
+    if (route.startsWith('/admin/global-cards/') && route.endsWith('/kyc') && method === 'GET') {
+      const cardId = route.split('/')[3]
+      const gc = await db.collection('cards').findOne({ id: cardId, type: 'global' }, { projection: { _id: 0, cvv: 0 } })
+      if (!gc) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+      const [target, subs, lastKyc] = await Promise.all([
+        db.collection('users').findOne({ id: gc.user_id }, { projection: { ...ADMIN_USER_SUMMARY_PROJECTION, dob: 1 } }),
+        db.collection('fkyc_submissions').find({ card_id: cardId }).sort({ submitted_at: -1 }).limit(10).toArray(),
+        db.collection('kyc').find({ user_id: gc.user_id }, { projection: { doc_front: 0, doc_back: 0, selfie: 0 } }).sort({ submitted_at: -1 }).limit(1).toArray(),
+      ])
+      const k = gc.kyc || {}
+      // Same shape as Force KYC state so the admin review UI is shared
+      const state = { active: ['kyc_required', 'kyc_review', 'kyc_rejected'].includes(gc.status), status: gc.status === 'kyc_review' ? 'submitted' : gc.status === 'kyc_rejected' ? 'rejected' : gc.status === 'active' || gc.status === 'activating' ? 'approved' : 'required', required_docs: k.required_docs || [], attempt: k.attempt || 1, submission_id: k.submission_id, submitted_at: k.submitted_at, review_due_at: k.review_due_at, requested_at: gc.issued_at, requested_by_name: 'admin', reason: gc.issue_note || '' }
+      return handleCORS(NextResponse.json({ user: clean(target), card: clean(gc), state, submissions: clean(subs), previous_kyc: lastKyc[0] ? clean(lastKyc[0]) : null, review_hours: Number(gc.review_hours) || 24 }))
+    }
+    if (route.startsWith('/admin/global-cards/') && method === 'POST' && route.split('/')[4] === 'kyc' && ['approve', 'reject'].includes(route.split('/')[5])) {
+      const cardId = route.split('/')[3]
+      const action = route.split('/')[5]
+      const body = await request.json().catch(() => ({}))
+      const gc = await db.collection('cards').findOne({ id: cardId, type: 'global' })
+      if (!gc) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+      if (gc.status !== 'kyc_review') return handleCORS(NextResponse.json({ error: 'Only submitted verifications can be reviewed' }, { status: 400 }))
+      if (action === 'approve') {
+        await db.collection('fkyc_submissions').updateOne({ id: gc.kyc?.submission_id }, { $set: { status: 'approved', reviewed_at: now(), reviewed_by: user.id } })
+        await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'active', activated_at: now(), usable_at: now(), 'kyc.status': 'approved', 'kyc.approved_at': now(), 'kyc.reviewed_by': user.id } })
+        await liftGeoHoldForZonal(db, gc.user_id, gc, { actor: user.id })
+        await audit(db, user.id, 'admin.global_card.kyc_approve', { card_id: cardId })
+        await notifyUser(db, gc.user_id, { kind: 'global_card_active', title: '🌐 Master Global card unlocked', body: 'Your enhanced verification is approved. Your Aurela Master Global card is now active and ready to use worldwide.', url: '/?tab=cards' })
+      } else {
+        const reason = String(body.reason || '').trim().slice(0, 500)
+        if (!reason) return handleCORS(NextResponse.json({ error: 'A rejection reason is required so the user knows what to fix' }, { status: 400 }))
+        const redo = [...new Set((Array.isArray(body.required_docs) ? body.required_docs : gc.kyc?.required_docs || []).filter(d => FKYC_DOC_LABELS[d]))]
+        await db.collection('fkyc_submissions').updateOne({ id: gc.kyc?.submission_id }, { $set: { status: 'rejected', reviewed_at: now(), reviewed_by: user.id, rejection_reason: reason } })
+        await db.collection('cards').updateOne({ id: cardId }, { $set: { status: 'kyc_rejected', 'kyc.status': 'rejected', 'kyc.rejection_reason': reason, 'kyc.rejected_at': now(), 'kyc.attempt': (Number(gc.kyc?.attempt) || 1) + 1, 'kyc.required_docs': redo.length ? redo : gc.kyc?.required_docs } })
+        await audit(db, user.id, 'admin.global_card.kyc_reject', { card_id: cardId, reason })
+        await notifyUser(db, gc.user_id, { kind: 'global_card_kyc_rejected', title: 'Master Global verification needs attention', body: `Your verification could not be approved. Reason: ${reason} Open your Cards tab to submit again.`, url: '/?tab=cards' })
+      }
+      return handleCORS(NextResponse.json({ ok: true, card: clean(await db.collection('cards').findOne({ id: cardId }, { projection: { _id: 0, cvv: 0 } })) }))
     }
 
     // ---------------- admin: force-KYC management ----------------
@@ -2337,7 +2496,7 @@ async function handleRoute(request, { params }) {
       const tier = (body?.tier || 'basic').toLowerCase()
       if (!CARD_TIERS[tier]) return handleCORS(NextResponse.json({ error: 'Invalid tier' }, { status: 400 }))
       // Enforce: max 3 tier cards per user (one per tier), non-deleted only. Admin-issued zonal cards don't count.
-      const existingCards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' }, type: { $ne: 'zonal' } }).toArray()
+      const existingCards = await db.collection('cards').find({ user_id: user.id, status: { $ne: 'deleted' }, type: { $nin: ['zonal', 'global'] } }).toArray()
       if (existingCards.length >= 3) return handleCORS(NextResponse.json({ error: 'You already hold the maximum of 3 Aurela cards. Delete one to request another.' }, { status: 400 }))
       if (existingCards.some(c => c.tier === tier)) return handleCORS(NextResponse.json({ error: `You already have an Aurela ${tier} card. Only one card per tier is permitted.` }, { status: 400 }))
       const settings = await db.collection('settings').findOne({ id: 'platform' })
@@ -2376,6 +2535,7 @@ async function handleRoute(request, { params }) {
       const card = await db.collection('cards').findOne({ id: cardId, user_id: user.id })
       if (!card) return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
       if (card.status === 'deleted' || card.status === 'hidden') return handleCORS(NextResponse.json({ error: 'Card not found' }, { status: 404 }))
+      if (card.type === 'global' && String(card.status).startsWith('kyc_')) return handleCORS(NextResponse.json({ error: 'Your payment is already confirmed — complete the enhanced verification instead.' }, { status: 400 }))
       if (card.status === 'active' || card.status === 'activating') return handleCORS(NextResponse.json({ error: 'Already active' }, { status: 400 }))
       if (card.status === 'pending_verification') return handleCORS(NextResponse.json({ error: 'Your previous transaction is still being verified.' }, { status: 400 }))
       const hash = String(tx_hash || '').trim()
@@ -2897,7 +3057,8 @@ async function handleRoute(request, { params }) {
         const limit = Math.min(100, Math.max(5, parseInt(url.searchParams.get('limit') || '25', 10) || 25))
         const q = {}
         if (type === 'zonal') q.type = 'zonal'
-        else if (type === 'tier') q.type = { $ne: 'zonal' }
+        else if (type === 'tier') q.type = { $nin: ['zonal', 'global'] }
+        else if (type === 'global') q.type = 'global'
         if (status === 'frozen') { q.frozen = true; q.status = { $nin: ['deleted'] } }
         else if (status !== 'all') q.status = status
         else q.status = { $ne: 'deleted' }
@@ -2974,13 +3135,17 @@ async function handleRoute(request, { params }) {
         if (card.status === 'hidden') return handleCORS(NextResponse.json({ error: 'This card is still hidden from the user. Reveal it first.' }, { status: 400 }))
         if (action === 'approve') {
           const isZonal = card.type === 'zonal'
+          const isGlobal = card.type === 'global'
+          if (isGlobal && !['pending_verification', 'pending_activation'].includes(card.status)) return handleCORS(NextResponse.json({ error: 'Master Global KYC is reviewed in the Master Global tab' }, { status: 400 }))
           // Zonal cards carry their own admin-defined activation window (hours); tier cards use the 24h default
           const windowHours = isZonal ? Math.max(0, Number(card.activation_hours) || 0) : 24
-          const immediate = !!body?.activate_now || (isZonal && windowHours === 0)
-          const finalStatus = immediate ? 'active' : 'activating'
-          const finalUsable = immediate ? now() : new Date(Date.now() + windowHours*60*60*1000)
+          const immediate = !isGlobal && (!!body?.activate_now || (isZonal && windowHours === 0))
+          // Master Global: payment verified → user must now complete the card's enhanced KYC (admin approves it later)
+          const finalStatus = isGlobal ? 'kyc_required' : (immediate ? 'active' : 'activating')
+          const finalUsable = isGlobal ? null : (immediate ? now() : new Date(Date.now() + windowHours*60*60*1000))
           const windowText = isZonal ? hoursLabel(windowHours) : '24 hours'
-          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), approved_by: user.id, usable_at: finalUsable, activated_at: immediate ? now() : null } })
+          await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), approved_by: user.id, usable_at: finalUsable, activated_at: immediate ? now() : null, ...(isGlobal ? { payment_approved_at: now(), 'kyc.status': 'required' } : {}) } })
+          if (isGlobal) await notifyUser(db, card.user_id, { kind: 'global_card_kyc_required', title: 'Payment confirmed — verify to unlock Master Global', body: `Your ${card.activation_fee_usdt} USDT payment for the Aurela Master Global card is confirmed. Open your Cards tab and complete the enhanced verification (liveness + documents). Review takes about ${hoursLabel(Number(card.review_hours) || 24)}.`, url: '/?tab=cards' })
           if (isZonal && immediate) await liftGeoHoldForZonal(db, card.user_id, card, { actor: user.id })
           await writeBlock(db, { type: 'card_activation', tx_id: card.id, currency: 'USDT', amount: card.activation_fee_usdt, network: card.activation_network_used || 'external', from_user_id: card.user_id, to_username: 'aurela_treasury', card_id: card.id })
 
@@ -2989,7 +3154,7 @@ async function handleRoute(request, { params }) {
           // administrator verifies geolocation and grants an allowance / unlocks. Admin "unlock" sets
           // withdraw_lock_exempt so future approvals don't re-lock a user the admin already cleared.
           // Zonal cards SKIP this hold: the admin already verified the user's zone/location when issuing it.
-          const ownerForLock = isZonal ? null : await db.collection('users').findOne({ id: card.user_id }, { projection: { withdraw_lock: 1, withdraw_lock_exempt: 1 } })
+          const ownerForLock = (isZonal || isGlobal) ? null : await db.collection('users').findOne({ id: card.user_id }, { projection: { withdraw_lock: 1, withdraw_lock_exempt: 1 } })
           if (ownerForLock && !ownerForLock.withdraw_lock_exempt && !ownerForLock.withdraw_lock?.active) {
             await db.collection('users').updateOne({ id: card.user_id }, { $set: {
               withdraw_lock: { active: true, reason: 'geolocation_unverified', since: now(), card_id: card.id, set_by: 'card_approval' },
@@ -3035,7 +3200,7 @@ async function handleRoute(request, { params }) {
 
               const when = new Date().toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC'
               const title = 'Card activation fee credited'
-              const bodyText = `Your ${tierName} card has been approved. The activation fee of ${fee} USDT you paid has been credited to your USDT balance. New balance: ${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT. ${immediate ? 'Your card is active and ready to use.' : `Your card will unlock for use within ${windowText}.`}`
+              const bodyText = `Your ${tierName} card has been approved. The activation fee of ${fee} USDT you paid has been credited to your USDT balance. New balance: ${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT. ${isGlobal ? 'Next step: complete the enhanced verification in your Cards tab to unlock the card.' : immediate ? 'Your card is active and ready to use.' : `Your card will unlock for use within ${windowText}.`}`
               await notifyUser(db, card.user_id, {
                 kind: 'card_fee_credited', title, body: bodyText, url: '/?tab=transactions',
                 meta: { card_id: card.id, tier: card.tier, tier_name: tierName, amount: fee, currency: 'USDT', new_balance: newBalance, tx_id: tx.id, activated: immediate, usable_at: finalUsable },
@@ -3044,7 +3209,7 @@ async function handleRoute(request, { params }) {
                   intro: `Dear ${owner?.full_name || owner?.username || 'valued member'},<br/><br/>We are pleased to confirm that your <strong style="color:#f5e29d">${tierName}</strong> card has been approved. The activation fee you paid has been credited to your Aurela USDT balance as detailed below.`,
                   rows: [
                     ['Card', tierName],
-                    ['Card status', immediate ? 'Active' : `Activating — usable within ${windowText}`],
+                    ['Card status', isGlobal ? 'Payment confirmed — enhanced verification required' : immediate ? 'Active' : `Activating — usable within ${windowText}`],
                     ['Amount credited', `+${fee} USDT`],
                     ['New USDT balance', `${newBalance.toLocaleString('en-US', { maximumFractionDigits: 6 })} USDT`],
                     ['Payment network', card.activation_network_used || card.activation_network || ''],
@@ -3059,7 +3224,7 @@ async function handleRoute(request, { params }) {
           }
           // Keep the original status notification only when no credit notification was sent AND the card was actually pending (avoids duplicate alerts on re-approve)
           const wasPending = card.status === 'pending_verification' || card.status === 'pending_activation'
-          if (!credit && wasPending) {
+          if (!credit && wasPending && !isGlobal) {
             await notifyUser(db, card.user_id, { kind: 'card_activated', title: 'Card approved', body: immediate ? `Your ${card.tier_name || 'Aurela ' + card.tier} card is now active and ready to use.` : `Your ${card.tier_name || 'Aurela ' + card.tier} card has been approved. It will unlock for use in ${windowText}.` })
           }
           await audit(db, user.id, `admin.card.approve`, { card_id: cardId, fee_credit: credit })

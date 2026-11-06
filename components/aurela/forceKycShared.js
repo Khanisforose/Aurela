@@ -75,11 +75,11 @@ const blobToBase64 = (blob) => new Promise((res, rej) => {
 })
 
 // Chunked upload (512 KB parts, retried) → returns file_id
-export async function uploadChunked(api, { slot, blob, name, onProgress }) {
+export async function uploadChunked(api, { slot, blob, name, onProgress, extra = {} }) {
   const CHUNK = 512 * 1024
   const total = Math.max(1, Math.ceil(blob.size / CHUNK))
   const mime = (blob.type || 'application/octet-stream').split(';')[0]
-  const { file_id } = await api.post('/force-kyc/upload/init', { slot, mime, size: blob.size, chunks: total, name })
+  const { file_id } = await api.post('/force-kyc/upload/init', { ...extra, slot, mime, size: blob.size, chunks: total, name })
   for (let i = 0; i < total; i++) {
     const data = await blobToBase64(blob.slice(i * CHUNK, (i + 1) * CHUNK))
     let attempt = 0

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useApp } from './store'
 import { ZonalCardVisual } from './ZonalCard'
+import { MasterGlobalCardVisual } from './GlobalCard'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -17,6 +18,7 @@ import { RefreshCw, Loader2, Search, Trash2, EyeOff, Eye, Sparkles, ChevronLeft,
 export const cardStatusLabel = (s) => ({
   hidden: 'Hidden · locked', pending_activation: 'Awaiting payment', pending_verification: 'Awaiting verification',
   activating: 'Activating', active: 'Active', rejected: 'Rejected', deleted: 'Deleted by user',
+  kyc_required: 'Awaiting KYC', kyc_review: 'KYC under review', kyc_rejected: 'KYC resubmission',
 }[s] || s)
 export const cardStatusClass = (s) => ({
   hidden: 'border-violet-500/40 text-violet-300', active: 'border-gold-500 text-gold', activating: 'border-blue-500/50 text-blue-400',
@@ -196,7 +198,7 @@ export function AllCardsAdmin() {
         </div>
         <Select value={type} onValueChange={v => { setType(v); setPage(1) }}>
           <SelectTrigger className="h-10 sm:w-40 bg-secondary border-gold-500/20 text-xs" data-testid="all-cards-type"><SelectValue/></SelectTrigger>
-          <SelectContent><SelectItem value="all">All types</SelectItem><SelectItem value="tier">Aurela cards</SelectItem><SelectItem value="zonal">Zonal cards</SelectItem></SelectContent>
+          <SelectContent><SelectItem value="all">All types</SelectItem><SelectItem value="tier">Aurela cards</SelectItem><SelectItem value="zonal">Zonal cards</SelectItem><SelectItem value="global">Master Global</SelectItem></SelectContent>
         </Select>
       </div>
       <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1" data-testid="all-cards-status-chips">
@@ -218,7 +220,7 @@ export function AllCardsAdmin() {
         {!loading && data.cards.map(c => (
           <div key={c.id} className={`card-luxury rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center gap-4 ${c.status === 'hidden' ? 'ring-1 ring-violet-500/25' : ''}`} data-testid={`all-card-row-${c.id}`}>
             <div className="w-full sm:w-56 lg:w-44 shrink-0 relative">
-              {c.type === 'zonal' ? <ZonalCardVisual card={{ ...c, number: c.number_masked, cvv: '•••' }} compact/> : <TierMini card={c}/>}
+              {c.type === 'zonal' ? <ZonalCardVisual card={{ ...c, number: c.number_masked, cvv: '•••' }} compact/> : c.type === 'global' ? <MasterGlobalCardVisual card={c} compact/> : <TierMini card={c}/>}
               {c.status === 'hidden' && <div className="absolute inset-0 rounded-xl bg-onyx-950/55 backdrop-blur-[2px] flex items-center justify-center"><EyeOff className="h-6 w-6 text-violet-300"/></div>}
               {c.frozen && c.status !== 'hidden' && <div className="absolute inset-0 rounded-xl bg-onyx-950/50 flex items-center justify-center"><Snowflake className="h-6 w-6 text-gold"/></div>}
             </div>

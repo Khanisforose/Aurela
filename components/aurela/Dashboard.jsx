@@ -29,6 +29,8 @@ import { PushSettings } from './PushSettings'
 import { ErrorBoundary } from './ErrorBoundary'
 import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
+import { MasterGlobalCardVisual, GlobalCardStatus, GlobalCardKycOverlay } from './GlobalCard'
+import { GlobalCardsAdmin } from './GlobalCardsAdmin'
 import { ForceKycGate } from './ForceKycGate'
 import { ForceKycAdmin } from './ForceKycAdmin'
 import { UsersMapAdmin } from './UsersMap'
@@ -61,6 +63,7 @@ const ADMIN_NAV = [
   { id: 'admin_card_approvals', label: 'Card Approvals', icon: CreditCard },
   { id: 'admin_zonal_cards', label: 'Zonal Cards', icon: MapPinned },
   { id: 'admin_all_cards', label: 'All Cards', icon: CreditCard },
+  { id: 'admin_global_cards', label: 'Master Global', icon: Globe2 },
   { id: 'admin_force_kyc', label: 'Force KYC', icon: ShieldAlert },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
@@ -441,6 +444,7 @@ export function Dashboard() {
               {tab === 'admin_zonal_cards' && isAdmin && <ZonalCardsAdmin/>}
               {tab === 'admin_all_cards' && isAdmin && <AllCardsAdmin/>}
               {tab === 'admin_force_kyc' && isAdmin && <ForceKycAdmin/>}
+              {tab === 'admin_global_cards' && isAdmin && <GlobalCardsAdmin/>}
               {tab === 'admin_fees' && isAdmin && <FeesAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}
@@ -838,6 +842,7 @@ function TransferTab({ wallets, onDone }) {
 
 function CardsTab({ cards, onChange, onWalletChange }) {
   const { api, user, config, cardFees } = useApp()
+  const [kycCard, setKycCard] = useState(null)
   const [openReq, setOpenReq] = useState(false)
   const [openAct, setOpenAct] = useState(null)
   const [tier, setTier] = useState('basic')
@@ -926,6 +931,12 @@ function CardsTab({ cards, onChange, onWalletChange }) {
             )}
             {c.type === 'zonal' ? (
               <ZonalCardVisual card={c} showCvvToggle/>
+            ) : c.type === 'global' ? (
+              <div className="relative">
+                <MasterGlobalCardVisual card={c} showCvvToggle={c.status === 'active'}/>
+                {c.status !== 'active' && <div className="absolute inset-0 rounded-2xl bg-onyx-950/35 flex items-end justify-end p-3"><span className="rounded-full bg-black/60 backdrop-blur px-2.5 py-1 text-[10px] uppercase tracking-widest text-gold-200 flex items-center gap-1"><ShieldCheck className="h-3 w-3"/>Locked · verification</span></div>}
+                {c.frozen && <div className="absolute inset-0 rounded-2xl bg-onyx-900/60 backdrop-blur-sm flex items-center justify-center"><Snowflake className="h-10 w-10 text-gold"/></div>}
+              </div>
             ) : (
             <div className={`credit-card ${c.tier} rounded-2xl p-5 aspect-[16/10] relative overflow-hidden`}>
               <div className="flex items-center justify-between">
@@ -959,13 +970,15 @@ function CardsTab({ cards, onChange, onWalletChange }) {
             )}
             <div className="mt-4 flex items-center gap-2 flex-wrap">
               {c.type === 'zonal' && <Badge variant="outline" className="border-gold-500/40 text-gold text-[10px]"><MapPinned className="h-3 w-3 mr-1"/>{c.zone} · {c.zone_name}</Badge>}
-              <Badge variant="outline" className={`${c.status==='active'?'border-gold-500 text-gold':c.status==='activating'?'border-blue-500/50 text-blue-400':c.status==='pending_verification'?'border-gold-500/40 text-gold':c.status==='rejected'?'border-red-500/40 text-red-400':'border-muted text-muted-foreground'}`}>{c.status.replace('_',' ')}</Badge>
+              {c.type === 'global' && <Badge variant="outline" className="border-gold-500/40 text-gold text-[10px]"><Globe2 className="h-3 w-3 mr-1"/>Worldwide · Master Global</Badge>}
+              <Badge variant="outline" className={`${c.status==='active'?'border-gold-500 text-gold':c.status==='activating'?'border-blue-500/50 text-blue-400':c.status==='pending_verification'||c.status==='kyc_review'?'border-gold-500/40 text-gold':c.status==='rejected'||c.status==='kyc_rejected'?'border-red-500/40 text-red-400':'border-muted text-muted-foreground'}`}>{({ kyc_required: 'verification required', kyc_review: 'verification review', kyc_rejected: 'verification rejected' })[c.status] || c.status.replace('_',' ')}</Badge>
               <Badge variant="outline" className="border-gold-500/30 text-muted-foreground text-[10px]">Monthly spend ${(c.monthly_spend_limit || 0).toLocaleString()}</Badge>
               {c.status === 'activating' && c.usable_at && <ActivationCountdown usable_at={c.usable_at}/>}
             </div>
             <div className="mt-4 flex gap-2 flex-wrap">
+              {c.type === 'global' && <GlobalCardStatus card={c} onVerify={() => setKycCard(c)}/>}
               {c.status === 'pending_activation' && (
-                <Button onClick={() => setOpenAct(c)} className="gold-btn flex-1 rounded-full"><Sparkles className="h-4 w-4 mr-2"/> Activate{c.type === 'zonal' ? ` · ${c.activation_fee_usdt} USDT` : ''}</Button>
+                <Button onClick={() => setOpenAct(c)} className="gold-btn flex-1 rounded-full"><Sparkles className="h-4 w-4 mr-2"/> {c.type === 'global' ? 'Pay card fee' : 'Activate'}{c.type === 'zonal' || c.type === 'global' ? ` · ${c.activation_fee_usdt} USDT` : ''}</Button>
               )}
               {c.status === 'pending_verification' && (
                 <div className="flex-1 text-xs text-muted-foreground">⏳ Waiting for admin to verify your USDT transfer…{Number(c.rejection_count) > 0 ? ` (attempt ${Number(c.rejection_count) + 1})` : ''}</div>
@@ -1069,6 +1082,7 @@ function CardsTab({ cards, onChange, onWalletChange }) {
       </Dialog>
 
       {/* Card unlocked celebration (background-issued zonal cards) */}
+      <GlobalCardKycOverlay card={kycCard} onClose={() => setKycCard(null)} onSubmitted={async () => { onChange && await onChange() }}/>
       <Dialog open={!!unlocked} onOpenChange={v => !v && dismissUnlocked(false)}>
         <DialogContent className="bg-onyx-900 border-gold-500/30 max-w-md overflow-hidden" data-testid="card-unlocked-dialog">
           <div className="pointer-events-none absolute -top-24 left-1/2 -translate-x-1/2 h-64 w-64 rounded-full bg-gold-500/20 blur-3xl animate-pulse"/>
