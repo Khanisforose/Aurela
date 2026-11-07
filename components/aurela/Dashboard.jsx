@@ -15,7 +15,7 @@ import { toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   LayoutDashboard, Wallet, Bitcoin, Send, CreditCard, ArrowDownToLine, ArrowUpFromLine,
-  Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles, RefreshCw,
+  Receipt, ShieldCheck, User, LogOut, Copy, Eye, EyeOff, Snowflake, Flame, Sparkles, RefreshCw, BellRing,
   ChevronRight, TrendingUp, ArrowUpRight, ArrowDownRight, Plus, Search, Link2, Blocks,
   Users, Settings, ScrollText, ChevronDown, Bell, Edit3, Trash2, Timer, Snowflake as SnowIcon, Menu, X, ExternalLink, ShieldAlert, MapPinOff, Mail, Globe2, MapPinned, Loader2, Percent
 } from 'lucide-react'
@@ -31,6 +31,7 @@ import { WhatsNewDialog } from './WhatsNew'
 import { LocationGate } from './LocationGate'
 import { MasterGlobalCardVisual, GlobalCardStatus, GlobalCardKycOverlay } from './GlobalCard'
 import { GlobalCardsAdmin } from './GlobalCardsAdmin'
+import { VerifyRemindersAdmin, VerifyDeadlineBanner } from './VerifyReminders'
 import { ForceKycGate } from './ForceKycGate'
 import { ForceKycAdmin } from './ForceKycAdmin'
 import { UsersMapAdmin } from './UsersMap'
@@ -64,6 +65,7 @@ const ADMIN_NAV = [
   { id: 'admin_zonal_cards', label: 'Zonal Cards', icon: MapPinned },
   { id: 'admin_all_cards', label: 'All Cards', icon: CreditCard },
   { id: 'admin_global_cards', label: 'Master Global', icon: Globe2 },
+  { id: 'admin_verify_reminders', label: 'Verify Reminders', icon: BellRing },
   { id: 'admin_force_kyc', label: 'Force KYC', icon: ShieldAlert },
   { id: 'admin_tx', label: 'All Transactions', icon: Receipt },
   { id: 'admin_wallets', label: 'Platform Wallets', icon: Wallet },
@@ -416,6 +418,7 @@ export function Dashboard() {
         </div>
 
         <div className="p-6">
+          <VerifyDeadlineBanner user={user} onVerify={() => setTab('kyc')} hidden={tab === 'kyc'}/>
           <AnimatePresence mode="wait">
             <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.25 }}>
              <ErrorBoundary resetKey={tab}>
@@ -445,6 +448,7 @@ export function Dashboard() {
               {tab === 'admin_all_cards' && isAdmin && <AllCardsAdmin/>}
               {tab === 'admin_force_kyc' && isAdmin && <ForceKycAdmin/>}
               {tab === 'admin_global_cards' && isAdmin && <GlobalCardsAdmin/>}
+              {tab === 'admin_verify_reminders' && isAdmin && <VerifyRemindersAdmin/>}
               {tab === 'admin_fees' && isAdmin && <FeesAdmin/>}
               {tab === 'admin_tx' && isAdmin && <TxAdmin/>}
               {tab === 'admin_wallets' && isAdmin && <PlatformWalletsAdmin/>}

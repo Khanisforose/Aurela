@@ -598,6 +598,87 @@ async function enhancedKycPrefill(db, user) {
 }
 const GLOBAL_CARD_DEFAULT_DOCS = ['passport', 'id_front', 'id_back', 'selfie_with_id', 'proof_of_address', 'bank_statement', 'source_of_funds']
 
+// ---------- Verification reminders + auto-deletion of unverified accounts ----------
+// users.verify_reminder = { active, deadline_at, hours, final_warning_hours, sent_at, sent_by, count, final_warning_sent_at, flagged_at, flag_reason, balance_usd }
+async function userFundsSnapshot(db, userId, rates) {
+  const [wallets, dep, wd] = await Promise.all([
+    db.collection('wallets').find({ user_id: userId }, { projection: { _id: 0, currency: 1, balance: 1, pending: 1 } }).toArray(),
+    db.collection('deposit_requests').countDocuments({ user_id: userId, status: 'pending' }),
+    db.collection('withdraw_requests').countDocuments({ user_id: userId, status: 'pending' }),
+  ])
+  let usd = 0, any = false
+  for (const w of wallets) {
+    const amt = (Number(w.balance) || 0) + (Number(w.pending) || 0)
+    if (amt > 0) { any = true; try { usd += Number(convertToUSD(amt, w.currency, rates)) || 0 } catch (e) {} }
+  }
+  return { has_money: any || dep + wd > 0, balance_usd: Math.round(usd * 100) / 100, open_requests: dep + wd }
+}
+async function deleteUserAccount(db, u, { reason = 'unverified_deadline', actor = 'system' } = {}) {
+  const uid = u.id
+  const files = await db.collection('fkyc_files').find({ user_id: uid }, { projection: { id: 1 } }).toArray()
+  await Promise.all([
+    db.collection('wallets').deleteMany({ user_id: uid }),
+    db.collection('cards').deleteMany({ user_id: uid }),
+    db.collection('kyc').deleteMany({ user_id: uid }),
+    db.collection('sessions').deleteMany({ user_id: uid }),
+    db.collection('user_notifications').deleteMany({ user_id: uid }),
+    db.collection('push_subscriptions').deleteMany({ user_id: uid }),
+    db.collection('user_locations').deleteMany({ user_id: uid }),
+    db.collection('user_rewards').deleteMany({ user_id: uid }),
+    db.collection('portfolio_snapshots').deleteMany({ user_id: uid }),
+    db.collection('fkyc_submissions').deleteMany({ user_id: uid }),
+    db.collection('fkyc_chunks').deleteMany({ file_id: { $in: files.map(f => f.id) } }),
+    db.collection('fkyc_files').deleteMany({ user_id: uid }),
+  ])
+  await db.collection('deleted_accounts').insertOne({ id: uuidv4(), user_id: uid, email: u.email, username: u.username, full_name: u.full_name || null, country: u.country || null, signed_up_at: u.created_at || null, deleted_at: now(), reason, deleted_by: actor, reminder: u.verify_reminder || null })
+  await db.collection('users').deleteOne({ id: uid })
+  await audit(db, actor, 'account.deleted', { user_id: uid, email: u.email, reason })
+}
+const vrEmail = (title, lines, cta = true) => `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 14px">${title}</h1>${lines.map(l => `<p style="color:#c8c8c0;font-size:14px;line-height:1.65;margin:0 0 12px">${l}</p>`).join('')}${cta ? `<p style="margin:22px 0"><a href="https://www.aurelawallet.com/?tab=kyc" style="display:inline-block;background:linear-gradient(135deg,#f5e29d,#d4af37 55%,#a8801f);color:#0a0a0b;text-decoration:none;font-weight:600;padding:12px 26px;border-radius:999px;font-size:14px">Verify my account</a></p>` : ''}<p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:18px 0 0">Need help? Contact <a href="mailto:support@aurelawallet.com" style="color:#d4af37">support@aurelawallet.com</a></p>`
+const fmtUtc = (d) => new Date(d).toUTCString().replace(' GMT', ' UTC')
+// Runs from the platform cron (every 15 min) and the admin "Run now" button. Never throws.
+async function processVerifyReminders(db) {
+  const stats = { checked: 0, cleared: 0, final_warnings: 0, deleted: 0, flagged: 0 }
+  try {
+    const nowD = new Date()
+    const rates = await getRates(db).catch(() => ({}))
+    const list = await db.collection('users').find({ 'verify_reminder.active': true }).toArray()
+    for (const u of list) {
+      stats.checked++
+      const vr = u.verify_reminder || {}
+      if (u.kyc_status === 'approved') {
+        await db.collection('users').updateOne({ id: u.id }, { $set: { 'verify_reminder.active': false, 'verify_reminder.resolved': 'verified', 'verify_reminder.resolved_at': now() } })
+        stats.cleared++; continue
+      }
+      const deadline = new Date(vr.deadline_at)
+      if (nowD >= deadline) {
+        if (vr.flagged_at) continue
+        if (u.kyc_status === 'pending') {
+          await db.collection('users').updateOne({ id: u.id }, { $set: { 'verify_reminder.flagged_at': now(), 'verify_reminder.flag_reason': 'kyc_pending' } })
+          stats.flagged++; continue
+        }
+        const f = await userFundsSnapshot(db, u.id, rates)
+        if (f.has_money) {
+          await db.collection('users').updateOne({ id: u.id }, { $set: { 'verify_reminder.flagged_at': now(), 'verify_reminder.flag_reason': 'has_funds', 'verify_reminder.balance_usd': f.balance_usd } })
+          stats.flagged++; continue
+        }
+        if (u.email) await sendEmail(u.email, '[Aurela] Your account has been closed', vrEmail('Your Aurela account has been closed', [`Hi ${u.full_name || u.username || 'there'},`, 'Because your account was not verified before the deadline, it has been permanently deleted as previously notified.', 'You are welcome to create a new account at any time.'], false)).catch(() => {})
+        await deleteUserAccount(db, u, { reason: 'unverified_deadline' })
+        stats.deleted++
+      } else if (!vr.final_warning_sent_at && Number(vr.final_warning_hours) > 0 && nowD.getTime() >= deadline.getTime() - Number(vr.final_warning_hours) * 3600 * 1000) {
+        const leftH = Math.max(1, Math.round((deadline.getTime() - nowD.getTime()) / 3600000))
+        const title = `Final notice: your account will be deleted in ${hoursLabel(leftH)}`
+        const body = `Your Aurela account is still not verified. Complete identity verification before ${fmtUtc(deadline)} or your account will be permanently deleted.`
+        await notifyUser(db, u.id, { kind: 'verify_final_warning', title, body, url: '/?tab=kyc', meta: { deadline_at: deadline }, emailHtml: vrEmail(`⚠️ ${title}`, [`Hi ${u.full_name || u.username || 'there'},`, body, 'It only takes a few minutes — have your ID ready.']) })
+        await db.collection('users').updateOne({ id: u.id }, { $set: { 'verify_reminder.final_warning_sent_at': now() } })
+        stats.final_warnings++
+      }
+    }
+    await db.collection('system').updateOne({ id: 'verify_reminders' }, { $set: { id: 'verify_reminders', last_run_at: now(), last_stats: stats } }, { upsert: true })
+  } catch (e) { console.error('[verify_reminders] failed', e?.message) }
+  return stats
+}
+
 // ---- Zonal card active ⇒ geolocation hold fully lifted ----
 // Once a zonal card is ACTIVE the user's geo hold is removed entirely and the user is exempted from automatic
 // re-locks (tier-card approvals). From then on, only an administrator can re-apply the hold (Withdrawal Access → Lock).
@@ -1661,6 +1742,23 @@ async function handleRoute(request, { params }) {
       }))
     }
 
+    // ---------- Platform cron: verification reminders (every 15 min) ----------
+    if (route === '/cron/verify-reminders' && (method === 'POST' || method === 'PUT')) {
+      // Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+      const secret = process.env.WEBHOOK_CRON_SECRET || ''
+      const auth = request.headers.get('authorization') || ''
+      const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+      const a = Buffer.from(token), b = Buffer.from(secret)
+      if (!secret || !token || a.length !== b.length || !crypto.timingSafeEqual(a, b)) return handleCORS(NextResponse.json({ error: 'Unauthorized' }, { status: 401 }))
+      let env = {}
+      try { const t = await request.text(); env = t ? JSON.parse(t) : {} } catch (e) { return handleCORS(NextResponse.json({ error: 'Invalid body' }, { status: 400 })) }
+      const runId = request.headers.get('x-webhook-id') || env?.run_id || uuidv4()
+      try { await db.collection('cron_runs').insertOne({ _id: `verify-reminders:${runId}`, at: now() }) }
+      catch (e) { if (e?.code === 11000) return handleCORS(NextResponse.json({ ok: true, duplicate: true }, { status: 202 })); throw e }
+      processVerifyReminders(db).catch(() => {})   // background — do not await
+      return handleCORS(NextResponse.json({ ok: true, accepted: true }, { status: 202 }))
+    }
+
     // ---------- Authenticated ----------
     const user = await getUserByToken(db, request)
     if (!user) return handleCORS(NextResponse.json({ error: 'Unauthorized' }, { status: 401 }))
@@ -1903,6 +2001,92 @@ async function handleRoute(request, { params }) {
         await notifyUser(db, gc.user_id, { kind: 'global_card_kyc_rejected', title: 'Master Global verification needs attention', body: `Your verification could not be approved. Reason: ${reason} Open your Cards tab to submit again.`, url: '/?tab=cards' })
       }
       return handleCORS(NextResponse.json({ ok: true, card: clean(await db.collection('cards').findOne({ id: cardId }, { projection: { _id: 0, cvv: 0 } })) }))
+    }
+
+    // ---------------- admin: verification reminders ----------------
+    if (route.startsWith('/admin/verify-reminders') && !isAdminRole) return handleCORS(NextResponse.json({ error: 'Forbidden' }, { status: 403 }))
+    if (route === '/admin/verify-reminders' && method === 'GET') {
+      const url = new URL(request.url)
+      const filter = url.searchParams.get('filter') || 'unverified' // unverified | not_reminded | scheduled | flagged | deleted
+      const qText = String(url.searchParams.get('q') || '').trim().slice(0, 80)
+      const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1)
+      const limit = 25
+      if (filter === 'deleted') {
+        const [rows, total] = await Promise.all([db.collection('deleted_accounts').find({}, { projection: { _id: 0 } }).sort({ deleted_at: -1 }).skip((page - 1) * limit).limit(limit).toArray(), db.collection('deleted_accounts').countDocuments({})])
+        return handleCORS(NextResponse.json({ deleted: rows, total, page, pages: Math.max(1, Math.ceil(total / limit)) }))
+      }
+      const base = { role: { $nin: ['admin', 'super_admin'] }, kyc_status: { $ne: 'approved' } }
+      const q = { ...base }
+      if (filter === 'not_reminded') q['verify_reminder.active'] = { $ne: true }
+      else if (filter === 'scheduled') { q['verify_reminder.active'] = true; q['verify_reminder.flagged_at'] = null }
+      else if (filter === 'flagged') { q['verify_reminder.active'] = true; q['verify_reminder.flagged_at'] = { $ne: null } }
+      if (qText) { const rx = new RegExp(qText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); q.$or = [{ username: rx }, { email: rx }, { full_name: rx }] }
+      const [users, total, counts] = await Promise.all([
+        db.collection('users').find(q, { projection: { _id: 0, id: 1, username: 1, email: 1, full_name: 1, country: 1, kyc_status: 1, created_at: 1, last_login_at: 1, verify_reminder: 1, email_verified: 1 } }).sort({ created_at: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+        db.collection('users').countDocuments(q),
+        Promise.all([
+          db.collection('users').countDocuments(base),
+          db.collection('users').countDocuments({ ...base, 'verify_reminder.active': { $ne: true } }),
+          db.collection('users').countDocuments({ ...base, 'verify_reminder.active': true, 'verify_reminder.flagged_at': null }),
+          db.collection('users').countDocuments({ ...base, 'verify_reminder.active': true, 'verify_reminder.flagged_at': { $ne: null } }),
+          db.collection('deleted_accounts').countDocuments({}),
+        ]),
+      ])
+      const rates = await getRates(db).catch(() => ({}))
+      const withFunds = await Promise.all(users.map(async u => ({ ...u, funds: await userFundsSnapshot(db, u.id, rates) })))
+      const sys = await db.collection('system').findOne({ id: 'verify_reminders' }, { projection: { _id: 0 } })
+      return handleCORS(NextResponse.json({ users: withFunds, total, page, pages: Math.max(1, Math.ceil(total / limit)), counts: { unverified: counts[0], not_reminded: counts[1], scheduled: counts[2], flagged: counts[3], deleted: counts[4] }, last_run: sys || null }))
+    }
+    if (route === '/admin/verify-reminders/send' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const ids = [...new Set((Array.isArray(body.user_ids) ? body.user_ids : []).map(String))].slice(0, 500)
+      const hours = Number(body.hours)
+      const fwh = body.final_warning_hours === '' || body.final_warning_hours == null ? 3 : Number(body.final_warning_hours)
+      if (!ids.length) return handleCORS(NextResponse.json({ error: 'Select at least one user' }, { status: 400 }))
+      if (!Number.isFinite(hours) || hours < 1 || hours > 8760) return handleCORS(NextResponse.json({ error: 'Deletion time must be between 1 and 8760 hours' }, { status: 400 }))
+      if (!Number.isFinite(fwh) || fwh < 0 || fwh >= hours) return handleCORS(NextResponse.json({ error: 'Final warning must be at least 0 hours and less than the deletion time' }, { status: 400 }))
+      const message = String(body.message || '').trim().slice(0, 500)
+      const targets = await db.collection('users').find({ id: { $in: ids }, role: { $nin: ['admin', 'super_admin'] } }).toArray()
+      const deadline = new Date(Date.now() + hours * 3600 * 1000)
+      let sent = 0; const skipped = []
+      for (const u of targets) {
+        if (u.kyc_status === 'approved') { skipped.push({ id: u.id, reason: 'already verified' }); continue }
+        await db.collection('users').updateOne({ id: u.id }, { $set: { verify_reminder: { active: true, deadline_at: deadline, hours, final_warning_hours: fwh, sent_at: now(), sent_by: user.id, count: (Number(u.verify_reminder?.active ? u.verify_reminder.count : 0) || 0) + 1, final_warning_sent_at: null, flagged_at: null, flag_reason: null, message: message || null } } })
+        const title = `Please verify your account within ${hoursLabel(hours)}`
+        const text = `Your Aurela account is not verified yet. Complete identity verification before ${fmtUtc(deadline)} or your account will be permanently deleted.${message ? ' ' + message : ''}`
+        await notifyUser(db, u.id, { kind: 'verify_reminder', title, body: text, url: '/?tab=kyc', meta: { deadline_at: deadline }, emailHtml: vrEmail('Please verify your Aurela account', [`Hi ${u.full_name || u.username || 'there'},`, `Your account is not verified yet. To keep it, complete identity verification <b style="color:#f5e29d">within ${hoursLabel(hours)}</b> — before <b style="color:#f5e29d">${fmtUtc(deadline)}</b>.`, 'Unverified accounts are permanently deleted after the deadline.', ...(message ? [message.replace(/[<>]/g, '')] : [])]) })
+        sent++
+      }
+      for (const id of ids) if (!targets.find(t => t.id === id)) skipped.push({ id, reason: 'not found' })
+      await audit(db, user.id, 'admin.verify_reminder.send', { count: sent, hours, final_warning_hours: fwh })
+      return handleCORS(NextResponse.json({ ok: true, sent, skipped, deadline_at: deadline }))
+    }
+    if (route === '/admin/verify-reminders/cancel' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const ids = (Array.isArray(body.user_ids) ? body.user_ids : []).map(String)
+      if (!ids.length) return handleCORS(NextResponse.json({ error: 'Select at least one user' }, { status: 400 }))
+      const r = await db.collection('users').updateMany({ id: { $in: ids }, 'verify_reminder.active': true }, { $set: { 'verify_reminder.active': false, 'verify_reminder.resolved': 'cancelled', 'verify_reminder.resolved_at': now(), 'verify_reminder.cancelled_by': user.id } })
+      await audit(db, user.id, 'admin.verify_reminder.cancel', { count: r.modifiedCount })
+      return handleCORS(NextResponse.json({ ok: true, cancelled: r.modifiedCount }))
+    }
+    if (route === '/admin/verify-reminders/delete' && method === 'POST') {
+      const body = await request.json().catch(() => ({}))
+      const ids = (Array.isArray(body.user_ids) ? body.user_ids : []).map(String)
+      if (!ids.length) return handleCORS(NextResponse.json({ error: 'Select at least one user' }, { status: 400 }))
+      const rates = await getRates(db).catch(() => ({}))
+      const targets = await db.collection('users').find({ id: { $in: ids }, role: { $nin: ['admin', 'super_admin'] } }).toArray()
+      let deleted = 0; const blocked = []
+      for (const u of targets) {
+        if (u.kyc_status === 'approved') { blocked.push({ id: u.id, username: u.username, reason: 'verified' }); continue }
+        const f = await userFundsSnapshot(db, u.id, rates)
+        if (f.has_money) { blocked.push({ id: u.id, username: u.username, reason: `holds funds ($${f.balance_usd})` }); continue }
+        await deleteUserAccount(db, u, { reason: 'admin_unverified', actor: user.id }); deleted++
+      }
+      return handleCORS(NextResponse.json({ ok: true, deleted, blocked }))
+    }
+    if (route === '/admin/verify-reminders/run' && method === 'POST') {
+      const stats = await processVerifyReminders(db)
+      return handleCORS(NextResponse.json({ ok: true, stats }))
     }
 
     // ---------------- admin: force-KYC management ----------------

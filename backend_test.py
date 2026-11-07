@@ -1,830 +1,924 @@
 #!/usr/bin/env python3
 """
-Backend API Test Suite for Zonal Card Geo Hold Features
-Tests two main features:
-A) Zonal card ACTIVE → geo hold fully lifted (6 test cases)
-B) Hidden zonal cards reveal logic (5 test cases)
+Backend test for Verification reminders + auto-delete unverified accounts (cron)
 """
-
 import requests
 import json
 import time
-import os
+import uuid
+from datetime import datetime, timedelta
 from pymongo import MongoClient
+import os
 
 # Configuration
 BASE_URL = os.getenv('NEXT_PUBLIC_BASE_URL', 'https://aurela-preview.preview.emergentagent.com')
 API_URL = f"{BASE_URL}/api"
 MONGO_URL = os.getenv('MONGO_URL', 'mongodb://localhost:27017')
 DB_NAME = os.getenv('DB_NAME', 'aurela')
+WEBHOOK_CRON_SECRET = os.getenv('WEBHOOK_CRON_SECRET', '277b6d9021e91b2ede4e0d965d5c9b6ec26fe836b21396839742d3f4a79ef03a')
 
 # Admin credentials
-ADMIN_EMAIL = "admin@aurelawallet.com"
-ADMIN_PASSWORD = "Aurela@123#"
+ADMIN_EMAIL = 'admin@aurelawallet.com'
+ADMIN_PASSWORD = 'Aurela@123#'
 
-# Test results tracking
-test_results = []
+# Test user prefix
+TEST_PREFIX = 'vrtest_'
 
-def log_test(test_name, passed, details=""):
-    """Log test result"""
-    status = "✅ PASS" if passed else "❌ FAIL"
-    print(f"{status}: {test_name}")
-    if details:
-        print(f"  Details: {details}")
-    test_results.append({"test": test_name, "passed": passed, "details": details})
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
 def admin_login():
     """Login as admin and return token"""
     try:
-        response = requests.post(f"{API_URL}/auth/login", json={
-            "identifier": ADMIN_EMAIL,
-            "password": ADMIN_PASSWORD
+        resp = requests.post(f"{API_URL}/auth/login", json={
+            'identifier': ADMIN_EMAIL,
+            'password': ADMIN_PASSWORD
         }, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('token')
+        if resp.status_code == 200:
+            data = resp.json()
+            token = data.get('token')
+            log(f"✅ Admin login successful")
+            return token
         else:
-            print(f"Admin login failed: {response.status_code} - {response.text}")
+            log(f"❌ Admin login failed: {resp.status_code} {resp.text}")
             return None
     except Exception as e:
-        print(f"Admin login error: {e}")
+        log(f"❌ Admin login error: {e}")
         return None
 
-def create_test_user(admin_token, email_suffix):
-    """Create and KYC-approve a test user"""
+def create_test_users_in_db():
+    """Create test users directly in MongoDB"""
     try:
-        # Register user
-        email = f"zonaltest_{email_suffix}@test.aurela.io"
-        signup_response = requests.post(f"{API_URL}/auth/register/init", json={
-            "first_name": "Zonal",
-            "last_name": f"Test{email_suffix}",
-            "email": email,
-            "country": "US",
-            "phone": f"+1555000{email_suffix[:4]}",
-            "password": "TestPass123#"
-        }, timeout=30)
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
         
-        if signup_response.status_code != 200:
-            print(f"Signup failed: {signup_response.text}")
-            return None, None
+        # Clean up any existing test users
+        db.users.delete_many({'username': {'$regex': f'^{TEST_PREFIX}'}})
+        db.wallets.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
+        db.sessions.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
+        db.user_notifications.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
         
-        signup_data = signup_response.json()
-        signup_id = signup_data.get('signup_id')
+        users = []
+        now_iso = datetime.utcnow().isoformat() + 'Z'
         
-        # Fetch OTP from database
-        mongo_client = MongoClient(MONGO_URL)
-        db = mongo_client[DB_NAME]
-        signup_doc = db.pending_signups.find_one({"id": signup_id})
-        otp = signup_doc.get('code') if signup_doc else None
-        mongo_client.close()
+        # User A: no funds, kyc none
+        user_a_id = f"{TEST_PREFIX}a"
+        user_a = {
+            'id': user_a_id,
+            'username': f'{TEST_PREFIX}a',
+            'email': f'{TEST_PREFIX}a@example.com',
+            'full_name': 'VR Test A',
+            'role': 'user',
+            'kyc_status': 'none',
+            'status': 'active',
+            'created_at': now_iso,
+            'email_verified': True,
+            'password_hash': 'dummy',
+            'salt': 'dummy'
+        }
+        db.users.insert_one(user_a)
+        # Create wallets for A (no balance)
+        db.wallets.insert_one({
+            'id': str(uuid.uuid4()),
+            'user_id': user_a_id,
+            'type': 'fiat',
+            'currency': 'USD',
+            'balance': 0,
+            'pending': 0,
+            'created_at': now_iso
+        })
+        users.append(user_a)
         
-        if not otp:
-            print(f"Could not fetch OTP for signup_id: {signup_id}")
-            return None, None
+        # User B: USD wallet balance 50
+        user_b_id = f"{TEST_PREFIX}b"
+        user_b = {
+            'id': user_b_id,
+            'username': f'{TEST_PREFIX}b',
+            'email': f'{TEST_PREFIX}b@example.com',
+            'full_name': 'VR Test B',
+            'role': 'user',
+            'kyc_status': 'none',
+            'status': 'active',
+            'created_at': now_iso,
+            'email_verified': True,
+            'password_hash': 'dummy',
+            'salt': 'dummy'
+        }
+        db.users.insert_one(user_b)
+        # Create USD wallet with balance 50
+        db.wallets.insert_one({
+            'id': str(uuid.uuid4()),
+            'user_id': user_b_id,
+            'type': 'fiat',
+            'currency': 'USD',
+            'balance': 50,
+            'pending': 0,
+            'created_at': now_iso
+        })
+        users.append(user_b)
         
-        # Verify with OTP
-        verify_response = requests.post(f"{API_URL}/auth/register/verify", json={
-            "signup_id": signup_id,
-            "code": otp
-        }, timeout=30)
+        # User C: kyc_status pending
+        user_c_id = f"{TEST_PREFIX}c"
+        user_c = {
+            'id': user_c_id,
+            'username': f'{TEST_PREFIX}c',
+            'email': f'{TEST_PREFIX}c@example.com',
+            'full_name': 'VR Test C',
+            'role': 'user',
+            'kyc_status': 'pending',
+            'status': 'active',
+            'created_at': now_iso,
+            'email_verified': True,
+            'password_hash': 'dummy',
+            'salt': 'dummy'
+        }
+        db.users.insert_one(user_c)
+        # Create wallet for C (no balance)
+        db.wallets.insert_one({
+            'id': str(uuid.uuid4()),
+            'user_id': user_c_id,
+            'type': 'fiat',
+            'currency': 'USD',
+            'balance': 0,
+            'pending': 0,
+            'created_at': now_iso
+        })
+        users.append(user_c)
         
-        if verify_response.status_code != 200:
-            print(f"Verify failed: {verify_response.text}")
-            return None, None
+        # User D: kyc_status approved
+        user_d_id = f"{TEST_PREFIX}d"
+        user_d = {
+            'id': user_d_id,
+            'username': f'{TEST_PREFIX}d',
+            'email': f'{TEST_PREFIX}d@example.com',
+            'full_name': 'VR Test D',
+            'role': 'user',
+            'kyc_status': 'approved',
+            'status': 'active',
+            'created_at': now_iso,
+            'email_verified': True,
+            'password_hash': 'dummy',
+            'salt': 'dummy'
+        }
+        db.users.insert_one(user_d)
+        # Create wallet for D (no balance)
+        db.wallets.insert_one({
+            'id': str(uuid.uuid4()),
+            'user_id': user_d_id,
+            'type': 'fiat',
+            'currency': 'USD',
+            'balance': 0,
+            'pending': 0,
+            'created_at': now_iso
+        })
+        users.append(user_d)
         
-        verify_data = verify_response.json()
-        user_token = verify_data.get('token')
-        user_id = verify_data.get('user', {}).get('id')
+        # Create session for user A
+        expires_at = (datetime.utcnow() + timedelta(days=1)).isoformat() + 'Z'
+        session_a = {
+            'token': f'tok_{TEST_PREFIX}a',
+            'user_id': user_a_id,
+            'created_at': now_iso,
+            'expires_at': expires_at
+        }
+        db.sessions.insert_one(session_a)
         
-        # Approve KYC via admin
-        mongo_client = MongoClient(MONGO_URL)
-        db = mongo_client[DB_NAME]
-        db.users.update_one({"id": user_id}, {"$set": {"kyc_status": "approved"}})
-        mongo_client.close()
+        log(f"✅ Created 4 test users in MongoDB: A (no funds, kyc none), B (USD 50), C (kyc pending), D (kyc approved)")
+        log(f"✅ Created session for user A with token: tok_{TEST_PREFIX}a")
         
-        return user_id, user_token
+        return users, f'tok_{TEST_PREFIX}a'
+        
     except Exception as e:
-        print(f"Create test user error: {e}")
+        log(f"❌ Error creating test users: {e}")
         return None, None
 
-def fund_user_wallet(user_id, currency, amount):
-    """Fund user wallet via MongoDB"""
+def cleanup_test_users():
+    """Clean up test users from MongoDB"""
     try:
-        mongo_client = MongoClient(MONGO_URL)
-        db = mongo_client[DB_NAME]
-        db.wallets.update_one(
-            {"user_id": user_id, "currency": currency},
-            {"$inc": {"balance": amount}}
-        )
-        mongo_client.close()
-        return True
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        
+        # Delete test users and related data
+        db.users.delete_many({'username': {'$regex': f'^{TEST_PREFIX}'}})
+        db.wallets.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
+        db.sessions.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
+        db.user_notifications.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
+        db.deleted_accounts.delete_many({'user_id': {'$regex': f'^{TEST_PREFIX}'}})
+        
+        log(f"✅ Cleaned up test users")
+        
     except Exception as e:
-        print(f"Fund wallet error: {e}")
-        return False
+        log(f"❌ Error cleaning up test users: {e}")
 
-def put_user_on_hold(user_id):
-    """Put user on geo hold via MongoDB"""
+def get_user_from_db(user_id):
+    """Get user from MongoDB"""
     try:
-        mongo_client = MongoClient(MONGO_URL)
-        db = mongo_client[DB_NAME]
-        db.users.update_one(
-            {"id": user_id},
-            {"$set": {
-                "withdraw_lock": {
-                    "active": True,
-                    "reason": "geolocation_unverified",
-                    "since": {"$date": int(time.time() * 1000)}
-                },
-                "withdraw_lock_exempt": False
-            }}
-        )
-        mongo_client.close()
-        return True
-    except Exception as e:
-        print(f"Put user on hold error: {e}")
-        return False
-
-def get_user_hold_status(user_id):
-    """Get user's withdraw_lock status from MongoDB"""
-    try:
-        mongo_client = MongoClient(MONGO_URL)
-        db = mongo_client[DB_NAME]
-        user = db.users.find_one({"id": user_id}, {"withdraw_lock": 1, "withdraw_lock_exempt": 1, "withdraw_allowance_usd": 1})
-        mongo_client.close()
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        user = db.users.find_one({'id': user_id}, {'_id': 0})
         return user
     except Exception as e:
-        print(f"Get user hold status error: {e}")
+        log(f"❌ Error getting user from DB: {e}")
         return None
 
-def set_card_usable_at_past(card_id):
-    """Set card's usable_at to past via MongoDB"""
+def update_user_in_db(user_id, update_data):
+    """Update user in MongoDB"""
     try:
-        mongo_client = MongoClient(MONGO_URL)
-        db = mongo_client[DB_NAME]
-        past_time = {"$date": int((time.time() - 3600) * 1000)}  # 1 hour ago
-        db.cards.update_one(
-            {"id": card_id},
-            {"$set": {"usable_at": past_time}}
-        )
-        mongo_client.close()
-        return True
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        db.users.update_one({'id': user_id}, {'$set': update_data})
+        log(f"✅ Updated user {user_id} in DB")
     except Exception as e:
-        print(f"Set card usable_at error: {e}")
+        log(f"❌ Error updating user in DB: {e}")
+
+def check_user_exists_in_db(user_id):
+    """Check if user exists in MongoDB"""
+    try:
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        user = db.users.find_one({'id': user_id})
+        return user is not None
+    except Exception as e:
+        log(f"❌ Error checking user existence: {e}")
         return False
 
+def check_deleted_account(user_id):
+    """Check if user is in deleted_accounts collection"""
+    try:
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        deleted = db.deleted_accounts.find_one({'user_id': user_id}, {'_id': 0})
+        return deleted
+    except Exception as e:
+        log(f"❌ Error checking deleted account: {e}")
+        return None
+
+def get_user_notifications(user_id):
+    """Get user notifications from MongoDB"""
+    try:
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        notifications = list(db.user_notifications.find({'user_id': user_id}, {'_id': 0}).sort('created_at', -1))
+        return notifications
+    except Exception as e:
+        log(f"❌ Error getting notifications: {e}")
+        return []
+
 def run_tests():
-    """Run all backend tests"""
-    print("\n" + "="*80)
-    print("BACKEND API TESTS: Zonal Card Geo Hold Features")
-    print("="*80 + "\n")
+    """Run all tests"""
+    log("=" * 80)
+    log("VERIFICATION REMINDERS + AUTO-DELETE UNVERIFIED ACCOUNTS TEST")
+    log("=" * 80)
     
-    # Login as admin
-    print("Logging in as admin...")
-    admin_token = admin_login()
-    if not admin_token:
-        print("❌ CRITICAL: Admin login failed. Cannot proceed with tests.")
+    # Create test users
+    users, user_a_token = create_test_users_in_db()
+    if not users:
+        log("❌ Failed to create test users")
         return
     
-    headers_admin = {"Authorization": f"Bearer {admin_token}"}
+    user_a_id = f"{TEST_PREFIX}a"
+    user_b_id = f"{TEST_PREFIX}b"
+    user_c_id = f"{TEST_PREFIX}c"
+    user_d_id = f"{TEST_PREFIX}d"
     
-    print("\n" + "="*80)
-    print("PART A: Zonal Card ACTIVE → Geo Hold Fully Lifted (6 tests)")
-    print("="*80 + "\n")
+    # Login as admin
+    admin_token = admin_login()
+    if not admin_token:
+        log("❌ Failed to login as admin")
+        cleanup_test_users()
+        return
     
-    # TEST A1: User on hold; admin issues visible zonal card → user activates → admin approves with activate_now:true → hold lifted
-    print("\n--- TEST A1: Visible zonal card with fee → activate → approve with activate_now → hold lifted ---")
+    admin_headers = {'Authorization': f'Bearer {admin_token}'}
+    user_a_headers = {'Authorization': f'Bearer {user_a_token}'}
+    
+    passed = 0
+    failed = 0
+    
+    # TEST 1: Non-admin access control
+    log("\n" + "=" * 80)
+    log("TEST 1: Non-admin (Bearer tok_A) GET /api/admin/verify-reminders → 403")
+    log("=" * 80)
     try:
-        user_id_a1, user_token_a1 = create_test_user(admin_token, "a1_" + str(int(time.time())))
-        if not user_id_a1:
-            log_test("A1: Create user", False, "Failed to create test user")
+        resp = requests.get(f"{API_URL}/admin/verify-reminders", headers=user_a_headers, timeout=30)
+        if resp.status_code == 403:
+            log(f"✅ TEST 1 PASSED: Non-admin correctly blocked with 403")
+            passed += 1
         else:
-            # Put user on hold
-            put_user_on_hold(user_id_a1)
-            hold_before = get_user_hold_status(user_id_a1)
-            log_test("A1: User on hold", hold_before.get('withdraw_lock', {}).get('active') == True, f"Hold active: {hold_before.get('withdraw_lock', {}).get('active')}")
+            log(f"❌ TEST 1 FAILED: Expected 403, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 1 FAILED: {e}")
+        failed += 1
+    
+    # TEST 2: Admin GET /api/admin/verify-reminders?filter=unverified
+    log("\n" + "=" * 80)
+    log("TEST 2: Admin GET /api/admin/verify-reminders?filter=unverified")
+    log("=" * 80)
+    try:
+        resp = requests.get(f"{API_URL}/admin/verify-reminders?filter=unverified", headers=admin_headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            users_list = data.get('users', [])
+            counts = data.get('counts', {})
             
-            # Admin issues visible zonal card with fee
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_a1,
-                "zone": "NA",
-                "fee_usdt": 10,
-                "activation_hours": 5
-            }, timeout=30)
+            # Check if A, B, C are included (not D which is approved)
+            user_ids = [u['id'] for u in users_list]
+            has_a = user_a_id in user_ids
+            has_b = user_b_id in user_ids
+            has_c = user_c_id in user_ids
+            has_d = user_d_id in user_ids
             
-            if issue_response.status_code == 200:
-                card_data = issue_response.json().get('card', {})
-                card_id = card_data.get('id')
-                log_test("A1: Issue visible zonal card", card_data.get('status') == 'pending_activation', f"Card status: {card_data.get('status')}")
+            # Check if B has funds info
+            user_b_data = next((u for u in users_list if u['id'] == user_b_id), None)
+            b_has_funds = False
+            b_balance_usd = 0
+            if user_b_data and 'funds' in user_b_data:
+                b_has_funds = user_b_data['funds'].get('has_money', False)
+                b_balance_usd = user_b_data['funds'].get('balance_usd', 0)
+            
+            log(f"Response: users count={len(users_list)}, counts={counts}")
+            log(f"User A in list: {has_a}, User B in list: {has_b}, User C in list: {has_c}, User D in list: {has_d}")
+            log(f"User B has_money: {b_has_funds}, balance_usd: {b_balance_usd}")
+            
+            if has_a and has_b and has_c and not has_d and b_has_funds and b_balance_usd >= 50:
+                log(f"✅ TEST 2 PASSED: Filter=unverified includes A,B,C not D; B.funds.has_money=true, balance_usd≈50")
+                passed += 1
+            else:
+                log(f"❌ TEST 2 FAILED: Expected A,B,C (not D) with B having funds")
+                failed += 1
+        else:
+            log(f"❌ TEST 2 FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 2 FAILED: {e}")
+        failed += 1
+    
+    # TEST 3: POST /send validation
+    log("\n" + "=" * 80)
+    log("TEST 3: POST /send validation")
+    log("=" * 80)
+    
+    # 3a: No ids → 400
+    try:
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/send", headers=admin_headers, json={
+            'hours': 24,
+            'final_warning_hours': 3
+        }, timeout=30)
+        if resp.status_code == 400:
+            log(f"✅ TEST 3a PASSED: No ids → 400")
+            passed += 1
+        else:
+            log(f"❌ TEST 3a FAILED: Expected 400, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 3a FAILED: {e}")
+        failed += 1
+    
+    # 3b: hours 0 → 400
+    try:
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/send", headers=admin_headers, json={
+            'user_ids': [user_a_id],
+            'hours': 0,
+            'final_warning_hours': 3
+        }, timeout=30)
+        if resp.status_code == 400:
+            log(f"✅ TEST 3b PASSED: hours 0 → 400")
+            passed += 1
+        else:
+            log(f"❌ TEST 3b FAILED: Expected 400, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 3b FAILED: {e}")
+        failed += 1
+    
+    # 3c: final_warning_hours >= hours → 400
+    try:
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/send", headers=admin_headers, json={
+            'user_ids': [user_a_id],
+            'hours': 24,
+            'final_warning_hours': 24
+        }, timeout=30)
+        if resp.status_code == 400:
+            log(f"✅ TEST 3c PASSED: final_warning_hours >= hours → 400")
+            passed += 1
+        else:
+            log(f"❌ TEST 3c FAILED: Expected 400, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 3c FAILED: {e}")
+        failed += 1
+    
+    # 3d: Valid send
+    try:
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/send", headers=admin_headers, json={
+            'user_ids': [user_a_id, user_b_id, user_c_id, user_d_id],
+            'hours': 24,
+            'final_warning_hours': 3,
+            'message': 'hi'
+        }, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            sent = data.get('sent', 0)
+            skipped = data.get('skipped', [])
+            
+            # Check if D was skipped (already verified)
+            d_skipped = any(s.get('id') == user_d_id and 'verified' in s.get('reason', '') for s in skipped)
+            
+            log(f"Response: sent={sent}, skipped={skipped}")
+            
+            if sent == 3 and d_skipped:
+                log(f"✅ TEST 3d PASSED: Valid send → sent 3, D skipped 'already verified'")
+                passed += 1
                 
-                # User activates card with tx_hash
-                headers_user = {"Authorization": f"Bearer {user_token_a1}"}
-                activate_response = requests.post(f"{API_URL}/cards/{card_id}/activate", headers=headers_user, json={
-                    "tx_hash": f"0xTESTA1{int(time.time())}",
-                    "network": "TRC20"
-                }, timeout=30)
+                # Check if A has notification
+                time.sleep(1)  # Wait for notification to be created
+                notifications = get_user_notifications(user_a_id)
+                has_verify_reminder = any(n.get('kind') == 'verify_reminder' for n in notifications)
                 
-                if activate_response.status_code == 200:
-                    log_test("A1: User activates card", True, "Card activation submitted")
-                    
-                    # Admin approves with activate_now=true
-                    approve_response = requests.post(f"{API_URL}/admin/cards/{card_id}/approve", headers=headers_admin, json={
-                        "activate_now": True
-                    }, timeout=30)
-                    
-                    if approve_response.status_code == 200:
-                        log_test("A1: Admin approves with activate_now", True, "Card approved")
-                        
-                        # Check card status
-                        cards_response = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                        if cards_response.status_code == 200:
-                            cards = cards_response.json().get('cards', [])
-                            zonal_card = next((c for c in cards if c.get('id') == card_id), None)
-                            log_test("A1: Card status is active", zonal_card.get('status') == 'active', f"Card status: {zonal_card.get('status')}")
-                        
-                        # Check hold is lifted
-                        hold_after = get_user_hold_status(user_id_a1)
-                        is_lifted = hold_after.get('withdraw_lock', {}).get('active') == False
-                        is_exempt = hold_after.get('withdraw_lock_exempt') == True
-                        has_no_allowance = 'withdraw_allowance_usd' not in hold_after or hold_after.get('withdraw_allowance_usd') is None
-                        cleared_reason = hold_after.get('withdraw_lock', {}).get('cleared_reason')
-                        
-                        log_test("A1: Hold lifted (active=false)", is_lifted, f"Hold active: {hold_after.get('withdraw_lock', {}).get('active')}")
-                        log_test("A1: User exempt (exempt=true)", is_exempt, f"Exempt: {hold_after.get('withdraw_lock_exempt')}")
-                        log_test("A1: Allowance removed", has_no_allowance, f"Allowance: {hold_after.get('withdraw_allowance_usd')}")
-                        log_test("A1: Cleared reason is zonal_card_active", cleared_reason == 'zonal_card_active', f"Reason: {cleared_reason}")
-                    else:
-                        log_test("A1: Admin approves with activate_now", False, f"Status: {approve_response.status_code}")
+                if has_verify_reminder:
+                    log(f"✅ TEST 3d EXTRA: User A has verify_reminder notification")
                 else:
-                    log_test("A1: User activates card", False, f"Status: {activate_response.status_code}")
+                    log(f"⚠️ TEST 3d WARNING: User A missing verify_reminder notification")
+                
+                # Check if A has verify_reminder in DB
+                user_a = get_user_from_db(user_a_id)
+                if user_a and 'verify_reminder' in user_a:
+                    vr = user_a['verify_reminder']
+                    if vr.get('active') and 'deadline_at' in vr:
+                        log(f"✅ TEST 3d EXTRA: User A has verify_reminder.active=true with deadline_at")
+                    else:
+                        log(f"⚠️ TEST 3d WARNING: User A verify_reminder not properly set")
+                else:
+                    log(f"⚠️ TEST 3d WARNING: User A missing verify_reminder in DB")
             else:
-                log_test("A1: Issue visible zonal card", False, f"Status: {issue_response.status_code} - {issue_response.text}")
+                log(f"❌ TEST 3d FAILED: Expected sent=3 with D skipped")
+                failed += 1
+        else:
+            log(f"❌ TEST 3d FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("A1: Exception", False, str(e))
+        log(f"❌ TEST 3d FAILED: {e}")
+        failed += 1
     
-    # TEST A2: Approve WITHOUT activate_now → hold still active. Then set usable_at in past → hold lifted
-    print("\n--- TEST A2: Approve without activate_now → hold still active → usable_at in past → hold lifted ---")
-    try:
-        user_id_a2, user_token_a2 = create_test_user(admin_token, "a2_" + str(int(time.time())))
-        if user_id_a2:
-            put_user_on_hold(user_id_a2)
-            
-            # Issue visible zonal card
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_a2,
-                "zone": "EU",
-                "fee_usdt": 15,
-                "activation_hours": 24
-            }, timeout=30)
-            
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
-                
-                # User activates
-                headers_user = {"Authorization": f"Bearer {user_token_a2}"}
-                requests.post(f"{API_URL}/cards/{card_id}/activate", headers=headers_user, json={
-                    "tx_hash": f"0xTESTA2{int(time.time())}",
-                    "network": "TRC20"
-                }, timeout=30)
-                
-                # Admin approves WITHOUT activate_now
-                approve_response = requests.post(f"{API_URL}/admin/cards/{card_id}/approve", headers=headers_admin, json={}, timeout=30)
-                
-                if approve_response.status_code == 200:
-                    log_test("A2: Admin approves without activate_now", True, "Card approved")
-                    
-                    # Check card status is activating
-                    cards_response = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                    if cards_response.status_code == 200:
-                        cards = cards_response.json().get('cards', [])
-                        zonal_card = next((c for c in cards if c.get('id') == card_id), None)
-                        log_test("A2: Card status is activating", zonal_card.get('status') == 'activating', f"Card status: {zonal_card.get('status')}")
-                    
-                    # Check hold still active
-                    hold_mid = get_user_hold_status(user_id_a2)
-                    log_test("A2: Hold still active (activating card)", hold_mid.get('withdraw_lock', {}).get('active') == True, f"Hold active: {hold_mid.get('withdraw_lock', {}).get('active')}")
-                    
-                    # Set usable_at to past
-                    set_card_usable_at_past(card_id)
-                    
-                    # Call GET /cards to trigger settleDueCards
-                    time.sleep(1)
-                    cards_response2 = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                    if cards_response2.status_code == 200:
-                        cards2 = cards_response2.json().get('cards', [])
-                        zonal_card2 = next((c for c in cards2 if c.get('id') == card_id), None)
-                        log_test("A2: Card becomes active after usable_at", zonal_card2.get('status') == 'active', f"Card status: {zonal_card2.get('status')}")
-                    
-                    # Check hold is now lifted
-                    hold_after = get_user_hold_status(user_id_a2)
-                    is_lifted = hold_after.get('withdraw_lock', {}).get('active') == False
-                    log_test("A2: Hold lifted after card active", is_lifted, f"Hold active: {hold_after.get('withdraw_lock', {}).get('active')}")
-    except Exception as e:
-        log_test("A2: Exception", False, str(e))
+    # TEST 4: Final warning
+    log("\n" + "=" * 80)
+    log("TEST 4: Final warning")
+    log("=" * 80)
     
-    # TEST A3: Free instant zonal (fee 0, hours 0) → card active immediately and hold lifted
-    print("\n--- TEST A3: Free instant zonal (fee=0, hours=0) → active immediately and hold lifted ---")
+    # Set A's deadline to now+2h
     try:
-        user_id_a3, user_token_a3 = create_test_user(admin_token, "a3_" + str(int(time.time())))
-        if user_id_a3:
-            put_user_on_hold(user_id_a3)
-            
-            # Issue free instant zonal card
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_a3,
-                "zone": "UK",
-                "fee_usdt": 0,
-                "activation_hours": 0
-            }, timeout=30)
-            
-            if issue_response.status_code == 200:
-                card_data = issue_response.json().get('card', {})
-                log_test("A3: Free instant card issued with status active", card_data.get('status') == 'active', f"Card status: {card_data.get('status')}")
-                
-                # Check hold is lifted
-                hold_after = get_user_hold_status(user_id_a3)
-                is_lifted = hold_after.get('withdraw_lock', {}).get('active') == False
-                is_exempt = hold_after.get('withdraw_lock_exempt') == True
-                log_test("A3: Hold lifted immediately", is_lifted, f"Hold active: {hold_after.get('withdraw_lock', {}).get('active')}")
-                log_test("A3: User exempt", is_exempt, f"Exempt: {hold_after.get('withdraw_lock_exempt')}")
-            else:
-                log_test("A3: Issue free instant zonal", False, f"Status: {issue_response.status_code}")
-    except Exception as e:
-        log_test("A3: Exception", False, str(e))
-    
-    # TEST A4: Hidden card with fee=0 hours=0 → reveal → active and hold lifted. With fee>0 → pending_activation, hold NOT lifted
-    print("\n--- TEST A4: Hidden card reveal logic with fee variations ---")
-    try:
-        # A4a: Hidden card with fee=0, hours=0, amount_usd rule
-        user_id_a4a, user_token_a4a = create_test_user(admin_token, "a4a_" + str(int(time.time())))
-        if user_id_a4a:
-            put_user_on_hold(user_id_a4a)
-            fund_user_wallet(user_id_a4a, "USD", 200)
-            
-            # Issue hidden card with amount_usd rule, fee=0, hours=0
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_a4a,
-                "zone": "ME",
-                "fee_usdt": 0,
-                "activation_hours": 0,
-                "reveal": {
-                    "mode": "hidden",
-                    "geo": False,
-                    "amount_usd": 50,
-                    "match": "any"
-                }
-            }, timeout=30)
-            
-            if issue_response.status_code == 200:
-                card_data = issue_response.json().get('card', {})
-                card_id = card_data.get('id')
-                log_test("A4a: Hidden card issued", card_data.get('status') == 'hidden', f"Card status: {card_data.get('status')}")
-                
-                # Admin manually reveals the card
-                reveal_response = requests.post(f"{API_URL}/admin/cards/{card_id}/reveal", headers=headers_admin, json={}, timeout=30)
-                
-                if reveal_response.status_code == 200:
-                    revealed_card = reveal_response.json().get('card', {})
-                    log_test("A4a: Hidden card revealed to active (fee=0, hours=0)", revealed_card.get('status') == 'active', f"Card status: {revealed_card.get('status')}")
-                    
-                    # Check hold is lifted
-                    hold_after = get_user_hold_status(user_id_a4a)
-                    is_lifted = hold_after.get('withdraw_lock', {}).get('active') == False
-                    log_test("A4a: Hold lifted after reveal to active", is_lifted, f"Hold active: {hold_after.get('withdraw_lock', {}).get('active')}")
+        deadline_2h = (datetime.utcnow() + timedelta(hours=2)).isoformat() + 'Z'
+        update_user_in_db(user_a_id, {'verify_reminder.deadline_at': deadline_2h})
         
-        # A4b: Hidden card with fee>0
-        user_id_a4b, user_token_a4b = create_test_user(admin_token, "a4b_" + str(int(time.time())))
-        if user_id_a4b:
-            put_user_on_hold(user_id_a4b)
+        # Run the cron job
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/run", headers=admin_headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            stats = data.get('stats', {})
+            final_warnings = stats.get('final_warnings', 0)
             
-            # Issue hidden card with fee>0
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_a4b,
-                "zone": "AF",
-                "fee_usdt": 20,
-                "activation_hours": 0,
-                "reveal": {
-                    "mode": "hidden",
-                    "geo": False,
-                    "amount_usd": 30,
-                    "match": "any"
-                }
-            }, timeout=30)
+            log(f"Response: stats={stats}")
             
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
+            if final_warnings >= 1:
+                log(f"✅ TEST 4a PASSED: Final warning sent (final_warnings={final_warnings})")
+                passed += 1
                 
-                # Admin reveals
-                reveal_response = requests.post(f"{API_URL}/admin/cards/{card_id}/reveal", headers=headers_admin, json={}, timeout=30)
+                # Check if A has final warning notification
+                time.sleep(1)
+                notifications = get_user_notifications(user_a_id)
+                has_final_warning = any(n.get('kind') == 'verify_final_warning' for n in notifications)
                 
-                if reveal_response.status_code == 200:
-                    revealed_card = reveal_response.json().get('card', {})
-                    log_test("A4b: Hidden card revealed to pending_activation (fee>0)", revealed_card.get('status') == 'pending_activation', f"Card status: {revealed_card.get('status')}")
-                    
-                    # Check hold NOT lifted
-                    hold_after = get_user_hold_status(user_id_a4b)
-                    is_still_active = hold_after.get('withdraw_lock', {}).get('active') == True
-                    log_test("A4b: Hold NOT lifted (card pending_activation)", is_still_active, f"Hold active: {hold_after.get('withdraw_lock', {}).get('active')}")
+                if has_final_warning:
+                    log(f"✅ TEST 4b PASSED: User A has verify_final_warning notification")
+                    passed += 1
+                else:
+                    log(f"❌ TEST 4b FAILED: User A missing verify_final_warning notification")
+                    failed += 1
+                
+                # Check if final_warning_sent_at is set
+                user_a = get_user_from_db(user_a_id)
+                if user_a and user_a.get('verify_reminder', {}).get('final_warning_sent_at'):
+                    log(f"✅ TEST 4c PASSED: User A has final_warning_sent_at set")
+                    passed += 1
+                else:
+                    log(f"❌ TEST 4c FAILED: User A missing final_warning_sent_at")
+                    failed += 1
+                
+                # Run again to check no duplicate
+                resp2 = requests.post(f"{API_URL}/admin/verify-reminders/run", headers=admin_headers, timeout=30)
+                if resp2.status_code == 200:
+                    stats2 = resp2.json().get('stats', {})
+                    final_warnings2 = stats2.get('final_warnings', 0)
+                    if final_warnings2 == 0:
+                        log(f"✅ TEST 4d PASSED: No duplicate warning (final_warnings=0 on second run)")
+                        passed += 1
+                    else:
+                        log(f"❌ TEST 4d FAILED: Duplicate warning sent")
+                        failed += 1
+                else:
+                    log(f"❌ TEST 4d FAILED: Second run failed with {resp2.status_code}")
+                    failed += 1
+            else:
+                log(f"❌ TEST 4 FAILED: No final warnings sent")
+                failed += 1
+        else:
+            log(f"❌ TEST 4 FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("A4: Exception", False, str(e))
+        log(f"❌ TEST 4 FAILED: {e}")
+        failed += 1
     
-    # TEST A5: After lift, tier card approval must NOT re-lock (exempt). Admin mode 'lock' re-applies hold
-    print("\n--- TEST A5: Exempt user + tier card approval + admin re-lock ---")
+    # TEST 5: Deadline passed
+    log("\n" + "=" * 80)
+    log("TEST 5: Deadline passed")
+    log("=" * 80)
+    
+    # Set deadline to past for A, B, C
     try:
-        user_id_a5, user_token_a5 = create_test_user(admin_token, "a5_" + str(int(time.time())))
-        if user_id_a5:
-            put_user_on_hold(user_id_a5)
+        deadline_past = (datetime.utcnow() - timedelta(minutes=1)).isoformat() + 'Z'
+        update_user_in_db(user_a_id, {'verify_reminder.deadline_at': deadline_past})
+        update_user_in_db(user_b_id, {'verify_reminder.deadline_at': deadline_past})
+        update_user_in_db(user_c_id, {'verify_reminder.deadline_at': deadline_past})
+        
+        # Run the cron job
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/run", headers=admin_headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            stats = data.get('stats', {})
+            deleted = stats.get('deleted', 0)
+            flagged = stats.get('flagged', 0)
             
-            # Issue free instant zonal to lift hold and set exempt
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_a5,
-                "zone": "SAS",
-                "fee_usdt": 0,
-                "activation_hours": 0
-            }, timeout=30)
+            log(f"Response: stats={stats}")
             
-            if issue_response.status_code == 200:
-                # Verify exempt
-                hold_after_zonal = get_user_hold_status(user_id_a5)
-                is_exempt = hold_after_zonal.get('withdraw_lock_exempt') == True
-                log_test("A5: User exempt after zonal card", is_exempt, f"Exempt: {hold_after_zonal.get('withdraw_lock_exempt')}")
-                
-                # Request and approve a tier card
-                headers_user = {"Authorization": f"Bearer {user_token_a5}"}
-                tier_request = requests.post(f"{API_URL}/cards/request", headers=headers_user, json={"tier": "basic"}, timeout=30)
-                
-                if tier_request.status_code == 200:
-                    tier_card_id = tier_request.json().get('card', {}).get('id')
-                    
-                    # Activate tier card
-                    requests.post(f"{API_URL}/cards/{tier_card_id}/activate", headers=headers_user, json={
-                        "tx_hash": f"0xTESTA5TIER{int(time.time())}",
-                        "network": "TRC20"
-                    }, timeout=30)
-                    
-                    # Admin approves tier card
-                    requests.post(f"{API_URL}/admin/cards/{tier_card_id}/approve", headers=headers_admin, json={"activate_now": True}, timeout=30)
-                    
-                    # Check hold NOT re-applied (exempt)
-                    hold_after_tier = get_user_hold_status(user_id_a5)
-                    is_not_locked = hold_after_tier.get('withdraw_lock', {}).get('active') != True
-                    log_test("A5: Hold NOT re-applied after tier card (exempt)", is_not_locked, f"Hold active: {hold_after_tier.get('withdraw_lock', {}).get('active')}")
-                    
-                    # Admin re-applies hold via mode 'lock'
-                    lock_response = requests.post(f"{API_URL}/admin/users/{user_id_a5}/withdraw_access", headers=headers_admin, json={
-                        "mode": "lock"
-                    }, timeout=30)
-                    
-                    if lock_response.status_code == 200:
-                        log_test("A5: Admin mode 'lock' succeeds", True, "Lock applied")
-                        
-                        # Check hold re-applied
-                        hold_after_lock = get_user_hold_status(user_id_a5)
-                        is_locked = hold_after_lock.get('withdraw_lock', {}).get('active') == True
-                        is_not_exempt = hold_after_lock.get('withdraw_lock_exempt') == False
-                        log_test("A5: Hold re-applied (active=true)", is_locked, f"Hold active: {hold_after_lock.get('withdraw_lock', {}).get('active')}")
-                        log_test("A5: Exempt cleared (exempt=false)", is_not_exempt, f"Exempt: {hold_after_lock.get('withdraw_lock_exempt')}")
+            # Check if A is deleted
+            time.sleep(1)
+            a_exists = check_user_exists_in_db(user_a_id)
+            a_deleted = check_deleted_account(user_a_id)
+            
+            # Check if B is flagged (has funds)
+            b_user = get_user_from_db(user_b_id)
+            b_flagged = b_user and b_user.get('verify_reminder', {}).get('flag_reason') == 'has_funds'
+            
+            # Check if C is flagged (kyc pending)
+            c_user = get_user_from_db(user_c_id)
+            c_flagged = c_user and c_user.get('verify_reminder', {}).get('flag_reason') == 'kyc_pending'
+            
+            log(f"User A exists: {a_exists}, deleted record: {a_deleted is not None}")
+            log(f"User B flagged: {b_flagged}, flag_reason: {b_user.get('verify_reminder', {}).get('flag_reason') if b_user else None}")
+            log(f"User C flagged: {c_flagged}, flag_reason: {c_user.get('verify_reminder', {}).get('flag_reason') if c_user else None}")
+            
+            if not a_exists and a_deleted and a_deleted.get('reason') == 'unverified_deadline':
+                log(f"✅ TEST 5a PASSED: User A deleted (reason='unverified_deadline')")
+                passed += 1
+            else:
+                log(f"❌ TEST 5a FAILED: User A not properly deleted")
+                failed += 1
+            
+            if b_flagged:
+                log(f"✅ TEST 5b PASSED: User B flagged (flag_reason='has_funds')")
+                passed += 1
+            else:
+                log(f"❌ TEST 5b FAILED: User B not flagged")
+                failed += 1
+            
+            if c_flagged:
+                log(f"✅ TEST 5c PASSED: User C flagged (flag_reason='kyc_pending')")
+                passed += 1
+            else:
+                log(f"❌ TEST 5c FAILED: User C not flagged")
+                failed += 1
+            
+            # Check filter=flagged
+            resp_flagged = requests.get(f"{API_URL}/admin/verify-reminders?filter=flagged", headers=admin_headers, timeout=30)
+            if resp_flagged.status_code == 200:
+                flagged_users = resp_flagged.json().get('users', [])
+                flagged_ids = [u['id'] for u in flagged_users]
+                if user_b_id in flagged_ids and user_c_id in flagged_ids:
+                    log(f"✅ TEST 5d PASSED: filter=flagged shows B,C")
+                    passed += 1
+                else:
+                    log(f"❌ TEST 5d FAILED: filter=flagged doesn't show B,C")
+                    failed += 1
+            else:
+                log(f"❌ TEST 5d FAILED: filter=flagged request failed")
+                failed += 1
+            
+            # Check filter=deleted
+            resp_deleted = requests.get(f"{API_URL}/admin/verify-reminders?filter=deleted", headers=admin_headers, timeout=30)
+            if resp_deleted.status_code == 200:
+                deleted_list = resp_deleted.json().get('deleted', [])
+                deleted_ids = [d['user_id'] for d in deleted_list]
+                if user_a_id in deleted_ids:
+                    log(f"✅ TEST 5e PASSED: filter=deleted shows A")
+                    passed += 1
+                else:
+                    log(f"❌ TEST 5e FAILED: filter=deleted doesn't show A")
+                    failed += 1
+            else:
+                log(f"❌ TEST 5e FAILED: filter=deleted request failed")
+                failed += 1
+        else:
+            log(f"❌ TEST 5 FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("A5: Exception", False, str(e))
+        log(f"❌ TEST 5 FAILED: {e}")
+        failed += 1
     
-    # TEST A6: Tier card activation alone (no zonal) must NOT lift hold
-    print("\n--- TEST A6: Tier card activation alone must NOT lift hold ---")
+    # TEST 6: Cancel
+    log("\n" + "=" * 80)
+    log("TEST 6: Cancel reminder")
+    log("=" * 80)
     try:
-        user_id_a6, user_token_a6 = create_test_user(admin_token, "a6_" + str(int(time.time())))
-        if user_id_a6:
-            put_user_on_hold(user_id_a6)
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/cancel", headers=admin_headers, json={
+            'user_ids': [user_b_id]
+        }, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            cancelled = data.get('cancelled', 0)
             
-            # Request and approve tier card
-            headers_user = {"Authorization": f"Bearer {user_token_a6}"}
-            tier_request = requests.post(f"{API_URL}/cards/request", headers=headers_user, json={"tier": "premium"}, timeout=30)
+            # Check if B's reminder is cancelled
+            time.sleep(1)
+            b_user = get_user_from_db(user_b_id)
+            b_active = b_user and b_user.get('verify_reminder', {}).get('active', True)
             
-            if tier_request.status_code == 200:
-                tier_card_id = tier_request.json().get('card', {}).get('id')
-                
-                # Activate
-                requests.post(f"{API_URL}/cards/{tier_card_id}/activate", headers=headers_user, json={
-                    "tx_hash": f"0xTESTA6{int(time.time())}",
-                    "network": "TRC20"
-                }, timeout=30)
-                
-                # Admin approves
-                requests.post(f"{API_URL}/admin/cards/{tier_card_id}/approve", headers=headers_admin, json={"activate_now": True}, timeout=30)
-                
-                # Check hold NOT lifted
-                hold_after = get_user_hold_status(user_id_a6)
-                is_still_active = hold_after.get('withdraw_lock', {}).get('active') == True
-                log_test("A6: Hold NOT lifted by tier card alone", is_still_active, f"Hold active: {hold_after.get('withdraw_lock', {}).get('active')}")
+            log(f"Response: cancelled={cancelled}")
+            log(f"User B verify_reminder.active: {b_active}")
+            
+            if cancelled >= 1 and not b_active:
+                log(f"✅ TEST 6 PASSED: Cancel → verify_reminder.active=false")
+                passed += 1
+            else:
+                log(f"❌ TEST 6 FAILED: Cancel didn't work properly")
+                failed += 1
+        else:
+            log(f"❌ TEST 6 FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("A6: Exception", False, str(e))
+        log(f"❌ TEST 6 FAILED: {e}")
+        failed += 1
     
-    print("\n" + "="*80)
-    print("PART B: Hidden Zonal Cards Reveal Logic (5 tests)")
-    print("="*80 + "\n")
+    # TEST 7: Manual delete
+    log("\n" + "=" * 80)
+    log("TEST 7: Manual delete")
+    log("=" * 80)
     
-    # TEST B7: Geo rule - user on hold with allowance → withdraw consuming allowance → card revealed
-    print("\n--- TEST B7: Geo rule - allowance consumed → card revealed ---")
+    # 7a: Try to delete B (has funds) → blocked
     try:
-        user_id_b7, user_token_b7 = create_test_user(admin_token, "b7_" + str(int(time.time())))
-        if user_id_b7:
-            put_user_on_hold(user_id_b7)
-            fund_user_wallet(user_id_b7, "USD", 200)
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/delete", headers=admin_headers, json={
+            'user_ids': [user_b_id]
+        }, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            deleted = data.get('deleted', 0)
+            blocked = data.get('blocked', [])
             
-            # Set allowance
-            requests.post(f"{API_URL}/admin/users/{user_id_b7}/withdraw_access", headers=headers_admin, json={
-                "mode": "allowance",
-                "allowance_usd": 50
-            }, timeout=30)
+            b_blocked = any(b.get('id') == user_b_id and 'funds' in b.get('reason', '') for b in blocked)
             
-            # Issue hidden card with geo rule
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_b7,
-                "zone": "SEA",
-                "fee_usdt": 10,
-                "activation_hours": 5,
-                "reveal": {
-                    "mode": "hidden",
-                    "geo": True,
-                    "amount_usd": 0,
-                    "match": "any"
-                }
-            }, timeout=30)
+            log(f"Response: deleted={deleted}, blocked={blocked}")
             
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
-                log_test("B7: Hidden card with geo rule issued", True, "Card issued")
-                
-                # User withdraws ~$50 to consume allowance
-                headers_user = {"Authorization": f"Bearer {user_token_b7}"}
-                withdraw_response = requests.post(f"{API_URL}/withdraw", headers=headers_user, json={
-                    "amount": 50,
-                    "currency": "USD",
-                    "method": "bank_swift",
-                    "destination": "test_account"
-                }, timeout=30)
-                
-                if withdraw_response.status_code == 200:
-                    withdraw_id = withdraw_response.json().get('request', {}).get('id')
-                    log_test("B7: Withdrawal submitted", True, f"Withdraw ID: {withdraw_id}")
-                    
-                    # Admin approves withdrawal
-                    approve_response = requests.post(f"{API_URL}/admin/withdrawals/{withdraw_id}/approve", headers=headers_admin, json={}, timeout=30)
-                    
-                    if approve_response.status_code == 200:
-                        log_test("B7: Withdrawal approved", True, "Approved")
-                        
-                        # Check card revealed
-                        time.sleep(1)
-                        cards_response = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                        if cards_response.status_code == 200:
-                            cards = cards_response.json().get('cards', [])
-                            revealed_card = next((c for c in cards if c.get('id') == card_id), None)
-                            if revealed_card:
-                                log_test("B7: Card revealed (visible to user)", True, f"Card status: {revealed_card.get('status')}")
-                                log_test("B7: Card status is pending_activation", revealed_card.get('status') == 'pending_activation', f"Status: {revealed_card.get('status')}")
-                            else:
-                                log_test("B7: Card revealed (visible to user)", False, "Card not found in user's cards")
-                        
-                        # Check notification
-                        notif_response = requests.get(f"{API_URL}/notifications", headers=headers_user, timeout=30)
-                        if notif_response.status_code == 200:
-                            notifs = notif_response.json().get('notifications', [])
-                            zonal_notif = next((n for n in notifs if n.get('kind') == 'zonal_card_unlocked'), None)
-                            log_test("B7: Notification created (zonal_card_unlocked)", zonal_notif is not None, f"Found: {zonal_notif is not None}")
+            if deleted == 0 and b_blocked:
+                log(f"✅ TEST 7a PASSED: B blocked (holds funds)")
+                passed += 1
+            else:
+                log(f"❌ TEST 7a FAILED: B should be blocked")
+                failed += 1
+        else:
+            log(f"❌ TEST 7a FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("B7: Exception", False, str(e))
+        log(f"❌ TEST 7a FAILED: {e}")
+        failed += 1
     
-    # TEST B8: Geo rule via admin mode 'unlock' → hidden geo card revealed
-    print("\n--- TEST B8: Admin mode 'unlock' → hidden geo card revealed ---")
+    # 7b: Try to delete C (no funds, kyc pending) → should delete
     try:
-        user_id_b8, user_token_b8 = create_test_user(admin_token, "b8_" + str(int(time.time())))
-        if user_id_b8:
-            put_user_on_hold(user_id_b8)
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/delete", headers=admin_headers, json={
+            'user_ids': [user_c_id]
+        }, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            deleted = data.get('deleted', 0)
             
-            # Issue hidden card with geo rule
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_b8,
-                "zone": "EA",
-                "fee_usdt": 15,
-                "activation_hours": 10,
-                "reveal": {
-                    "mode": "hidden",
-                    "geo": True,
-                    "amount_usd": 0,
-                    "match": "any"
-                }
-            }, timeout=30)
+            # Check if C is deleted
+            time.sleep(1)
+            c_exists = check_user_exists_in_db(user_c_id)
             
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
-                log_test("B8: Hidden card with geo rule issued", True, "Card issued")
-                
-                # Admin unlocks hold
-                unlock_response = requests.post(f"{API_URL}/admin/users/{user_id_b8}/withdraw_access", headers=headers_admin, json={
-                    "mode": "unlock"
-                }, timeout=30)
-                
-                if unlock_response.status_code == 200:
-                    log_test("B8: Admin mode 'unlock' succeeds", True, "Unlocked")
-                    
-                    # Check card revealed
-                    time.sleep(1)
-                    headers_user = {"Authorization": f"Bearer {user_token_b8}"}
-                    cards_response = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                    if cards_response.status_code == 200:
-                        cards = cards_response.json().get('cards', [])
-                        revealed_card = next((c for c in cards if c.get('id') == card_id), None)
-                        log_test("B8: Card revealed after unlock", revealed_card is not None, f"Card found: {revealed_card is not None}")
+            log(f"Response: deleted={deleted}")
+            log(f"User C exists: {c_exists}")
+            
+            if deleted >= 1 and not c_exists:
+                log(f"✅ TEST 7b PASSED: C deleted (no funds)")
+                passed += 1
+            else:
+                log(f"❌ TEST 7b FAILED: C should be deleted")
+                failed += 1
+        else:
+            log(f"❌ TEST 7b FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("B8: Exception", False, str(e))
+        log(f"❌ TEST 7b FAILED: {e}")
+        failed += 1
     
-    # TEST B9: match 'all' with geo + amount_usd → needs both
-    print("\n--- TEST B9: match='all' requires both geo and amount_usd ---")
+    # 7c: Try to delete D (verified) → blocked
     try:
-        user_id_b9, user_token_b9 = create_test_user(admin_token, "b9_" + str(int(time.time())))
-        if user_id_b9:
-            put_user_on_hold(user_id_b9)
-            fund_user_wallet(user_id_b9, "USD", 300)
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/delete", headers=admin_headers, json={
+            'user_ids': [user_d_id]
+        }, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            deleted = data.get('deleted', 0)
+            blocked = data.get('blocked', [])
             
-            # Set allowance
-            requests.post(f"{API_URL}/admin/users/{user_id_b9}/withdraw_access", headers=headers_admin, json={
-                "mode": "allowance",
-                "allowance_usd": 100
-            }, timeout=30)
+            d_blocked = any(b.get('id') == user_d_id and 'verified' in b.get('reason', '') for b in blocked)
             
-            # Issue hidden card with match='all'
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_b9,
-                "zone": "OCE",
-                "fee_usdt": 20,
-                "activation_hours": 12,
-                "reveal": {
-                    "mode": "hidden",
-                    "geo": True,
-                    "amount_usd": 80,
-                    "match": "all"
-                }
-            }, timeout=30)
+            log(f"Response: deleted={deleted}, blocked={blocked}")
             
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
-                log_test("B9: Hidden card with match='all' issued", True, "Card issued")
-                
-                # User withdraws $80 (meets amount rule but not geo rule yet)
-                headers_user = {"Authorization": f"Bearer {user_token_b9}"}
-                withdraw_response = requests.post(f"{API_URL}/withdraw", headers=headers_user, json={
-                    "amount": 80,
-                    "currency": "USD",
-                    "method": "bank_swift",
-                    "destination": "test_account"
-                }, timeout=30)
-                
-                if withdraw_response.status_code == 200:
-                    withdraw_id = withdraw_response.json().get('request', {}).get('id')
-                    
-                    # Admin approves
-                    requests.post(f"{API_URL}/admin/withdrawals/{withdraw_id}/approve", headers=headers_admin, json={}, timeout=30)
-                    
-                    # Check card NOT revealed yet (geo rule not met)
-                    time.sleep(1)
-                    cards_response = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                    if cards_response.status_code == 200:
-                        cards = cards_response.json().get('cards', [])
-                        revealed_card = next((c for c in cards if c.get('id') == card_id), None)
-                        log_test("B9: Card NOT revealed (amount met, geo not met)", revealed_card is None, f"Card visible: {revealed_card is not None}")
-                    
-                    # Now consume remaining allowance to meet geo rule
-                    withdraw_response2 = requests.post(f"{API_URL}/withdraw", headers=headers_user, json={
-                        "amount": 20,
-                        "currency": "USD",
-                        "method": "bank_swift",
-                        "destination": "test_account"
-                    }, timeout=30)
-                    
-                    if withdraw_response2.status_code == 200:
-                        withdraw_id2 = withdraw_response2.json().get('request', {}).get('id')
-                        requests.post(f"{API_URL}/admin/withdrawals/{withdraw_id2}/approve", headers=headers_admin, json={}, timeout=30)
-                        
-                        # Now card should be revealed (both rules met)
-                        time.sleep(1)
-                        cards_response2 = requests.get(f"{API_URL}/cards", headers=headers_user, timeout=30)
-                        if cards_response2.status_code == 200:
-                            cards2 = cards_response2.json().get('cards', [])
-                            revealed_card2 = next((c for c in cards2 if c.get('id') == card_id), None)
-                            log_test("B9: Card revealed after both rules met", revealed_card2 is not None, f"Card visible: {revealed_card2 is not None}")
+            if deleted == 0 and d_blocked:
+                log(f"✅ TEST 7c PASSED: D blocked (verified)")
+                passed += 1
+            else:
+                log(f"❌ TEST 7c FAILED: D should be blocked")
+                failed += 1
+        else:
+            log(f"❌ TEST 7c FAILED: Expected 200, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("B9: Exception", False, str(e))
+        log(f"❌ TEST 7c FAILED: {e}")
+        failed += 1
     
-    # TEST B10: PUT /api/admin/cards/:id/reveal-rule validations
-    print("\n--- TEST B10: PUT reveal-rule validations ---")
+    # TEST 8: Approved during reminder
+    log("\n" + "=" * 80)
+    log("TEST 8: Approved during reminder")
+    log("=" * 80)
+    
+    # Create user E and send reminder
     try:
-        user_id_b10, user_token_b10 = create_test_user(admin_token, "b10_" + str(int(time.time())))
-        if user_id_b10:
-            # Issue hidden card
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_b10,
-                "zone": "CIS",
-                "fee_usdt": 25,
-                "activation_hours": 15,
-                "reveal": {
-                    "mode": "hidden",
-                    "geo": False,
-                    "amount_usd": 100,
-                    "match": "any"
-                }
-            }, timeout=30)
+        client = MongoClient(MONGO_URL)
+        db = client[DB_NAME]
+        
+        user_e_id = f"{TEST_PREFIX}e"
+        now_iso = datetime.utcnow().isoformat() + 'Z'
+        user_e = {
+            'id': user_e_id,
+            'username': f'{TEST_PREFIX}e',
+            'email': f'{TEST_PREFIX}e@example.com',
+            'full_name': 'VR Test E',
+            'role': 'user',
+            'kyc_status': 'none',
+            'status': 'active',
+            'created_at': now_iso,
+            'email_verified': True,
+            'password_hash': 'dummy',
+            'salt': 'dummy'
+        }
+        db.users.insert_one(user_e)
+        db.wallets.insert_one({
+            'id': str(uuid.uuid4()),
+            'user_id': user_e_id,
+            'type': 'fiat',
+            'currency': 'USD',
+            'balance': 0,
+            'pending': 0,
+            'created_at': now_iso
+        })
+        
+        # Send reminder to E
+        resp = requests.post(f"{API_URL}/admin/verify-reminders/send", headers=admin_headers, json={
+            'user_ids': [user_e_id],
+            'hours': 24,
+            'final_warning_hours': 3
+        }, timeout=30)
+        
+        if resp.status_code == 200:
+            # Set E's kyc_status to approved
+            update_user_in_db(user_e_id, {'kyc_status': 'approved'})
             
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
+            # Run cron
+            resp2 = requests.post(f"{API_URL}/admin/verify-reminders/run", headers=admin_headers, timeout=30)
+            if resp2.status_code == 200:
+                stats = resp2.json().get('stats', {})
+                cleared = stats.get('cleared', 0)
                 
-                # B10a: Invalid rule (geo=false, amount=0)
-                invalid_response = requests.put(f"{API_URL}/admin/cards/{card_id}/reveal-rule", headers=headers_admin, json={
-                    "geo": False,
-                    "amount_usd": 0
-                }, timeout=30)
-                log_test("B10a: Invalid rule (geo=false, amount=0) → 400", invalid_response.status_code == 400, f"Status: {invalid_response.status_code}")
+                # Check if E's reminder is cleared
+                time.sleep(1)
+                e_user = get_user_from_db(user_e_id)
+                e_active = e_user and e_user.get('verify_reminder', {}).get('active', True)
+                e_resolved = e_user and e_user.get('verify_reminder', {}).get('resolved')
                 
-                # B10b: Lower amount below progress → auto-reveal
-                # First, add some progress via MongoDB
-                mongo_client = MongoClient(MONGO_URL)
-                db = mongo_client[DB_NAME]
-                db.cards.update_one({"id": card_id}, {"$set": {"reveal.progress_usd": 60}})
-                mongo_client.close()
+                log(f"Response: stats={stats}")
+                log(f"User E verify_reminder.active: {e_active}, resolved: {e_resolved}")
                 
-                # Now lower amount to 50 (below progress of 60)
-                lower_response = requests.put(f"{API_URL}/admin/cards/{card_id}/reveal-rule", headers=headers_admin, json={
-                    "geo": False,
-                    "amount_usd": 50
-                }, timeout=30)
-                
-                if lower_response.status_code == 200:
-                    updated_card = lower_response.json().get('card', {})
-                    log_test("B10b: Lowering amount below progress auto-reveals", updated_card.get('status') != 'hidden', f"Card status: {updated_card.get('status')}")
-            
-            # B10c: Non-hidden card → 400
-            # Issue a visible card
-            issue_visible = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_b10,
-                "zone": "SA",
-                "fee_usdt": 0,
-                "activation_hours": 0
-            }, timeout=30)
-            
-            if issue_visible.status_code == 200:
-                visible_card_id = issue_visible.json().get('card', {}).get('id')
-                
-                # Try to update reveal-rule on non-hidden card
-                non_hidden_response = requests.put(f"{API_URL}/admin/cards/{visible_card_id}/reveal-rule", headers=headers_admin, json={
-                    "geo": True,
-                    "amount_usd": 100
-                }, timeout=30)
-                log_test("B10c: Non-hidden card reveal-rule → 400", non_hidden_response.status_code == 400, f"Status: {non_hidden_response.status_code}")
+                if cleared >= 1 and not e_active and e_resolved == 'verified':
+                    log(f"✅ TEST 8 PASSED: Reminder cleared (active=false, resolved='verified')")
+                    passed += 1
+                else:
+                    log(f"❌ TEST 8 FAILED: Reminder not properly cleared")
+                    failed += 1
+            else:
+                log(f"❌ TEST 8 FAILED: Run failed with {resp2.status_code}")
+                failed += 1
+        else:
+            log(f"❌ TEST 8 FAILED: Send reminder failed with {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("B10: Exception", False, str(e))
+        log(f"❌ TEST 8 FAILED: {e}")
+        failed += 1
     
-    # TEST B11: POST /api/admin/cards/:id/reveal on non-hidden → 400
-    print("\n--- TEST B11: POST reveal on non-hidden card → 400 ---")
+    # TEST 9: Cron endpoint
+    log("\n" + "=" * 80)
+    log("TEST 9: Cron endpoint")
+    log("=" * 80)
+    
+    # 9a: No auth → 401
     try:
-        user_id_b11, user_token_b11 = create_test_user(admin_token, "b11_" + str(int(time.time())))
-        if user_id_b11:
-            # Issue visible card
-            issue_response = requests.post(f"{API_URL}/admin/zones/issue", headers=headers_admin, json={
-                "user_id": user_id_b11,
-                "zone": "NA",
-                "fee_usdt": 10,
-                "activation_hours": 5
-            }, timeout=30)
-            
-            if issue_response.status_code == 200:
-                card_id = issue_response.json().get('card', {}).get('id')
-                
-                # Try to reveal non-hidden card
-                reveal_response = requests.post(f"{API_URL}/admin/cards/{card_id}/reveal", headers=headers_admin, json={}, timeout=30)
-                log_test("B11: POST reveal on non-hidden card → 400", reveal_response.status_code == 400, f"Status: {reveal_response.status_code}")
+        resp = requests.post(f"{API_URL}/cron/verify-reminders", timeout=30)
+        if resp.status_code == 401:
+            log(f"✅ TEST 9a PASSED: No auth → 401")
+            passed += 1
+        else:
+            log(f"❌ TEST 9a FAILED: Expected 401, got {resp.status_code}")
+            failed += 1
     except Exception as e:
-        log_test("B11: Exception", False, str(e))
+        log(f"❌ TEST 9a FAILED: {e}")
+        failed += 1
     
-    # Print summary
-    print("\n" + "="*80)
-    print("TEST SUMMARY")
-    print("="*80 + "\n")
+    # 9b: Wrong token → 401
+    try:
+        resp = requests.post(f"{API_URL}/cron/verify-reminders", headers={
+            'Authorization': 'Bearer wrong_token'
+        }, timeout=30)
+        if resp.status_code == 401:
+            log(f"✅ TEST 9b PASSED: Wrong token → 401")
+            passed += 1
+        else:
+            log(f"❌ TEST 9b FAILED: Expected 401, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 9b FAILED: {e}")
+        failed += 1
     
-    total_tests = len(test_results)
-    passed_tests = sum(1 for t in test_results if t['passed'])
-    failed_tests = total_tests - passed_tests
+    # 9c: Correct token → 202
+    try:
+        run_id = str(uuid.uuid4())
+        resp = requests.post(f"{API_URL}/cron/verify-reminders", headers={
+            'Authorization': f'Bearer {WEBHOOK_CRON_SECRET}',
+            'X-Webhook-Id': f'test-run-{run_id}'
+        }, timeout=30)
+        if resp.status_code == 202:
+            data = resp.json()
+            if data.get('ok') and data.get('accepted'):
+                log(f"✅ TEST 9c PASSED: Correct token → 202 accepted")
+                passed += 1
+            else:
+                log(f"❌ TEST 9c FAILED: Response not as expected: {data}")
+                failed += 1
+        else:
+            log(f"❌ TEST 9c FAILED: Expected 202, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 9c FAILED: {e}")
+        failed += 1
     
-    print(f"Total tests: {total_tests}")
-    print(f"Passed: {passed_tests}")
-    print(f"Failed: {failed_tests}")
-    print(f"Success rate: {(passed_tests/total_tests*100):.1f}%\n")
+    # 9d: Same id again → 202 duplicate
+    try:
+        resp = requests.post(f"{API_URL}/cron/verify-reminders", headers={
+            'Authorization': f'Bearer {WEBHOOK_CRON_SECRET}',
+            'X-Webhook-Id': f'test-run-{run_id}'
+        }, timeout=30)
+        if resp.status_code == 202:
+            data = resp.json()
+            if data.get('ok') and data.get('duplicate'):
+                log(f"✅ TEST 9d PASSED: Same id again → 202 duplicate")
+                passed += 1
+            else:
+                log(f"❌ TEST 9d FAILED: Response not as expected: {data}")
+                failed += 1
+        else:
+            log(f"❌ TEST 9d FAILED: Expected 202, got {resp.status_code}")
+            failed += 1
+    except Exception as e:
+        log(f"❌ TEST 9d FAILED: {e}")
+        failed += 1
     
-    if failed_tests > 0:
-        print("Failed tests:")
-        for t in test_results:
-            if not t['passed']:
-                print(f"  ❌ {t['test']}")
-                if t['details']:
-                    print(f"     {t['details']}")
+    # Clean up
+    log("\n" + "=" * 80)
+    log("CLEANUP")
+    log("=" * 80)
+    cleanup_test_users()
     
-    print("\n" + "="*80)
+    # Summary
+    log("\n" + "=" * 80)
+    log("TEST SUMMARY")
+    log("=" * 80)
+    total = passed + failed
+    log(f"Total tests: {total}")
+    log(f"Passed: {passed}")
+    log(f"Failed: {failed}")
+    log(f"Success rate: {(passed/total*100):.1f}%")
+    
+    if failed == 0:
+        log("\n✅ ALL TESTS PASSED!")
+    else:
+        log(f"\n❌ {failed} TEST(S) FAILED")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     run_tests()

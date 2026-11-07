@@ -1,0 +1,8 @@
+crons:
+  - name: verify-reminders
+    description: "Every 15 min: sends final verification warnings and deletes unverified accounts past their deadline"
+    cron: "*/15 * * * *"
+    endpoint: "{{BASE_URL}}/api/cron/verify-reminders"
+    method: POST
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    enabled: true
