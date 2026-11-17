@@ -12,7 +12,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { RefreshCw, Loader2, Search, Trash2, EyeOff, Eye, Sparkles, ChevronLeft, ChevronRight, Lock, MapPinned, CreditCard, ShieldCheck, Snowflake } from 'lucide-react'
+import { RefreshCw, Loader2, Search, Trash2, EyeOff, Eye, Sparkles, ChevronLeft, ChevronRight, Lock, MapPinned, CreditCard, ShieldCheck, Snowflake, Clock } from 'lucide-react'
 
 // ---------- shared helpers ----------
 export const cardStatusLabel = (s) => ({
@@ -118,6 +118,43 @@ function TierMini({ card }) {
       <div className="font-display capitalize text-sm">{card.tier}</div>
       <div className="absolute bottom-2 left-3 font-mono text-[11px] tracking-widest">{card.number_masked || '•••• ••••'}</div>
       <CreditCard className="absolute top-3 right-3 h-4 w-4 opacity-70"/>
+    </div>
+  )
+}
+
+// Inline editor: change activation time (hours) at any stage — even after the user paid
+export function ActivationHoursEditor({ card, onSaved }) {
+  const { api } = useApp()
+  const isGlobal = card?.type === 'global'
+  const current = isGlobal ? (card?.review_hours ?? 24) : (card?.activation_hours ?? (card?.type === 'zonal' ? 0 : 24))
+  const [hours, setHours] = useState(String(current))
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setHours(String(current)) }, [card?.id, current])
+  if (!card || ['active', 'deleted'].includes(card.status)) return null
+  const n = Number(hours)
+  const valid = hours !== '' && Number.isFinite(n) && n >= 0 && n <= 8760
+  let preview = null
+  if (valid && card.status === 'activating') {
+    const usable = new Date(new Date(card.admin_approved_at || card.created_at).getTime() + n * 3600000)
+    preview = usable.getTime() <= Date.now() ? 'Card becomes active immediately' : `Ready ${usable.toLocaleString()}`
+  } else if (valid && isGlobal && card.status === 'kyc_review' && card.kyc?.submitted_at) {
+    preview = `Review due ${new Date(new Date(card.kyc.submitted_at).getTime() + n * 3600000).toLocaleString()}`
+  } else if (valid) preview = isGlobal ? 'Applies when the user submits verification' : 'Applies after payment verification'
+  const save = async () => {
+    setBusy(true)
+    try { const r = await api.put(`/admin/cards/${card.id}/activation-hours`, { hours: n }); toast.success(r?.card?.status === 'active' && card.status !== 'active' ? 'Card activated — user notified' : 'Activation time updated — user notified'); onSaved && onSaved(r?.card) }
+    catch (e) { toast.error(e?.message || 'Update failed') } finally { setBusy(false) }
+  }
+  return (
+    <div className="rounded-xl border border-gold-500/20 bg-secondary/40 p-3 space-y-2" data-testid={`activation-hours-editor-${card.id}`}>
+      <div className="text-[10px] uppercase tracking-widest text-muted-foreground flex items-center gap-1.5"><Clock className="h-3 w-3 text-gold"/>{isGlobal ? 'KYC review time' : 'Activation time'} · current {current}h</div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <Input type="number" min="0" max="8760" value={hours} onChange={e => setHours(e.target.value)} className="h-9 w-24 bg-onyx-950/60 border-gold-500/20 font-mono" data-testid="activation-hours-input"/>
+        <span className="text-xs text-muted-foreground">hours</span>
+        {[0, 1, 5, 12, 24, 48].map(x => <button key={x} type="button" onClick={() => setHours(String(x))} className={`text-[11px] rounded-full border px-2 py-0.5 ${n === x ? 'border-gold-500 bg-gold-500/10 text-gold' : 'border-gold-500/15 text-muted-foreground'}`}>{x === 0 ? 'Now' : `${x}h`}</button>)}
+        <Button size="sm" onClick={save} disabled={!valid || busy || n === Number(current)} className="gold-btn h-8 ml-auto" data-testid="activation-hours-save">{busy ? <Loader2 className="h-3.5 w-3.5 animate-spin"/> : 'Update'}</Button>
+      </div>
+      {preview && <div className="text-[11px] text-muted-foreground">{preview}</div>}
     </div>
   )
 }
@@ -308,7 +345,7 @@ function CardDetailDialog({ card, onClose, onReveal, onDelete, onUpdated }) {
                 ['Card number', c.number ? '•••• •••• •••• ' + String(c.number).replace(/\s/g, '').slice(-4) : c.number_masked],
                 ['Holder', c.holder], ['Expiry', c.expiry],
                 ['Activation fee', c.activation_fee_usdt != null ? `${c.activation_fee_usdt} USDT` : ''],
-                ['Activation time', c.type === 'zonal' ? `${c.activation_hours ?? 0}h` : '24h'],
+                ['Activation time', c.type === 'global' ? `${c.review_hours ?? 24}h review` : `${c.activation_hours ?? (c.type === 'zonal' ? 0 : 24)}h`],
                 ['Monthly limit', c.monthly_spend_limit ? usd(c.monthly_spend_limit) : ''],
                 ['Created', c.created_at ? new Date(c.created_at).toLocaleString() : ''],
                 ['Revealed', c.revealed_at ? new Date(c.revealed_at).toLocaleString() : (c.status === 'hidden' ? 'Not yet' : '')],
@@ -318,6 +355,7 @@ function CardDetailDialog({ card, onClose, onReveal, onDelete, onUpdated }) {
               ))}
             </div>
             {c.issue_note && <div className="text-xs text-muted-foreground">Issue note: {c.issue_note}</div>}
+            <ActivationHoursEditor card={c} onSaved={(fresh) => { if (fresh) setFull(f => ({ ...(f || {}), card: { ...(f?.card || {}), ...fresh } })); onUpdated() }}/>
             {c.activation_tx_hash && <div className="text-xs"><span className="text-muted-foreground">Last tx hash:</span> <span className="font-mono text-gold break-all">{c.activation_tx_hash}</span></div>}
 
             {c.status === 'hidden' && rule && (

@@ -67,7 +67,7 @@ export function VerifyRemindersAdmin() {
   useEffect(() => { const t = setTimeout(() => { setDebQ(q.trim()); setPage(1) }, 300); return () => clearTimeout(t) }, [q])
   const load = async (silent = false) => {
     if (!silent) setLoading(true)
-    try { const r = await api.get(`/admin/verify-reminders?filter=${filter}&q=${encodeURIComponent(debQ)}&page=${page}`); setData({ users: r?.users || [], deleted: r?.deleted || [], counts: r?.counts || data.counts, pages: r?.pages || 1, total: r?.total || 0, last_run: r?.last_run }) }
+    try { const r = await api.get(`/admin/verify-reminders?filter=${filter}&q=${encodeURIComponent(debQ)}&page=${page}`); setData({ users: r?.users || [], deleted: r?.deleted || [], counts: r?.counts || data.counts, pages: r?.pages || 1, total: r?.total || 0, last_run: r?.last_run || data.last_run, email_configured: r?.email_configured ?? data.email_configured, scheduler: r?.scheduler ?? data.scheduler }) }
     catch (e) { toast.error(e?.message || 'Failed to load') } finally { if (!silent) setLoading(false) }
   }
   useEffect(() => { load() }, [filter, debQ, page])
@@ -116,6 +116,12 @@ export function VerifyRemindersAdmin() {
             <div className="text-[10px] sm:text-[11px] text-muted-foreground truncate">{s}</div>
           </div>
         ))}
+      </div>
+
+      <div className="flex flex-wrap gap-2 text-[11px]" data-testid="vr-status">
+        <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 ${data.last_run?.last_run_at ? 'border-emerald-500/30 text-emerald-300' : 'border-amber-500/30 text-amber-300'}`}><span className={`h-1.5 w-1.5 rounded-full ${data.last_run?.last_run_at ? 'bg-emerald-400' : 'bg-amber-400'}`}/>Auto-check {data.last_run?.last_run_at ? `· last ${new Date(data.last_run.last_run_at).toLocaleString()}` : '· waiting for first run'}</span>
+        {data.email_configured === false && <span className="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 px-2.5 py-1 text-red-300"><Mail className="h-3 w-3"/>Email not configured (RESEND_API_KEY missing on server) — only in-app & push will be sent</span>}
+        {data.email_configured === true && <span className="inline-flex items-center gap-1.5 rounded-full border border-gold-500/20 px-2.5 py-1 text-muted-foreground"><Mail className="h-3 w-3 text-gold"/>Email ready</span>}
       </div>
 
       <div className="flex flex-col sm:flex-row gap-2">

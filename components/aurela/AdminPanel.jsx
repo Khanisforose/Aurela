@@ -14,6 +14,7 @@ import { LocationSummary } from './LocationSummary'
 import { toast } from 'sonner'
 import { LayoutDashboard, Users, ShieldCheck, Settings, Receipt, ScrollText, LogOut, Search, Snowflake, Ban, Trash2, Plus, Minus, Wallet, Sparkles, ChevronRight, Copy, Edit3, X, Save, Check, RefreshCw, Loader2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { ActivationHoursEditor } from './AllCardsAdmin'
 
 const ADMIN_NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -1509,6 +1510,7 @@ function CardApprovalsAdmin() {
                 <div className="text-xs text-muted-foreground">This user also holds {open.other_cards.length} other card{open.other_cards.length === 1 ? '' : 's'}: {open.other_cards.map(oc => `${oc.tier} (${oc.status})`).join(', ')}</div>
               )}
 
+              <ActivationHoursEditor card={open.card} onSaved={(fresh) => { if (fresh) setOpen(o => ({ ...o, card: { ...o.card, ...fresh } })); load(true) }}/>
               {isActionable(open.card) && (
                 <div>
                   <Label className="text-[10px] uppercase tracking-widest text-muted-foreground">Rejection reason (shown to user)</Label>

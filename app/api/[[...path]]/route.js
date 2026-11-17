@@ -636,9 +636,31 @@ async function deleteUserAccount(db, u, { reason = 'unverified_deadline', actor 
 }
 const vrEmail = (title, lines, cta = true) => `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 14px">${title}</h1>${lines.map(l => `<p style="color:#c8c8c0;font-size:14px;line-height:1.65;margin:0 0 12px">${l}</p>`).join('')}${cta ? `<p style="margin:22px 0"><a href="https://www.aurelawallet.com/?tab=kyc" style="display:inline-block;background:linear-gradient(135deg,#f5e29d,#d4af37 55%,#a8801f);color:#0a0a0b;text-decoration:none;font-weight:600;padding:12px 26px;border-radius:999px;font-size:14px">Verify my account</a></p>` : ''}<p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:18px 0 0">Need help? Contact <a href="mailto:support@aurelawallet.com" style="color:#d4af37">support@aurelawallet.com</a></p>`
 const fmtUtc = (d) => new Date(d).toUTCString().replace(' GMT', ' UTC')
-// Runs from the platform cron (every 15 min) and the admin "Run now" button. Never throws.
-async function processVerifyReminders(db) {
-  const stats = { checked: 0, cleared: 0, final_warnings: 0, deleted: 0, flagged: 0 }
+// Built-in scheduler: works on self-hosted servers (VPS/Docker) with no external cron.
+// Starts once per server process on the first API request, then checks every 5 minutes.
+function ensureBackgroundScheduler(db) {
+  if (globalThis.__aurelaVerifyScheduler) return
+  globalThis.__aurelaVerifyScheduler = true
+  const tick = () => processVerifyReminders(db, 'scheduler').catch(() => {})
+  setTimeout(tick, 15 * 1000)
+  const t = setInterval(tick, 5 * 60 * 1000)
+  if (typeof t?.unref === 'function') t.unref()
+  console.log('[verify_reminders] built-in scheduler started (every 5 min)')
+}
+// Lease lock so overlapping runs (scheduler + platform cron + "Run now") never double-process
+async function acquireVerifyLease(db, ms = 4 * 60 * 1000) {
+  try {
+    await db.collection('system').updateOne(
+      { _id: 'verify_reminders_lock', $or: [{ until: { $lt: new Date() } }, { until: { $exists: false } }] },
+      { $set: { until: new Date(Date.now() + ms) } }, { upsert: true })
+    return true
+  } catch (e) { return false }   // E11000 on _id → someone else holds the lease
+}
+async function releaseVerifyLease(db) { try { await db.collection('system').updateOne({ _id: 'verify_reminders_lock' }, { $set: { until: new Date(0) } }) } catch (e) {} }
+// Runs from the built-in scheduler, the platform cron and the admin "Run now" button. Never throws.
+async function processVerifyReminders(db, source = 'manual') {
+  const stats = { checked: 0, cleared: 0, final_warnings: 0, deleted: 0, flagged: 0, source }
+  if (!(await acquireVerifyLease(db))) return { ...stats, skipped: 'another run in progress' }
   try {
     const nowD = new Date()
     const rates = await getRates(db).catch(() => ({}))
@@ -675,7 +697,8 @@ async function processVerifyReminders(db) {
       }
     }
     await db.collection('system').updateOne({ id: 'verify_reminders' }, { $set: { id: 'verify_reminders', last_run_at: now(), last_stats: stats } }, { upsert: true })
-  } catch (e) { console.error('[verify_reminders] failed', e?.message) }
+  } catch (e) { console.error('[verify_reminders] failed', e?.message); stats.error = e?.message }
+  finally { await releaseVerifyLease(db) }
   return stats
 }
 
@@ -1200,6 +1223,7 @@ async function handleRoute(request, { params }) {
   const method = request.method
   try {
     const db = await connectToMongo()
+    ensureBackgroundScheduler(db)
 
     // ---------- Public ----------
     if (route === '/' && method === 'GET') return handleCORS(NextResponse.json({ ok: true, app: 'Aurela' }))
@@ -1755,7 +1779,7 @@ async function handleRoute(request, { params }) {
       const runId = request.headers.get('x-webhook-id') || env?.run_id || uuidv4()
       try { await db.collection('cron_runs').insertOne({ _id: `verify-reminders:${runId}`, at: now() }) }
       catch (e) { if (e?.code === 11000) return handleCORS(NextResponse.json({ ok: true, duplicate: true }, { status: 202 })); throw e }
-      processVerifyReminders(db).catch(() => {})   // background — do not await
+      processVerifyReminders(db, 'cron').catch(() => {})   // background — do not await
       return handleCORS(NextResponse.json({ ok: true, accepted: true }, { status: 202 }))
     }
 
@@ -2035,7 +2059,7 @@ async function handleRoute(request, { params }) {
       const rates = await getRates(db).catch(() => ({}))
       const withFunds = await Promise.all(users.map(async u => ({ ...u, funds: await userFundsSnapshot(db, u.id, rates) })))
       const sys = await db.collection('system').findOne({ id: 'verify_reminders' }, { projection: { _id: 0 } })
-      return handleCORS(NextResponse.json({ users: withFunds, total, page, pages: Math.max(1, Math.ceil(total / limit)), counts: { unverified: counts[0], not_reminded: counts[1], scheduled: counts[2], flagged: counts[3], deleted: counts[4] }, last_run: sys || null }))
+      return handleCORS(NextResponse.json({ users: withFunds, total, page, pages: Math.max(1, Math.ceil(total / limit)), counts: { unverified: counts[0], not_reminded: counts[1], scheduled: counts[2], flagged: counts[3], deleted: counts[4] }, last_run: sys || null, email_configured: !!process.env.RESEND_API_KEY, scheduler: !!globalThis.__aurelaVerifyScheduler }))
     }
     if (route === '/admin/verify-reminders/send' && method === 'POST') {
       const body = await request.json().catch(() => ({}))
@@ -2085,7 +2109,7 @@ async function handleRoute(request, { params }) {
       return handleCORS(NextResponse.json({ ok: true, deleted, blocked }))
     }
     if (route === '/admin/verify-reminders/run' && method === 'POST') {
-      const stats = await processVerifyReminders(db)
+      const stats = await processVerifyReminders(db, 'admin')
       return handleCORS(NextResponse.json({ ok: true, stats }))
     }
 
@@ -3275,6 +3299,43 @@ async function handleRoute(request, { params }) {
         const fresh = await db.collection('cards').findOne({ id: cardId })
         return handleCORS(NextResponse.json({ ok, card: clean(fresh) }))
       }
+      // Admin: change a card's activation time (hours) at ANY stage — even after the user applied and paid.
+      // Zonal/tier: activation_hours (re-times an `activating` card from its approval time). Master Global: KYC review hours.
+      if (route.startsWith('/admin/cards/') && route.endsWith('/activation-hours') && method === 'PUT') {
+        const cardId = route.split('/')[3]
+        const body = await request.json().catch(() => ({}))
+        const hours = Number(body.hours)
+        if (body.hours === '' || body.hours == null || !Number.isFinite(hours) || hours < 0 || hours > 8760) return handleCORS(NextResponse.json({ error: 'Hours must be a number between 0 and 8760' }, { status: 400 }))
+        const card = await db.collection('cards').findOne({ id: cardId })
+        if (!card) return handleCORS(NextResponse.json({ error: 'Not found' }, { status: 404 }))
+        if (card.status === 'deleted') return handleCORS(NextResponse.json({ error: 'Card was deleted by the user' }, { status: 400 }))
+        if (card.status === 'active') return handleCORS(NextResponse.json({ error: 'Card is already active' }, { status: 400 }))
+        const name = card.tier_name || `Aurela ${card.tier}`
+        const set = {}
+        let becameActive = false, userMsg = null
+        if (card.type === 'global') {
+          set.review_hours = hours
+          if (card.status === 'kyc_review' && card.kyc?.submitted_at) {
+            set['kyc.review_due_at'] = new Date(new Date(card.kyc.submitted_at).getTime() + hours * 3600 * 1000)
+            userMsg = `The review time for your ${name} verification was updated — expected by ${fmtUtc(set['kyc.review_due_at'])}.`
+          }
+        } else {
+          set.activation_hours = hours
+          if (card.status === 'activating') {
+            const base = new Date(card.admin_approved_at || card.created_at || Date.now()).getTime()
+            const usable = new Date(base + hours * 3600 * 1000)
+            if (usable.getTime() <= Date.now()) { set.status = 'active'; set.usable_at = now(); set.activated_at = now(); becameActive = true; userMsg = `Good news — your ${name} card is now active and ready to use.` }
+            else { set.usable_at = usable; userMsg = `The activation time for your ${name} card was updated — it will be ready ${fmtUtc(usable)}.` }
+          } else if (['pending_activation', 'pending_verification', 'rejected', 'hidden'].includes(card.status)) {
+            if (card.status !== 'hidden') userMsg = `The activation time for your ${name} card is now ${hoursLabel(hours)} after payment verification.`
+          }
+        }
+        await db.collection('cards').updateOne({ id: cardId }, { $set: { ...set, activation_hours_updated_at: now(), activation_hours_updated_by: user.id } })
+        if (becameActive && card.type === 'zonal') await liftGeoHoldForZonal(db, card.user_id, card, { actor: user.id })
+        if (userMsg && body.notify !== false) await notifyUser(db, card.user_id, { kind: becameActive ? 'card_active' : 'card_activation_time_updated', title: becameActive ? `${name} card is active` : 'Card activation time updated', body: userMsg, url: '/?tab=cards' })
+        await audit(db, user.id, 'admin.card.activation_hours', { card_id: cardId, user_id: card.user_id, hours, status: card.status, became_active: becameActive })
+        return handleCORS(NextResponse.json({ ok: true, card: clean(await db.collection('cards').findOne({ id: cardId }, { projection: { cvv: 0 } })) }))
+      }
       // Admin: update the reveal rule of a hidden zonal card. Body: { geo?, amount_usd?, match? }
       if (route.startsWith('/admin/cards/') && route.endsWith('/reveal-rule') && method === 'PUT') {
         const cardId = route.split('/')[3]
@@ -3322,12 +3383,12 @@ async function handleRoute(request, { params }) {
           const isGlobal = card.type === 'global'
           if (isGlobal && !['pending_verification', 'pending_activation'].includes(card.status)) return handleCORS(NextResponse.json({ error: 'Master Global KYC is reviewed in the Master Global tab' }, { status: 400 }))
           // Zonal cards carry their own admin-defined activation window (hours); tier cards use the 24h default
-          const windowHours = isZonal ? Math.max(0, Number(card.activation_hours) || 0) : 24
-          const immediate = !isGlobal && (!!body?.activate_now || (isZonal && windowHours === 0))
+          const windowHours = isZonal ? Math.max(0, Number(card.activation_hours) || 0) : (card.activation_hours != null && Number.isFinite(Number(card.activation_hours)) ? Math.max(0, Number(card.activation_hours)) : 24)
+          const immediate = !isGlobal && (!!body?.activate_now || windowHours === 0)
           // Master Global: payment verified → user must now complete the card's enhanced KYC (admin approves it later)
           const finalStatus = isGlobal ? 'kyc_required' : (immediate ? 'active' : 'activating')
           const finalUsable = isGlobal ? null : (immediate ? now() : new Date(Date.now() + windowHours*60*60*1000))
-          const windowText = isZonal ? hoursLabel(windowHours) : '24 hours'
+          const windowText = hoursLabel(windowHours)
           await db.collection('cards').updateOne({ id: cardId }, { $set: { status: finalStatus, admin_approved_at: now(), approved_by: user.id, usable_at: finalUsable, activated_at: immediate ? now() : null, ...(isGlobal ? { payment_approved_at: now(), 'kyc.status': 'required' } : {}) } })
           if (isGlobal) await notifyUser(db, card.user_id, { kind: 'global_card_kyc_required', title: 'Payment confirmed — verify to unlock Master Global', body: `Your ${card.activation_fee_usdt} USDT payment for the Aurela Master Global card is confirmed. Open your Cards tab and complete the enhanced verification (liveness + documents). Review takes about ${hoursLabel(Number(card.review_hours) || 24)}.`, url: '/?tab=cards' })
           if (isZonal && immediate) await liftGeoHoldForZonal(db, card.user_id, card, { actor: user.id })
