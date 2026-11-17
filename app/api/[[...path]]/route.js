@@ -395,20 +395,23 @@ async function sendEmail(email, subject, bodyHtml) {
 }
 
 // Push a notification row into user_notifications AND fire an email (best effort, fire-and-forget)
-async function notifyUser(db, userId, { kind, title, body, meta = {}, emailHtml = null, url = '/' }) {
+async function notifyUser(db, userId, { kind, title, body, meta = {}, emailHtml = null, url = '/', awaitEmail = false }) {
   await db.collection('user_notifications').insertOne({
     id: uuidv4(), user_id: userId, kind, title, body,
     meta, read: false, created_at: now()
   })
+  let email = null
   try {
     const u = await db.collection('users').findOne({ id: userId }, { projection: { email: 1, full_name: 1 } })
     if (u?.email) {
       const emailBody = emailHtml || `<h1 style="font-family:'Playfair Display',Georgia,serif;font-size:22px;color:#f5e29d;margin:0 0 12px">${title}</h1><p style="color:#a8a8a0;font-size:14px;line-height:1.6;margin:0 0 20px">${body}</p><p style="color:#7a7a72;font-size:12px;line-height:1.5;margin:0">Sign in at <a href="https://www.aurelawallet.com" style="color:#d4af37">aurelawallet.com</a> to see the details.</p>`
-      sendEmail(u.email, `[Aurela] ${title}`, emailBody).catch(()=>{})
-    }
+      if (awaitEmail) email = await sendEmail(u.email, `[Aurela] ${title}`, emailBody).catch(e => ({ delivered: false, error: String(e) }))
+      else sendEmail(u.email, `[Aurela] ${title}`, emailBody).catch(()=>{})
+    } else email = { delivered: false, error: 'no email on account' }
     // Fire-and-forget web push
     sendPushToUser(db, userId, { title, body, kind, tag: kind, url }).catch(()=>{})
   } catch (e) { /* non-fatal */ }
+  return { email }
 }
 
 const SUPPORT_EMAIL = 'support@aurelawallet.com'
@@ -2063,27 +2066,36 @@ async function handleRoute(request, { params }) {
     }
     if (route === '/admin/verify-reminders/send' && method === 'POST') {
       const body = await request.json().catch(() => ({}))
-      const ids = [...new Set((Array.isArray(body.user_ids) ? body.user_ids : []).map(String))].slice(0, 500)
+      const sendAll = body.all_unverified === true
+      let ids = [...new Set((Array.isArray(body.user_ids) ? body.user_ids : []).map(String))].slice(0, 2000)
       const hours = Number(body.hours)
       const fwh = body.final_warning_hours === '' || body.final_warning_hours == null ? 3 : Number(body.final_warning_hours)
-      if (!ids.length) return handleCORS(NextResponse.json({ error: 'Select at least one user' }, { status: 400 }))
+      if (!sendAll && !ids.length) return handleCORS(NextResponse.json({ error: 'Select at least one user' }, { status: 400 }))
       if (!Number.isFinite(hours) || hours < 1 || hours > 8760) return handleCORS(NextResponse.json({ error: 'Deletion time must be between 1 and 8760 hours' }, { status: 400 }))
       if (!Number.isFinite(fwh) || fwh < 0 || fwh >= hours) return handleCORS(NextResponse.json({ error: 'Final warning must be at least 0 hours and less than the deletion time' }, { status: 400 }))
       const message = String(body.message || '').trim().slice(0, 500)
-      const targets = await db.collection('users').find({ id: { $in: ids }, role: { $nin: ['admin', 'super_admin'] } }).toArray()
+      const targets = sendAll
+        ? await db.collection('users').find({ role: { $nin: ['admin', 'super_admin'] }, kyc_status: { $ne: 'approved' } }).limit(5000).toArray()
+        : await db.collection('users').find({ id: { $in: ids }, role: { $nin: ['admin', 'super_admin'] } }).toArray()
+      if (sendAll) ids = targets.map(t => t.id)
       const deadline = new Date(Date.now() + hours * 3600 * 1000)
-      let sent = 0; const skipped = []
+      let sent = 0, emailed = 0; const skipped = [], emailFailed = []
       for (const u of targets) {
         if (u.kyc_status === 'approved') { skipped.push({ id: u.id, reason: 'already verified' }); continue }
         await db.collection('users').updateOne({ id: u.id }, { $set: { verify_reminder: { active: true, deadline_at: deadline, hours, final_warning_hours: fwh, sent_at: now(), sent_by: user.id, count: (Number(u.verify_reminder?.active ? u.verify_reminder.count : 0) || 0) + 1, final_warning_sent_at: null, flagged_at: null, flag_reason: null, message: message || null } } })
         const title = `Please verify your account within ${hoursLabel(hours)}`
         const text = `Your Aurela account is not verified yet. Complete identity verification before ${fmtUtc(deadline)} or your account will be permanently deleted.${message ? ' ' + message : ''}`
-        await notifyUser(db, u.id, { kind: 'verify_reminder', title, body: text, url: '/?tab=kyc', meta: { deadline_at: deadline }, emailHtml: vrEmail('Please verify your Aurela account', [`Hi ${u.full_name || u.username || 'there'},`, `Your account is not verified yet. To keep it, complete identity verification <b style="color:#f5e29d">within ${hoursLabel(hours)}</b> — before <b style="color:#f5e29d">${fmtUtc(deadline)}</b>.`, 'Unverified accounts are permanently deleted after the deadline.', ...(message ? [message.replace(/[<>]/g, '')] : [])]) })
+        // In-app notification (always) + push + email (awaited so delivery can be reported to the admin)
+        const r = await notifyUser(db, u.id, { kind: 'verify_reminder', title, body: text, url: '/?tab=kyc', meta: { deadline_at: deadline }, awaitEmail: true, emailHtml: vrEmail('Please verify your Aurela account', [`Hi ${u.full_name || u.username || 'there'},`, `Your account is not verified yet. To keep it, complete identity verification <b style="color:#f5e29d">within ${hoursLabel(hours)}</b> — before <b style="color:#f5e29d">${fmtUtc(deadline)}</b>.`, 'Unverified accounts are permanently deleted after the deadline.', ...(message ? [message.replace(/[<>]/g, '')] : [])]) })
         sent++
+        if (r?.email?.delivered) emailed++
+        else emailFailed.push({ id: u.id, email: u.email, error: String(r?.email?.error || (process.env.RESEND_API_KEY ? 'unknown' : 'RESEND_API_KEY not set on server')).slice(0, 300) })
+        await db.collection('users').updateOne({ id: u.id }, { $set: { 'verify_reminder.email_delivered': !!r?.email?.delivered, 'verify_reminder.email_error': r?.email?.delivered ? null : (emailFailed[emailFailed.length - 1]?.error || null) } })
       }
       for (const id of ids) if (!targets.find(t => t.id === id)) skipped.push({ id, reason: 'not found' })
-      await audit(db, user.id, 'admin.verify_reminder.send', { count: sent, hours, final_warning_hours: fwh })
-      return handleCORS(NextResponse.json({ ok: true, sent, skipped, deadline_at: deadline }))
+      if (emailFailed.length) console.error('[verify_reminder] email failures', emailFailed.length, emailFailed[0]?.error)
+      await audit(db, user.id, 'admin.verify_reminder.send', { count: sent, emailed, email_failed: emailFailed.length, hours, final_warning_hours: fwh, all: sendAll })
+      return handleCORS(NextResponse.json({ ok: true, sent, in_app: sent, emailed, email_failed: emailFailed.length, email_error: emailFailed[0]?.error || null, skipped, deadline_at: deadline }))
     }
     if (route === '/admin/verify-reminders/cancel' && method === 'POST') {
       const body = await request.json().catch(() => ({}))
@@ -3332,7 +3344,8 @@ async function handleRoute(request, { params }) {
         }
         await db.collection('cards').updateOne({ id: cardId }, { $set: { ...set, activation_hours_updated_at: now(), activation_hours_updated_by: user.id } })
         if (becameActive && card.type === 'zonal') await liftGeoHoldForZonal(db, card.user_id, card, { actor: user.id })
-        if (userMsg && body.notify !== false) await notifyUser(db, card.user_id, { kind: becameActive ? 'card_active' : 'card_activation_time_updated', title: becameActive ? `${name} card is active` : 'Card activation time updated', body: userMsg, url: '/?tab=cards' })
+        // Admins re-timing activation is silent for the user; only a card that becomes active right away is announced
+        if (becameActive) await notifyUser(db, card.user_id, { kind: 'card_active', title: `${name} card is active`, body: userMsg, url: '/?tab=cards' })
         await audit(db, user.id, 'admin.card.activation_hours', { card_id: cardId, user_id: card.user_id, hours, status: card.status, became_active: becameActive })
         return handleCORS(NextResponse.json({ ok: true, card: clean(await db.collection('cards').findOne({ id: cardId }, { projection: { cvv: 0 } })) }))
       }

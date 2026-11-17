@@ -142,7 +142,7 @@ export function ActivationHoursEditor({ card, onSaved }) {
   } else if (valid) preview = isGlobal ? 'Applies when the user submits verification' : 'Applies after payment verification'
   const save = async () => {
     setBusy(true)
-    try { const r = await api.put(`/admin/cards/${card.id}/activation-hours`, { hours: n }); toast.success(r?.card?.status === 'active' && card.status !== 'active' ? 'Card activated — user notified' : 'Activation time updated — user notified'); onSaved && onSaved(r?.card) }
+    try { const r = await api.put(`/admin/cards/${card.id}/activation-hours`, { hours: n }); toast.success(r?.card?.status === 'active' && card.status !== 'active' ? 'Card activated' : 'Activation time updated'); onSaved && onSaved(r?.card) }
     catch (e) { toast.error(e?.message || 'Update failed') } finally { setBusy(false) }
   }
   return (

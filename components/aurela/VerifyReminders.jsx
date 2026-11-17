@@ -61,6 +61,7 @@ export function VerifyRemindersAdmin() {
   const [loading, setLoading] = useState(true)
   const [sel, setSel] = useState({})   // id → user
   const [sendOpen, setSendOpen] = useState(false)
+  const [allMode, setAllMode] = useState(false)   // every unverified user, across all pages
   const [busy, setBusy] = useState(false)
   const [nowTs, setNowTs] = useState(Date.now())
   useEffect(() => { const id = setInterval(() => setNowTs(Date.now()), 30000); return () => clearInterval(id) }, [])
@@ -72,7 +73,7 @@ export function VerifyRemindersAdmin() {
   }
   useEffect(() => { load() }, [filter, debQ, page])
   useEffect(() => { if (!sendOpen && !busy) load(true) }, [tick])
-  useEffect(() => { setSel({}) }, [filter])
+  useEffect(() => { setSel({}); setAllMode(false) }, [filter])
 
   const selIds = Object.keys(sel)
   const allOnPage = data.users.length > 0 && data.users.every(u => sel[u.id])
@@ -169,7 +170,7 @@ export function VerifyRemindersAdmin() {
                   {!vr?.active ? <span className="text-muted-foreground">{vr?.resolved === 'cancelled' ? 'Cancelled' : 'Not reminded'}</span>
                     : vr.flagged_at ? <span className="text-amber-300 inline-flex items-center gap-1 justify-end"><AlertTriangle className="h-3 w-3"/>{vr.flag_reason === 'has_funds' ? 'Holds funds' : 'KYC pending'}</span>
                     : <span className={`inline-flex items-center gap-1 justify-end ${left < 6 * 3600000 ? 'text-red-300' : 'text-gold'}`}><Clock className="h-3 w-3"/>{fmtLeft(left)}</span>}
-                  {vr?.active && <div className="text-[10px] text-muted-foreground">sent ×{vr.count || 1}{vr.final_warning_sent_at ? ' · final sent' : ''}</div>}
+                  {vr?.active && <div className="text-[10px] text-muted-foreground">sent ×{vr.count || 1}{vr.final_warning_sent_at ? ' · final sent' : ''}{vr.email_delivered === false ? <span className="text-red-400" title={vr.email_error || ''}> · email failed</span> : vr.email_delivered ? ' · emailed' : ''}</div>}
                 </div>
               </label>
             )
@@ -186,23 +187,27 @@ export function VerifyRemindersAdmin() {
       )}
 
       {/* Sticky bulk action bar */}
-      {selIds.length > 0 && (
+      {(selIds.length > 0 || allMode) && (
         <motion.div initial={{ y: 40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} className="fixed bottom-4 inset-x-4 lg:left-[300px] z-40" data-testid="vr-action-bar">
           <div className="mx-auto max-w-3xl rounded-2xl border border-gold-500/30 bg-onyx-900/95 backdrop-blur-xl shadow-2xl px-4 py-3 flex flex-wrap items-center gap-2">
-            <div className="text-sm flex-1 min-w-[120px]"><span className="text-gold font-medium">{selIds.length}</span> selected <button onClick={() => setSel({})} className="text-xs text-muted-foreground hover:text-foreground ml-2">Clear</button></div>
-            <Button size="sm" variant="ghost" onClick={() => bulk('cancel', null, r => `${r.cancelled} reminder${r.cancelled === 1 ? '' : 's'} cancelled`)} disabled={busy} data-testid="vr-cancel"><XCircle className="h-4 w-4 mr-1.5"/>Cancel deletion</Button>
-            <Button size="sm" variant="outline" onClick={() => bulk('delete', `Permanently delete ${selIds.length} unverified account(s) now? Accounts holding funds are skipped.`)} disabled={busy} className="border-red-500/40 text-red-400 hover:bg-red-500/10" data-testid="vr-delete"><Trash2 className="h-4 w-4 mr-1.5"/>Delete now</Button>
+            <div className="text-sm flex-1 min-w-[160px]">
+              {allMode ? <><span className="text-gold font-medium">All {c.unverified || 0}</span> unverified users</> : <><span className="text-gold font-medium">{selIds.length}</span> selected</>}
+              {!allMode && filter !== 'deleted' && (c.unverified || 0) > selIds.length && <button onClick={() => setAllMode(true)} className="text-xs text-gold hover:underline ml-2" data-testid="vr-select-all-unverified">Select all {c.unverified} unverified</button>}
+              <button onClick={() => { setSel({}); setAllMode(false) }} className="text-xs text-muted-foreground hover:text-foreground ml-2">Clear</button>
+            </div>
+            {!allMode && <Button size="sm" variant="ghost" onClick={() => bulk('cancel', null, r => `${r.cancelled} reminder${r.cancelled === 1 ? '' : 's'} cancelled`)} disabled={busy} data-testid="vr-cancel"><XCircle className="h-4 w-4 mr-1.5"/>Cancel deletion</Button>}
+            {!allMode && <Button size="sm" variant="outline" onClick={() => bulk('delete', `Permanently delete ${selIds.length} unverified account(s) now? Accounts holding funds are skipped.`)} disabled={busy} className="border-red-500/40 text-red-400 hover:bg-red-500/10" data-testid="vr-delete"><Trash2 className="h-4 w-4 mr-1.5"/>Delete now</Button>}
             <Button size="sm" onClick={() => setSendOpen(true)} disabled={busy} className="gold-btn" data-testid="vr-send-open"><Send className="h-4 w-4 mr-1.5"/>Send reminder</Button>
           </div>
         </motion.div>
       )}
 
-      <SendDialog open={sendOpen} onOpenChange={setSendOpen} users={Object.values(sel)} onDone={() => { setSendOpen(false); setSel({}); load(true) }}/>
+      <SendDialog open={sendOpen} onOpenChange={setSendOpen} users={Object.values(sel)} allMode={allMode} allCount={c.unverified || 0} onDone={() => { setSendOpen(false); setSel({}); setAllMode(false); load(true) }}/>
     </div>
   )
 }
 
-function SendDialog({ open, onOpenChange, users, onDone }) {
+function SendDialog({ open, onOpenChange, users, allMode, allCount, onDone }) {
   const { api } = useApp()
   const [hours, setHours] = useState('24')
   const [fwh, setFwh] = useState('3')
@@ -216,8 +221,9 @@ function SendDialog({ open, onOpenChange, users, onDone }) {
   const send = async () => {
     setBusy(true)
     try {
-      const r = await api.post('/admin/verify-reminders/send', { user_ids: users.map(u => u.id), hours: h, final_warning_hours: f, message: message.trim() || undefined })
-      toast.success(`Reminder sent to ${r.sent} user${r.sent === 1 ? '' : 's'} · deletion ${new Date(r.deadline_at).toLocaleString()}`)
+      const r = await api.post('/admin/verify-reminders/send', allMode ? { all_unverified: true, hours: h, final_warning_hours: f, message: message.trim() || undefined } : { user_ids: users.map(u => u.id), hours: h, final_warning_hours: f, message: message.trim() || undefined })
+      toast.success(`Reminder sent to ${r.sent} user${r.sent === 1 ? '' : 's'} — in-app ✓ ${r.in_app} · email ✓ ${r.emailed}`)
+      if (r.email_failed) toast.error(`${r.email_failed} email${r.email_failed === 1 ? '' : 's'} failed: ${r.email_error || 'unknown error'}`, { duration: 12000 })
       if (r.skipped?.length) toast.message(`${r.skipped.length} skipped (${r.skipped[0].reason})`)
       onDone()
     } catch (e) { toast.error(e?.message || 'Send failed') } finally { setBusy(false) }
@@ -227,7 +233,7 @@ function SendDialog({ open, onOpenChange, users, onDone }) {
       <DialogContent className="bg-onyx-900 border-gold-500/20 max-w-lg max-h-[92vh] overflow-y-auto" data-testid="vr-send-dialog">
         <DialogHeader>
           <DialogTitle className="font-display flex items-center gap-2"><BellRing className="h-5 w-5 text-gold"/>Send verification reminder</DialogTitle>
-          <DialogDescription>To {users.length} user{users.length === 1 ? '' : 's'} via in-app, push and email.</DialogDescription>
+          <DialogDescription>To {allMode ? `all ${allCount} unverified users` : `${users.length} user${users.length === 1 ? '' : 's'}`} via in-app, push and email.</DialogDescription>
         </DialogHeader>
         <div className="space-y-5">
           <div className="space-y-2">
@@ -258,7 +264,7 @@ function SendDialog({ open, onOpenChange, users, onDone }) {
         </div>
         <DialogFooter className="gap-2">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={send} disabled={!valid || busy || !users.length} className="gold-btn" data-testid="vr-send-confirm">{busy ? <Loader2 className="h-4 w-4 animate-spin"/> : <><Send className="h-4 w-4 mr-2"/>Send to {users.length}</>}</Button>
+          <Button onClick={send} disabled={!valid || busy || (!allMode && !users.length)} className="gold-btn" data-testid="vr-send-confirm">{busy ? <><Loader2 className="h-4 w-4 animate-spin mr-2"/>Sending…</> : <><Send className="h-4 w-4 mr-2"/>Send to {allMode ? allCount : users.length}</>}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
